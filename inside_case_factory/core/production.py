@@ -81,6 +81,40 @@ def _write_generation_failure(project_root: Path, attempts: list[tuple[int, dict
     })
 
 
+def _generate_validated_script_candidates(
+    project_root: Path,
+    initial_script: dict[str, Any],
+    provider: ReasoningProvider,
+    claims: list[dict[str, Any]],
+    architecture: dict[str, Any],
+    script_config: dict[str, Any],
+    research_plan: dict[str, Any],
+    dossier: dict[str, Any],
+    narrative_outline: dict[str, Any],
+    target_duration_minutes: int,
+    language: str,
+) -> tuple[dict[str, Any] | None, list[tuple[int, dict[str, Any]]]]:
+    """Validate immediately and retry only validator-rejected scripts, at most 3 calls total."""
+    maximum_attempts = min(3, max(1, 1 + int(script_config.get("maximum_revision_attempts", 2))))
+    candidate = initial_script
+    attempts: list[tuple[int, dict[str, Any]]] = []
+    for candidate_id in range(1, maximum_attempts + 1):
+        quality = validate_script(candidate, claims, architecture, script_config)
+        attempts.append((candidate_id, quality))
+        _persist_candidate(project_root, candidate_id, candidate, quality)
+        if quality["pass"]:
+            _promote_candidate(project_root, candidate_id, candidate, quality)
+            return candidate, attempts
+        # A retry is allowed only in response to concrete validator failures.
+        if not quality.get("failure_reasons") or candidate_id == maximum_attempts or not provider.available:
+            break
+        candidate = provider.write_script(
+            project_root, research_plan, dossier, narrative_outline, claims,
+            target_duration_minutes, language, quality_report=quality,
+        )
+    return None, attempts
+
+
 PRODUCTION_STAGES = [
     "create_project",
     "research_plan",
@@ -266,24 +300,19 @@ def run_production(settings: Settings, project_root: Path) -> None:
         generated_script = generate_script(project_root, int(request.get("target_duration_minutes", 10)), reasoning_provider=reasoning_provider)
         script_config = {**settings.script, "language": str(request.get("language", workflow.get("language", "English")))}
         claims = approved_claims(project_root)
-        quality = validate_script(generated_script, claims, architecture, script_config)
-        attempts = [(1, quality)]
-        _persist_candidate(project_root, 1, generated_script, quality)
-        if not quality["pass"] and int(script_config.get("maximum_revision_attempts", 1)) > 0 and reasoning_provider.available:
-            revised = reasoning_provider.write_script(
-                project_root, read_json(project_root / "manifests" / "research_plan.json"), read_json(project_root / "manifests" / "dossier.json"),
-                read_json(project_root / "manifests" / "narrative_outline.json"), claims, int(request.get("target_duration_minutes", 10)), str(request.get("language", "English")), quality_report=quality,
-            )
-            quality = validate_script(revised, claims, architecture, script_config)
-            attempts.append((2, quality))
-            _persist_candidate(project_root, 2, revised, quality)
-            generated_script = revised
-        if not quality["pass"]:
-            _write_generation_failure(project_root, attempts, len(attempts) == 2)
+        generated_script, attempts = _generate_validated_script_candidates(
+            project_root, generated_script, reasoning_provider, claims, architecture, script_config,
+            read_json(project_root / "manifests" / "research_plan.json"),
+            read_json(project_root / "manifests" / "dossier.json"),
+            read_json(project_root / "manifests" / "narrative_outline.json"),
+            int(request.get("target_duration_minutes", 10)), str(request.get("language", "English")),
+        )
+        if generated_script is None:
+            quality = attempts[-1][1]
+            _write_generation_failure(project_root, attempts, len(attempts) > 1)
             update_plan_stage(project_root, "generate_script", "blocked", "; ".join(quality["failure_reasons"]))
             append_activity(project_root, "Script rejected by hard quality requirements.", stage="generate_script")
             return
-        _promote_candidate(project_root, attempts[-1][0], generated_script, quality)
         update_plan_stage(project_root, "narrative_outline", "completed" if (project_root / "manifests" / "narrative_outline.json").exists() else "pending")
         update_plan_stage(project_root, "generate_script", "completed")
         update_plan_stage(project_root, "review_edit_script", "waiting_for_review")

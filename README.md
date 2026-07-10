@@ -95,6 +95,8 @@ python3 -m inside_case_factory estimate-cost --duration 12
 
 Every new prompt-production project also receives `manifests/cost_estimate.json` before production proceeds. A paid reasoning call requires all of the following: paid providers enabled globally, reasoning enabled, dry-run disabled, an API key, sufficient project budget, and a project-local `paid_api_confirmation.json` containing `{"confirmed": true}`. Tavily and ElevenLabs are likewise blocked by default; their standalone CLI commands additionally require `--confirm-paid`.
 
+Script generation uses a bounded validation retry: one initial low-cost script attempt and at most two revisions. Every candidate is validated immediately, a revision is requested only for concrete validator failures, and generation stops as soon as the first fully valid candidate is safely promoted. Confirmation and per-project spending checks still run before every provider call.
+
 Keep API keys out of the repository. Confirmation only unlocks a configured call; it never bypasses the project budget.
 
 ## ElevenLabs TTS

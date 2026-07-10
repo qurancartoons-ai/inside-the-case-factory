@@ -5,7 +5,12 @@ import json
 from unittest.mock import patch
 
 from inside_case_factory.core.narrative_quality import validate_script, validate_story_architecture, validate_architecture_file
-from inside_case_factory.core.production import _persist_candidate, _promote_candidate, _write_generation_failure
+from inside_case_factory.core.production import (
+    _generate_validated_script_candidates,
+    _persist_candidate,
+    _promote_candidate,
+    _write_generation_failure,
+)
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.core.project import create_project
 from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, ReasoningConfig
@@ -61,6 +66,12 @@ class ScriptAcceptanceTests(unittest.TestCase):
         self.assertIn("die kwetsuur", report["unnatural_phrasing"])
         self.assertIn("toont aan dat", report["overdramatic_phrases"])
         self.assertIn("hand in hand gaat met", report["overdramatic_phrases"])
+
+    def test_calibration_style_turning_point_and_visible_safety_fail(self) -> None:
+        report = self.language_report("Deze heropening markeert een keerpunt. Vanaf nu is de veiligheid ook zichtbaar geborgd.")
+        self.assertFalse(report["pass"])
+        self.assertIn("markeert een keerpunt", report["overdramatic_phrases"])
+        self.assertIn("zichtbaar geborgd", report["unnatural_phrasing"])
 
     def test_repeated_rhetorical_questions_fail(self) -> None:
         report = self.language_report("Maar waarom zweeg hij? De politie onderzocht de brief. Maar waarom zweeg hij?")
@@ -165,6 +176,78 @@ class ScriptAcceptanceTests(unittest.TestCase):
             failure = read_json(root / "manifests/script_generation_failure.json")
             self.assertEqual(len(failure["candidates"]), 2)
             self.assertTrue(all("word_count" in item and "unknown_beat_ids" in item for item in failure["candidates"]))
+
+    def test_bounded_retry_validates_each_candidate_and_stops_on_first_pass(self) -> None:
+        class Provider:
+            available = True
+            calls = 0
+
+            def write_script(self, *args, quality_report=None, **kwargs):
+                self.calls += 1
+                self.previous_report = quality_report
+                return {"candidate": self.calls + 1}
+
+        reports = [
+            {"pass": False, "failure_reasons": ["too short"]},
+            {"pass": True, "failure_reasons": []},
+        ]
+        provider = Provider()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "manifests").mkdir()
+            with patch("inside_case_factory.core.production.validate_script", side_effect=reports) as validator:
+                accepted, attempts = _generate_validated_script_candidates(
+                    root, {"candidate": 1}, provider, [], {}, {"maximum_revision_attempts": 99},
+                    {}, {}, {}, 3, "Nederlands",
+                )
+            self.assertEqual(accepted, {"candidate": 2})
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(validator.call_count, 2)
+            self.assertEqual(provider.calls, 1)
+            self.assertEqual(provider.previous_report["failure_reasons"], ["too short"])
+            self.assertEqual(read_json(root / "manifests/script.json")["accepted_candidate_id"], 2)
+
+    def test_bounded_retry_never_exceeds_three_attempts(self) -> None:
+        class Provider:
+            available = True
+            calls = 0
+
+            def write_script(self, *args, **kwargs):
+                self.calls += 1
+                return {"candidate": self.calls + 1}
+
+        rejection = {"pass": False, "failure_reasons": ["validator rejection"]}
+        provider = Provider()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "manifests").mkdir()
+            with patch("inside_case_factory.core.production.validate_script", return_value=rejection) as validator:
+                accepted, attempts = _generate_validated_script_candidates(
+                    root, {"candidate": 1}, provider, [], {}, {"maximum_revision_attempts": 50},
+                    {}, {}, {}, 3, "Nederlands",
+                )
+            self.assertIsNone(accepted)
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(validator.call_count, 3)
+            self.assertEqual(provider.calls, 2)
+
+    def test_bounded_retry_requires_real_validator_reasons(self) -> None:
+        class Provider:
+            available = True
+            calls = 0
+
+            def write_script(self, *args, **kwargs):
+                self.calls += 1
+                return {}
+
+        provider = Provider()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "manifests").mkdir()
+            with patch("inside_case_factory.core.production.validate_script", return_value={"pass": False, "failure_reasons": []}):
+                accepted, attempts = _generate_validated_script_candidates(
+                    root, {}, provider, [], {}, {"maximum_revision_attempts": 2}, {}, {}, {}, 3, "Nederlands",
+                )
+            self.assertIsNone(accepted)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(provider.calls, 0)
 
 
 if __name__ == "__main__":
