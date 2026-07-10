@@ -30,6 +30,22 @@ python3 -m inside_case_factory dashboard --host 0.0.0.0 --port 8000
 
 No dependency installation is required for this scaffold. `requirements.txt` is intentionally empty except for future notes.
 
+## Autonomous offline verification
+
+Repository agents follow [AGENTS.md](AGENTS.md). Run the complete unittest suite and health check in a fixed, fail-fast sequence with:
+
+```bash
+python3 -m inside_case_factory autonomous-check
+```
+
+In `auto` mode, the command also runs all Dutch language fixtures when the working tree contains script, prompt, validator, or Dutch fixture changes. Force that check for script-language work with:
+
+```bash
+python3 -m inside_case_factory autonomous-check --language always
+```
+
+The runner is entirely offline. It does not generate projects, call providers, alter approval gates, or hide subprocess output. A failed command is shown with its exact exit code; fix the root cause and rerun until all required checks pass.
+
 ## Project Structure
 
 ```text
