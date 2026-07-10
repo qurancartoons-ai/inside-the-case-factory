@@ -359,11 +359,13 @@ class OpenAIReasoningProvider(ReasoningProvider):
         target_duration_minutes: int,
         language: str,
         quality_report: dict[str, Any] | None = None,
+        word_range: tuple[int, int] = (1500, 1700),
     ) -> dict[str, Any]:
+        minimum_words, maximum_words = word_range
         result = self._json_response(
             project_root,
             "script",
-            f"Write the final {language} voice-over narration at 1500-1700 words using the complete story architecture. Map every narration section to one or more stable beat_ids and cover all required beats. Write natural spoken {language}, not formal prose or a translation from English. Use a restrained documentary tone, concrete language, varied sentence rhythm, and transitions that sound natural aloud. Avoid awkward inversions, inflated vocabulary, generic suspense clichés, invented emotion, repetitive rhetorical questions, and translated-English constructions. Every paragraph must add new factual or narrative value. Preserve all evidence provenance and attribution. " + mode_prompt(_project_content_mode(project_root)),
+            f"Write the final {language} voice-over narration at {minimum_words}-{maximum_words} words using the complete story architecture. Map every narration section to one or more stable beat_ids and cover all required beats. Write natural spoken {language}, not formal prose or a translation from English. Use a restrained documentary tone, concrete language, varied sentence rhythm, and transitions that sound natural aloud. Avoid awkward inversions, inflated vocabulary, generic suspense clichés, invented emotion, repetitive rhetorical questions, and translated-English constructions. Every paragraph must add new factual or narrative value. Preserve all evidence provenance and attribution. " + mode_prompt(_project_content_mode(project_root)),
             {
                 "research_plan": research_plan,
                 "dossier": dossier,
@@ -376,7 +378,7 @@ class OpenAIReasoningProvider(ReasoningProvider):
                 "video_language": language,
                 "rules": [
                     "No invented thoughts, dialogue, motives, events, or unsupported details.",
-                    "For this final revision, write 1500-1700 words, with a strong opening hook, chronological sections, attributed allegations and disputed interpretations, and a case-connected ending.",
+                    f"For this final revision, write {minimum_words}-{maximum_words} words, with a strong opening hook, chronological sections, attributed allegations and disputed interpretations, and a case-connected ending.",
                     "Every script section must include beat_ids, and every required architecture beat must be represented.",
                     "Suspenseful but factual.",
                     "Preserve citations internally with claim IDs.",

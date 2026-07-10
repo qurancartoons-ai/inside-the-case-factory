@@ -9,6 +9,7 @@ import sys
 from inside_case_factory import __version__
 from inside_case_factory.core.media import add_image_asset
 from inside_case_factory.core.language_check import format_language_report, run_language_fixtures
+from inside_case_factory.core.script_calibration import run_dutch_script_calibration, script_stage_maximum_cost
 from inside_case_factory.core.research import TavilyResearchProvider, tavily_config_from_settings
 from inside_case_factory.config.settings import load_settings
 from inside_case_factory.core.project import create_project
@@ -65,6 +66,22 @@ def cmd_language_check(args: argparse.Namespace) -> int:
         return 2
     print(format_language_report(results))
     return 1 if any(result["result"] == "fail" for result in results) else 0
+
+
+def cmd_calibrate_dutch_script(args: argparse.Namespace) -> int:
+    settings = load_settings(Path(args.root))
+    maximum = script_stage_maximum_cost(settings)
+    print(f"Maximum expected API cost: ${maximum:.6f}")
+    if not args.confirm_one_paid_call:
+        print("Calibration not run: pass --confirm-one-paid-call to authorize exactly one script call.", file=sys.stderr)
+        return 2
+    try:
+        report = run_dutch_script_calibration(settings, Path(args.output))
+    except (RuntimeError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    _print_json(report)
+    return 0
 
 
 def cmd_estimate_cost(args: argparse.Namespace) -> int:
@@ -290,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
     language_check = subparsers.add_parser("language-check", help="Run the offline Dutch narration fixture checks")
     language_check.add_argument("--fixture", default="all", help="Fixture name, or all")
     language_check.set_defaults(func=cmd_language_check)
+
+    calibration = subparsers.add_parser("calibrate-dutch-script", help="Run one isolated real Dutch script calibration")
+    calibration.add_argument("--output", default=".calibration/dutch-script", help="New isolated output directory")
+    calibration.add_argument("--confirm-one-paid-call", action="store_true", help="Authorize exactly one OpenAI script call")
+    calibration.set_defaults(func=cmd_calibrate_dutch_script)
 
     estimate_cost = subparsers.add_parser("estimate-cost", help="Estimate the configured maximum without calling an API")
     estimate_cost.add_argument("--duration", type=int, default=12, help="Target documentary duration in minutes")
