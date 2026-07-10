@@ -1,0 +1,64 @@
+# Secrets and local environments
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.secret
+
+# Python caches and tooling state
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Temporary and local files
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+.DS_Store
+
+# Runtime-generated project data and manifests
+projects/*/manifests/
+projects/*/workspace/
+projects/*/research/
+projects/*/review/
+projects/*/assets/
+projects/*/exports/
+
+# Generated media and local media tests
+videos/
+voiceovers/
+images/
+thumbnails/
+*.mp3
+*.wav
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# Runtime API usage, cost, and activity records
+**/reasoning_usage.json
+**/*usage*.json
+**/*cost*.json
+**/*activity*.json
+**/production_plan.json
+**/production_request.json
+**/source_snapshots.json
+**/discovery_results.json
+**/query_log.json
+**/source_analysis*.json
+**/proposed_claims.json
+**/claim_rejections.json
+**/corroboration*.json
+**/research_coverage.json

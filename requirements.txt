@@ -1,0 +1,8 @@
+# The initial scaffold intentionally uses only the Python 3.12 standard library.
+# Add optional provider SDKs here later, for example:
+# pydantic
+# pyyaml
+# typer
+# openai
+# anthropic
+# google-genai

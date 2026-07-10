@@ -1,0 +1,101 @@
+[research]
+provider = "local_stub"
+
+[research.tavily]
+enabled = true
+max_results = 8
+search_depth = "advanced"
+include_domains = []
+exclude_domains = []
+
+[text_generation]
+provider = "local_stub"
+
+[reasoning]
+provider = "openai"
+enabled = true
+strategy = "low_cost"
+# Backward-compatible fallback only. Each pipeline stage below has its own model.
+model = "gpt-4.1-mini"
+reasoning_effort = "low"
+max_output_tokens = 3500
+max_sources_analyzed = 8
+max_source_text_length = 18000
+per_project_spending_limit_usd = 0.25
+require_explicit_confirmation = true
+dry_run = false
+
+# Prices are editable planning assumptions in USD per 1M tokens, not live quotes.
+# Cheap stages clean/filter sources and extract claims; stronger stages shape the
+# final narrative. No model below is enabled while [reasoning].enabled is false.
+[reasoning.stages.research_plan]
+model = "gpt-4.1-nano"
+max_input_tokens = 4000
+max_output_tokens = 1200
+input_cost_per_million_tokens_usd = 0.10
+output_cost_per_million_tokens_usd = 0.40
+
+[reasoning.stages.source_analysis]
+model = "gpt-4.1-nano"
+max_input_tokens = 36000
+max_output_tokens = 5000
+input_cost_per_million_tokens_usd = 0.10
+output_cost_per_million_tokens_usd = 0.40
+
+[reasoning.stages.narrative_outline]
+model = "gpt-4.1-mini"
+max_input_tokens = 18000
+max_output_tokens = 3000
+input_cost_per_million_tokens_usd = 0.40
+output_cost_per_million_tokens_usd = 1.60
+
+[reasoning.stages.script]
+model = "gpt-4.1-mini"
+max_input_tokens = 24000
+max_output_tokens = 5000
+input_cost_per_million_tokens_usd = 0.40
+output_cost_per_million_tokens_usd = 1.60
+
+[reasoning.stages.scenes]
+model = "gpt-4.1-nano"
+max_input_tokens = 14000
+max_output_tokens = 4000
+input_cost_per_million_tokens_usd = 0.10
+output_cost_per_million_tokens_usd = 0.40
+
+[reasoning.stages.corroboration]
+model = "gpt-4.1-nano"
+max_input_tokens = 12000
+max_output_tokens = 5000
+input_cost_per_million_tokens_usd = 0.10
+output_cost_per_million_tokens_usd = 0.40
+
+[reasoning.stages.story_architecture]
+model = "gpt-4.1-nano"
+max_input_tokens = 12000
+max_output_tokens = 5000
+input_cost_per_million_tokens_usd = 0.10
+output_cost_per_million_tokens_usd = 0.40
+
+[image_generation]
+provider = "local_svg_placeholder"
+
+[image_to_video]
+provider = "ffmpeg_local"
+
+[voice_over]
+provider = "auto"
+fallback_provider = "ffmpeg_flite"
+
+[voice_over.elevenlabs]
+enabled = false
+voice_id = "JBFqnCBsd6RMkjVDRZzb"
+model_id = "eleven_v3"
+stability = 0.55
+similarity_boost = 0.80
+style = 0.0
+use_speaker_boost = true
+output_format = "mp3_44100_128"
+
+[publishing]
+provider = "disabled"
