@@ -1,0 +1,42 @@
+[
+  {
+    "name": "natural_professional_dutch",
+    "expected": "pass",
+    "text": "In 1998 opent de gemeente het nieuwe station. Reizigers krijgen vanaf die dag een rechtstreekse verbinding met de stad.\n\nDrie jaar later rijden er dagelijks zestig treinen. De dienstregeling laat zien hoe snel de lijn een vaste plek krijgt in de regio.\n\nDe verbouwing begint in mei 2004. Het oude perron blijft tijdens het werk in gebruik."
+  },
+  {
+    "name": "translated_english_dutch",
+    "expected": "fail",
+    "text": "De verslaggever maakte zijn weg naar het gerechtsgebouw. Aan het einde van de dag was dit waar het onderzoek tot stilstand kwam."
+  },
+  {
+    "name": "generic_ai_suspense_cliches",
+    "expected": "fail",
+    "text": "Niemand kon vermoeden wat daarna gebeurde. Achter de schermen lag een duister geheim. De waarheid zou alles veranderen."
+  },
+  {
+    "name": "repetitive_paragraph_openings",
+    "expected": "fail",
+    "text": "Maar de politie vindt geen bruikbare afdrukken.\n\nMaar de getuige herkent de auto niet.\n\nMaar het onderzoek gaat die avond verder."
+  },
+  {
+    "name": "repeated_rhetorical_questions",
+    "expected": "fail",
+    "text": "Maar waarom zweeg de bestuurder? De recherche bekijkt de beelden opnieuw. Maar waarom zweeg de bestuurder?"
+  },
+  {
+    "name": "overly_long_spoken_sentence",
+    "expected": "fail",
+    "text": "De commissie stelde na een uitvoerige vergadering waarin alle afdelingen hun afzonderlijke bevindingen toelichtten en verschillende bestuurders aanvullende vragen formuleerden uiteindelijk vast dat de geplande uitvoering van het omvangrijke herstelprogramma opnieuw moest worden uitgesteld tot een nader te bepalen datum."
+  },
+  {
+    "name": "bureaucratic_abstract_wording",
+    "expected": "fail",
+    "text": "Ten aanzien van de problematiek werd in het kader van het besluitvormingsproces een nadere implementatie overwogen. Derhalve bleef onderhavige regeling van kracht."
+  },
+  {
+    "name": "restrained_factual_narration",
+    "expected": "pass",
+    "text": "De rechtbank hoort op 12 maart 2012 drie getuigen. Twee van hen bevestigen dat de winkel om acht uur sloot.\n\nDe camerabeelden tonen één auto bij de achteringang. Het kenteken is niet leesbaar."
+  }
+]

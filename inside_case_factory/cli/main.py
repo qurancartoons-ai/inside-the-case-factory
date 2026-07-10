@@ -8,6 +8,7 @@ import sys
 
 from inside_case_factory import __version__
 from inside_case_factory.core.media import add_image_asset
+from inside_case_factory.core.language_check import format_language_report, run_language_fixtures
 from inside_case_factory.core.research import TavilyResearchProvider, tavily_config_from_settings
 from inside_case_factory.config.settings import load_settings
 from inside_case_factory.core.project import create_project
@@ -54,6 +55,16 @@ def cmd_health(args: argparse.Namespace) -> int:
 def cmd_plan(args: argparse.Namespace) -> int:
     _print_json(describe_pipeline())
     return 0
+
+
+def cmd_language_check(args: argparse.Namespace) -> int:
+    try:
+        results = run_language_fixtures(args.fixture)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(format_language_report(results))
+    return 1 if any(result["result"] == "fail" for result in results) else 0
 
 
 def cmd_estimate_cost(args: argparse.Namespace) -> int:
@@ -275,6 +286,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = subparsers.add_parser("plan", help="Print the planned production pipeline")
     plan.set_defaults(func=cmd_plan)
+
+    language_check = subparsers.add_parser("language-check", help="Run the offline Dutch narration fixture checks")
+    language_check.add_argument("--fixture", default="all", help="Fixture name, or all")
+    language_check.set_defaults(func=cmd_language_check)
 
     estimate_cost = subparsers.add_parser("estimate-cost", help="Estimate the configured maximum without calling an API")
     estimate_cost.add_argument("--duration", type=int, default=12, help="Target documentary duration in minutes")
