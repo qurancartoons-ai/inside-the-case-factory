@@ -75,7 +75,7 @@ DUTCH_OVERDRAMATIC_PHRASES = (
     "stukje bij beetje", "in de schaduw van", "op het eerste gezicht",
     "het verhaal neemt een onverwachte wending",
     "dit markeerde het begin van een complexe periode", "maar liefst", "ging eindelijk opnieuw open",
-    "toont aan dat", "hand in hand gaat met", "een nieuwe standaard", "markeert een keerpunt",
+    "toont aan dat", "hand in hand", "een nieuwe standaard", "markeert een keerpunt",
     "what happened next", "no one could have imagined", "the world was turned upside down",
     "behind the scenes", "nothing was what it seemed", "a dark secret",
     "the truth would change everything", "the beginning of the end", "a shocking twist",
@@ -121,6 +121,29 @@ def _sentences(text: str) -> list[str]:
     return [item.strip() for item in re.split(r"(?<=[.!?])\s+", text.replace("\n", " ")) if item.strip()]
 
 
+def _dutch_years(text: str) -> set[int]:
+    units = {"een": 1, "twee": 2, "drie": 3, "vier": 4, "vijf": 5, "zes": 6, "zeven": 7, "acht": 8, "negen": 9}
+    small = {
+        "": 0, "een": 1, "twee": 2, "drie": 3, "vier": 4, "vijf": 5, "zes": 6, "zeven": 7,
+        "acht": 8, "negen": 9, "tien": 10, "elf": 11, "twaalf": 12, "dertien": 13,
+        "veertien": 14, "vijftien": 15, "zestien": 16, "zeventien": 17, "achttien": 18,
+        "negentien": 19, "twintig": 20, "dertig": 30, "veertig": 40, "vijftig": 50,
+        "zestig": 60, "zeventig": 70, "tachtig": 80, "negentig": 90,
+    }
+    for tens_word, tens_value in list(small.items()):
+        if tens_value >= 20 and tens_value % 10 == 0:
+            for unit_word, unit_value in units.items():
+                small[f"{unit_word}en{tens_word}"] = tens_value + unit_value
+                # Also parse the common model misspelling with a duplicated "en" so it cannot hide a wrong year.
+                small[f"{unit_word}enen{tens_word}"] = tens_value + unit_value
+    years: set[int] = set()
+    for match in re.finditer(r"\btwee\s*duizend(?:\s*([a-zë]+))?\b", text.casefold()):
+        suffix = (match.group(1) or "").replace("ë", "e")
+        if suffix in small:
+            years.add(2000 + small[suffix])
+    return years
+
+
 def analyze_dutch_language(text: str) -> dict[str, Any]:
     lower = text.casefold()
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
@@ -154,7 +177,7 @@ def analyze_dutch_language(text: str) -> dict[str, Any]:
             templates.append(" ".join(words[:4]))
     repeated_templates = sorted({template for template in templates if templates.count(template) > 1})
     questions = [sentence for sentence in sentences if sentence.endswith("?")]
-    dramatic_questions = [q for q in questions if re.search(r"\b(?:maar waarom|hoe kon|wat als|wie kon|wat gebeurde|wie wist|zou .* ooit)\b", q, re.I)]
+    dramatic_questions = [q for q in questions if re.search(r"\b(?:maar waarom|hoe kon|wat als|wie kon|wat gebeurde|wat veroorzaakte|wie wist|zou .* ooit)\b", q, re.I)]
     normalized_questions = [re.sub(r"\W+", " ", q.casefold()).strip() for q in dramatic_questions]
     repeated_questions = sorted({q for q in normalized_questions if normalized_questions.count(q) > 1})
 
@@ -178,7 +201,7 @@ def analyze_dutch_language(text: str) -> dict[str, Any]:
     if overdramatic: rejection_reasons.append("Generic or overdramatic documentary phrases are present.")
     if repeated_openings or repeated_templates: rejection_reasons.append("Repeated sentence or transition patterns are present.")
     if repeated_connectors: rejection_reasons.append("Paragraph-opening connectors are repeated.")
-    if repeated_questions or len(dramatic_questions) > 1: rejection_reasons.append("Repetitive rhetorical questions are present.")
+    if dramatic_questions: rejection_reasons.append("rhetorical questions are present.")
     if spoken_issues: rejection_reasons.append("The narration contains spoken-language quality issues.")
     return {
         "dutch_language_quality": "pass" if not rejection_reasons else "fail",
@@ -245,6 +268,15 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
         "spoken_language_issues": [], "long_sentence_count": 0, "connector_repetition": [],
         "language_rejection_reasons": [],
     }
+    approved_years = {
+        int(match.group(0))
+        for claim in claims if isinstance(claim, dict)
+        for match in re.finditer(r"\b(?:19|20)\d{2}\b", f"{claim.get('date', '')} {claim.get('text', '')}")
+    }
+    narrated_years = {int(item) for item in re.findall(r"\b(?:19|20)\d{2}\b", text)}
+    if _is_dutch(language):
+        narrated_years.update(_dutch_years(text))
+    unsupported_years = sorted(narrated_years - approved_years) if approved_years else []
     failures: list[str] = []
     if not architecture_report["valid"]: failures.append("Story architecture is malformed and cannot be used for script validation.")
     if word_count < minimum: failures.append(f"Script te kort: {word_count} woorden; minimum is {minimum}.")
@@ -257,6 +289,7 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     if unused_required: failures.append("Belangrijke onderzoeksdetails ontbreken: required details are unused.")
     if style["unsupported_citation_ids"]: failures.append("Unsupported claim IDs are cited.")
     if style["style_violations"]: failures.append("Banned style phrases are present.")
+    if unsupported_years: failures.append("Narration contains years not supported by approved claims.")
     failures.extend(style.get("repetitive_transition_count", 0) and ["Repetitive transitions exceed the quality threshold."] or [])
     failures.extend(dutch["language_rejection_reasons"])
     report = {
@@ -266,6 +299,7 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
         "represented_beat_ids": sorted(required_beats & represented), "missing_beat_ids": missing_beats,
         "unknown_beat_ids": unknown_beats, "duplicate_beat_ids": duplicate_beats,
         "unsupported_claim_ids": sorted(cited - claim_ids), "unused_required_research_details": unused_required,
+        "unsupported_narrated_years": unsupported_years,
         "unused_optional_research_details": architecture.get("unused_high_value_details", []),
         "banned_style_phrases": style["style_violations"], "repetitive_transitions": style.get("repetitive_transition_count", 0),
         "opening_quality": "pass" if not style["weak_opening"] else "fail", "ending_quality": "fail" if style["generic_conclusion"] else "pass",

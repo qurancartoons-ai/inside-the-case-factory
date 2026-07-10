@@ -97,6 +97,8 @@ Every new prompt-production project also receives `manifests/cost_estimate.json`
 
 Script generation uses a bounded validation retry: one initial low-cost script attempt and at most two revisions. Every candidate is validated immediately, a revision is requested only for concrete validator failures, and generation stops as soon as the first fully valid candidate is safely promoted. Confirmation and per-project spending checks still run before every provider call.
 
+An isolated Dutch calibration can exercise the same behavior with `calibrate-dutch-script --confirm-up-to-three-paid-calls`. This explicit confirmation permits no more than three script calls, validates and records every candidate, and stops at the first accepted result. The command rejects a run before calling the provider when its cumulative worst-case estimate exceeds the configured project budget.
+
 Keep API keys out of the repository. Confirmation only unlocks a configured call; it never bypasses the project budget.
 
 ## ElevenLabs TTS

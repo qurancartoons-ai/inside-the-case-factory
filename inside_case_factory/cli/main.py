@@ -72,12 +72,13 @@ def cmd_language_check(args: argparse.Namespace) -> int:
 def cmd_calibrate_dutch_script(args: argparse.Namespace) -> int:
     settings = load_settings(Path(args.root))
     maximum = script_stage_maximum_cost(settings)
-    print(f"Maximum expected API cost: ${maximum:.6f}")
-    if not args.confirm_one_paid_call:
-        print("Calibration not run: pass --confirm-one-paid-call to authorize exactly one script call.", file=sys.stderr)
+    print(f"Maximum expected API cost per call: ${maximum:.6f}")
+    maximum_attempts = 3 if args.confirm_up_to_three_paid_calls else 1
+    if not (args.confirm_one_paid_call or args.confirm_up_to_three_paid_calls):
+        print("Calibration not run: explicitly authorize one call or up to three validator-retry calls.", file=sys.stderr)
         return 2
     try:
-        report = run_dutch_script_calibration(settings, Path(args.output))
+        report = run_dutch_script_calibration(settings, Path(args.output), maximum_attempts=maximum_attempts)
     except (RuntimeError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1
@@ -316,6 +317,10 @@ def build_parser() -> argparse.ArgumentParser:
     calibration = subparsers.add_parser("calibrate-dutch-script", help="Run one isolated real Dutch script calibration")
     calibration.add_argument("--output", default=".calibration/dutch-script", help="New isolated output directory")
     calibration.add_argument("--confirm-one-paid-call", action="store_true", help="Authorize exactly one OpenAI script call")
+    calibration.add_argument(
+        "--confirm-up-to-three-paid-calls", action="store_true",
+        help="Authorize up to three OpenAI script calls, with retries only after validator rejection",
+    )
     calibration.set_defaults(func=cmd_calibrate_dutch_script)
 
     autonomous = subparsers.add_parser("autonomous-check", help="Run the repository's required offline verification sequence")

@@ -14,6 +14,7 @@ from inside_case_factory.core.script_calibration import (
     run_dutch_script_calibration,
     script_stage_maximum_cost,
 )
+from inside_case_factory.utils.files import read_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,9 +66,59 @@ class ScriptCalibrationTests(unittest.TestCase):
             self.assertIn("Do not end with a broad lesson", captured["input"][1]["content"])
             self.assertEqual(report["word_count"], 300)
             self.assertTrue((output / "calibration_report.json").exists())
-            self.assertTrue((output / "script_candidate.json").exists())
+            self.assertTrue((output / "script_candidate_1.json").exists())
             self.assertFalse(any((output / name).exists() for name in PROTECTED_ARTIFACTS))
             self.assertEqual(report["human_review"]["reviewer_notes"], "")
+
+    def test_calibration_retries_only_validator_failures_and_stops_on_pass(self) -> None:
+        base = {
+            "version": 1, "title": "De Oude Havenbrug", "target_duration_minutes": 3,
+            "language": "Nederlands", "status": "final", "generated_from": ["c001"],
+            "opening_hook": "De brug sluit.",
+            "sections": [{"id": "s1", "heading": "Brug", "claim_ids": ["c001"],
+                          "beat_ids": ["beat_01", "beat_02", "beat_03"], "text": "tekst"}],
+        }
+        bad = {**base, "narration": "Te kort."}
+        good_text = " ".join(
+            f"Fase nummer {number} toont dat de brug vandaag veilig open blijft."
+            for number in range(1, 31)
+        )
+        good = {**base, "narration": good_text,
+                "sections": [{**base["sections"][0], "text": good_text}]}
+
+        def response(script, tokens):
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *args): return None
+                def read(self):
+                    return json.dumps({"output_text": json.dumps(script), "usage": {
+                        "input_tokens": tokens, "output_tokens": tokens,
+                    }}).encode()
+            return Response()
+
+        requests = []
+        def fake_urlopen(request, timeout=0):
+            requests.append(json.loads(request.data.decode()))
+            return response(bad if len(requests) == 1 else good, 100)
+
+        settings = load_settings(ROOT)
+        with tempfile.TemporaryDirectory() as parent:
+            output = Path(parent) / "retry-calibration"
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "local-test-key"}):
+                with patch("inside_case_factory.providers.reasoning.urlopen", side_effect=fake_urlopen):
+                    report = run_dutch_script_calibration(settings, output, maximum_attempts=3)
+            self.assertEqual(report["attempts_used"], 2)
+            self.assertFalse(report["attempts"][0]["overall_acceptance"])
+            self.assertTrue(report["attempts"][1]["overall_acceptance"])
+            self.assertIn("previous_quality_report", requests[1]["input"][1]["content"])
+            self.assertTrue((output / "best_valid_script_candidate.json").exists())
+            self.assertEqual(len(read_json(output / "manifests/reasoning_usage.json")["calls"]), 2)
+
+    def test_calibration_attempt_limit_and_budget_are_bounded(self) -> None:
+        settings = load_settings(ROOT)
+        with tempfile.TemporaryDirectory() as parent:
+            with self.assertRaises(ValueError):
+                run_dutch_script_calibration(settings, Path(parent) / "too-many", maximum_attempts=4)
 
 
 if __name__ == "__main__":

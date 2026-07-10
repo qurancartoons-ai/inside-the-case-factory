@@ -65,13 +65,26 @@ class ScriptAcceptanceTests(unittest.TestCase):
         self.assertFalse(report["pass"])
         self.assertIn("die kwetsuur", report["unnatural_phrasing"])
         self.assertIn("toont aan dat", report["overdramatic_phrases"])
-        self.assertIn("hand in hand gaat met", report["overdramatic_phrases"])
+        self.assertIn("hand in hand", report["overdramatic_phrases"])
 
     def test_calibration_style_turning_point_and_visible_safety_fail(self) -> None:
         report = self.language_report("Deze heropening markeert een keerpunt. Vanaf nu is de veiligheid ook zichtbaar geborgd.")
         self.assertFalse(report["pass"])
         self.assertIn("markeert een keerpunt", report["overdramatic_phrases"])
         self.assertIn("zichtbaar geborgd", report["unnatural_phrasing"])
+
+    def test_dutch_spoken_year_must_be_supported_by_claims(self) -> None:
+        self.claims = [{"id": "c001", "date": "2020-03-02", "text": "Het herstel begon in 2020."}]
+        report = self.language_report("Het herstel begint in tweeduizendtachtig. De brug opent in tweeduizendtweeentwintig.")
+        self.assertFalse(report["pass"])
+        self.assertEqual(report["unsupported_narrated_years"], [2022, 2080])
+        self.assertIn("Narration contains years not supported by approved claims.", report["failure_reasons"])
+
+    def test_any_rhetorical_question_and_hand_in_hand_cliche_fail(self) -> None:
+        report = self.language_report("Wat veroorzaakte deze schade eigenlijk? Daarna gaan veiligheid en openheid hand in hand.")
+        self.assertFalse(report["pass"])
+        self.assertIn("rhetorical questions are present.", report["language_rejection_reasons"])
+        self.assertIn("hand in hand", report["overdramatic_phrases"])
 
     def test_repeated_rhetorical_questions_fail(self) -> None:
         report = self.language_report("Maar waarom zweeg hij? De politie onderzocht de brief. Maar waarom zweeg hij?")

@@ -41,7 +41,9 @@ def assert_calibration_isolated(repository_root: Path, output_root: Path) -> Non
         raise ValueError("Calibration output path uses a protected production artifact name.")
 
 
-def run_dutch_script_calibration(settings: Settings, output_root: Path) -> dict[str, Any]:
+def run_dutch_script_calibration(settings: Settings, output_root: Path, *, maximum_attempts: int = 1) -> dict[str, Any]:
+    if maximum_attempts not in range(1, 4):
+        raise ValueError("Calibration maximum_attempts must be between 1 and 3.")
     maximum_cost = script_stage_maximum_cost(settings)
     if maximum_cost > 0.05:
         raise RuntimeError(f"Maximum expected script cost ${maximum_cost:.6f} exceeds $0.05; API call blocked.")
@@ -56,17 +58,45 @@ def run_dutch_script_calibration(settings: Settings, output_root: Path) -> dict[
     manifests.mkdir(parents=True)
     write_json(manifests / "story_architecture.json", architecture)
     write_json(manifests / "workflow.json", {"language": "Nederlands", "content_mode": "factual_documentary"})
-    write_json(manifests / "paid_api_confirmation.json", {"confirmed": True, "scope": "one calibration script call"})
-
     config = reasoning_config_from_settings(settings.providers.get("reasoning", {}))
+    maximum_total_cost = round(maximum_cost * maximum_attempts, 6)
+    if maximum_total_cost > config.per_project_spending_limit_usd:
+        raise RuntimeError(
+            f"Maximum expected calibration cost ${maximum_total_cost:.6f} exceeds the project budget "
+            f"${config.per_project_spending_limit_usd:.6f}; API calls blocked."
+        )
+    write_json(manifests / "paid_api_confirmation.json", {
+        "confirmed": True,
+        "scope": f"up to {maximum_attempts} calibration script calls, validator retries only",
+        "maximum_attempts": maximum_attempts,
+        "maximum_expected_cost_usd": maximum_total_cost,
+    })
+
     provider = OpenAIReasoningProvider(config)
-    script = provider.write_script(
-        output_root, fixture["research_plan"], fixture["dossier"], fixture["narrative_outline"],
-        fixture["approved_claims"], 3, "Nederlands", word_range=(300, 500),
-    )
-    quality = validate_script(script, fixture["approved_claims"], architecture, CALIBRATION_LIMITS)
+    attempts: list[dict[str, Any]] = []
+    quality: dict[str, Any] | None = None
+    script: dict[str, Any] | None = None
+    for attempt in range(1, maximum_attempts + 1):
+        script = provider.write_script(
+            output_root, fixture["research_plan"], fixture["dossier"], fixture["narrative_outline"],
+            fixture["approved_claims"], 3, "Nederlands", quality_report=quality,
+            word_range=(300, 500),
+        )
+        quality = validate_script(script, fixture["approved_claims"], architecture, CALIBRATION_LIMITS)
+        write_json(output_root / f"script_candidate_{attempt}.json", script)
+        write_json(output_root / f"script_candidate_{attempt}_quality_report.json", quality)
+        attempts.append({
+            "attempt": attempt, "overall_acceptance": quality["pass"],
+            "word_count": quality["word_count"], "rejection_reasons": quality["failure_reasons"],
+        })
+        if quality["pass"]:
+            break
+        if not quality.get("failure_reasons"):
+            break
+    assert script is not None and quality is not None
     usage_manifest = read_json(manifests / "reasoning_usage.json")
-    usage = usage_manifest["calls"][-1]
+    usage_calls = usage_manifest["calls"]
+    usage = usage_calls[-1]
     report = {
         "version": 1,
         "created_at": datetime.now(UTC).isoformat(),
@@ -74,8 +104,10 @@ def run_dutch_script_calibration(settings: Settings, output_root: Path) -> dict[
         "reasoning_effort": usage["reasoning_effort"],
         "input_tokens": usage["input_tokens"],
         "output_tokens": usage["output_tokens"],
-        "maximum_expected_api_cost_usd": maximum_cost,
-        "estimated_api_cost_usd": usage["token_based_estimated_cost_usd"],
+        "maximum_expected_api_cost_usd": maximum_total_cost,
+        "estimated_api_cost_usd": round(sum(call["token_based_estimated_cost_usd"] for call in usage_calls), 6),
+        "attempts_used": len(attempts),
+        "attempts": attempts,
         "word_count": quality["word_count"],
         "estimated_narration_duration_minutes": quality["estimated_duration_minutes"],
         "narration": script["narration"],
@@ -98,5 +130,6 @@ def run_dutch_script_calibration(settings: Settings, output_root: Path) -> dict[
         },
     }
     write_json(output_root / "calibration_report.json", report)
-    write_json(output_root / "script_candidate.json", script)
+    if quality["pass"]:
+        write_json(output_root / "best_valid_script_candidate.json", script)
     return report
