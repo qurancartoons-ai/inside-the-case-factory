@@ -11,7 +11,12 @@ from inside_case_factory.core.production import (
     _promote_candidate,
     _write_generation_failure,
 )
-from inside_case_factory.core.script_repair import apply_surgical_replacements, build_script_repair_plan
+from inside_case_factory.core.script_repair import (
+    _semantic_issue_map,
+    apply_surgical_replacements,
+    build_script_repair_plan,
+    run_writer_critic_rewriter,
+)
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.core.project import create_project
 from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, ReasoningConfig, ReasoningProviderError
@@ -121,6 +126,101 @@ class ScriptAcceptanceTests(unittest.TestCase):
         self.assertEqual(repair["original_passage"], script["narration"])
         self.assertIn("unsupported_year: 2080", repair["validator_errors"])
         self.assertEqual(repair["approved_claims"][0]["id"], "c001")
+
+    def test_critic_plan_adds_word_count_expansion_target(self) -> None:
+        claims = [
+            {"id": "c001", "text": "De gemeente sluit de brug.", "date": "2021-01-01"},
+            {"id": "c002", "text": "Ingenieurs plaatsen sensoren die de vervorming elke minuut meten.", "date": "2021-01-02"},
+            {"id": "c003", "text": "Na de heropening publiceert de gemeente elk kwartaal de meetresultaten.", "date": "2021-01-03"},
+        ]
+        script = {
+            "narration": "De gemeente sluit de brug. Ingenieurs plaatsen sensoren.",
+            "target_duration_minutes": 1,
+            "sections": [{
+                "claim_ids": ["c001", "c002", "c003"],
+                "text": "De gemeente sluit de brug. Ingenieurs plaatsen sensoren.",
+            }],
+        }
+        config = {"minimum_words": 10, "maximum_words": 100, "duration_tolerance": 10}
+        report = validate_script(script, claims, self.architecture, config)
+        self.assertFalse(report["pass"])
+        plan = build_script_repair_plan(script, report, claims)
+        repair = next(item for item in plan["repairs"] if item["target_id"] == "repair_word_count")
+        self.assertEqual(repair["original_passage"], "Ingenieurs plaatsen sensoren.")
+        self.assertTrue(any("word_count_shortfall" in error for error in repair["validator_errors"]))
+        self.assertTrue(any(claim["id"] == "c002" for claim in repair["approved_claims"]))
+
+    def test_semantic_issue_map_keeps_word_count_shortfall_stable(self) -> None:
+        first = {"word_count": 270, "minimum_words": 300, "maximum_words": 500, "estimated_duration_minutes": 2.16, "target_duration_minutes": 3.0, "duration_tolerance": 1.0}
+        second = {**first, "word_count": 266}
+        self.assertEqual(set(_semantic_issue_map(first)), set(_semantic_issue_map(second)))
+
+    def test_short_script_can_be_expanded_surgically_to_pass(self) -> None:
+        claims = [
+            {"id": "c001", "text": "De gemeente sluit de brug.", "date": "2021-01-01"},
+            {"id": "c002", "text": "Ingenieurs plaatsen sensoren die de vervorming elke minuut meten.", "date": "2021-01-02"},
+            {"id": "c003", "text": "Na de heropening publiceert de gemeente elk kwartaal de meetresultaten.", "date": "2021-01-03"},
+        ]
+        architecture = {
+            "version": 1,
+            "status": "final",
+            "beats": [
+                {"beat_id": "beat_01", "what_happens": "event", "viewer_learns": "fact", "why_here": "order", "curiosity_forward": "next", "claim_ids": ["c001"], "high_value_details": []},
+                {"beat_id": "beat_02", "what_happens": "event", "viewer_learns": "fact", "why_here": "order", "curiosity_forward": "next", "claim_ids": ["c002"], "high_value_details": []},
+                {"beat_id": "beat_03", "what_happens": "event", "viewer_learns": "fact", "why_here": "order", "curiosity_forward": "next", "claim_ids": ["c003"], "high_value_details": []},
+            ],
+            "research_utilization_audit": [],
+            "unused_high_value_details": [],
+            "coverage_gaps": [],
+            "final_reflection": "reflection",
+            "closing_requirements": [],
+            "supplementary_metadata": {},
+        }
+        script = {
+            "narration": "De gemeente sluit de brug. Ingenieurs plaatsen sensoren.",
+            "target_duration_minutes": 1,
+            "sections": [{
+                "id": "section_01",
+                "heading": "Herstel",
+                "claim_ids": ["c001", "c002", "c003"],
+                "beat_ids": ["beat_01", "beat_02", "beat_03"],
+                "text": "De gemeente sluit de brug. Ingenieurs plaatsen sensoren.",
+            }],
+        }
+
+        class Provider:
+            available = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.plans = []
+
+            def rewrite_script_passages(self, *args, **kwargs):
+                self.calls += 1
+                plan = args[1]
+                self.plans.append(plan)
+                return {
+                    "replacements": [
+                        {
+                            "target_id": "repair_word_count",
+                            "replacement_passage": "Ingenieurs plaatsen sensoren die de vervorming elke minuut meten en de gemeente publiceert daarna elk kwartaal de meetresultaten.",
+                        }
+                    ]
+                }
+
+        provider = Provider()
+        with tempfile.TemporaryDirectory() as tmp:
+            accepted, attempts = run_writer_critic_rewriter(
+                Path(tmp), script, provider, claims, architecture,
+                {"minimum_words": 10, "maximum_words": 100, "duration_tolerance": 10},
+                {}, {}, {}, 3, "Nederlands", maximum_model_calls=2,
+            )
+        self.assertIsNotNone(accepted)
+        self.assertTrue(attempts[0][1]["word_count"] < 10)
+        self.assertTrue(attempts[-1][1]["pass"])
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(provider.plans[0]["repairs"][0]["target_id"], "repair_word_count")
+        self.assertIn("word_count_shortfall", provider.plans[0]["repairs"][0]["validator_errors"][0])
 
     def test_surgical_replacement_changes_only_exact_target(self) -> None:
         claims = [{"id": "c001", "text": "Het herstel begon in 2020.", "date": "2020-01-01"}]

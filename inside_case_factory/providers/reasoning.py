@@ -419,6 +419,8 @@ class OpenAIReasoningProvider(ReasoningProvider):
                     "Return exactly one target_id and replacement_passage for every supplied repair.",
                     "Do not return narration, sections, metadata, commentary, or any non-target text.",
                     "Do not introduce a name, date, year, number, event, or conclusion absent from that repair's approved_claims.",
+                    "If a repair item is a word-count shortfall, expand only that passage with approved-claim detail until the full script reaches the requested minimum.",
+                    "If a repair item is a word-count excess, compress only that passage without changing any other passage.",
                     "An empty replacement_passage is allowed when the target must be removed.",
                 ],
             },
