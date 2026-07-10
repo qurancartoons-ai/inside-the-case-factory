@@ -527,7 +527,8 @@ class DashboardApp:
             )
             architecture_path = project_root / "manifests" / "story_architecture.json"
             if architecture_path.exists():
-                quality = validate_script(script, approved_claims(project_root), read_json(architecture_path), self.settings.script)
+                workflow = load_manifest(project_root, "workflow.json")
+                quality = validate_script(script, approved_claims(project_root), read_json(architecture_path), {**self.settings.script, "language": workflow.get("language", script.get("language", "English"))})
                 _persist_candidate(project_root, 1, script, quality)
                 if not quality["pass"]:
                     raise RuntimeError("Script rejected: " + "; ".join(quality["failure_reasons"]))

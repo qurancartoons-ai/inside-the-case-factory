@@ -67,6 +67,114 @@ GENERIC_PHRASES = (
 )
 ACADEMIC_PHRASES = ("judicial scrutiny", "multifaceted", "underscored the critical importance", "catalyzed discussions")
 
+DUTCH_OVERDRAMATIC_PHRASES = (
+    "wat daarna gebeurde", "niemand kon vermoeden", "de wereld stond op zijn kop",
+    "maar achter de schermen", "niets was wat het leek", "een duister geheim",
+    "de waarheid zou alles veranderen", "het begin van het einde", "een schokkende wending",
+    "de stilte werd doorbroken", "vragen bleven onbeantwoord", "een complex web",
+    "stukje bij beetje", "in de schaduw van", "op het eerste gezicht",
+    "het verhaal neemt een onverwachte wending",
+    "what happened next", "no one could have imagined", "the world was turned upside down",
+    "behind the scenes", "nothing was what it seemed", "a dark secret",
+    "the truth would change everything", "the beginning of the end", "a shocking twist",
+    "the silence was broken", "questions remained unanswered", "a complex web",
+    "piece by piece", "in the shadow of", "at first glance", "the story takes an unexpected turn",
+)
+DUTCH_TRANSLATED_ENGLISH_PATTERNS = (
+    (re.compile(r"\bmaak(?:te|t)? (?:zijn|haar|hun) weg naar\b", re.I), "maakte zijn/haar/hun weg naar"),
+    (re.compile(r"\baan het einde van de dag\b", re.I), "aan het einde van de dag"),
+    (re.compile(r"\bhet feit dat\b", re.I), "het feit dat"),
+    (re.compile(r"\bdit is waar\b", re.I), "dit is waar"),
+    (re.compile(r"\bhet was niet totdat\b", re.I), "het was niet totdat"),
+    (re.compile(r"\bwie weet wat er zou zijn gebeurd\b", re.I), "wie weet wat er zou zijn gebeurd"),
+)
+DUTCH_ABSTRACT_WORDING = (
+    "met betrekking tot", "ten aanzien van", "in het kader van", "dientengevolge",
+    "derhalve", "onderhavige", "problematiek", "implementatieproces", "besluitvormingsproces",
+)
+PARAGRAPH_CONNECTORS = (
+    "maar", "toch", "ondertussen", "vervolgens", "echter", "daarna", "bovendien",
+    "daarentegen", "intussen", "desondanks", "uiteindelijk",
+)
+
+
+def _is_dutch(language: object) -> bool:
+    normalized = str(language or "").strip().casefold()
+    return normalized in {"dutch", "nederlands", "nl", "nl-nl", "nl-be"} or normalized.startswith("dutch ")
+
+
+def _sentences(text: str) -> list[str]:
+    return [item.strip() for item in re.split(r"(?<=[.!?])\s+", text.replace("\n", " ")) if item.strip()]
+
+
+def analyze_dutch_language(text: str) -> dict[str, Any]:
+    lower = text.casefold()
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    sentences = _sentences(text)
+    overdramatic = sorted({phrase for phrase in DUTCH_OVERDRAMATIC_PHRASES if phrase in lower})
+    translated = sorted({label for pattern, label in DUTCH_TRANSLATED_ENGLISH_PATTERNS if pattern.search(text)})
+
+    long_sentences = [sentence for sentence in sentences if len(re.findall(r"\b[\w'-]+\b", sentence)) > 32]
+    parentheticals = [match.group(0) for match in re.finditer(r"\([^)]{8,}\)", text)]
+    citations = [match.group(0) for match in re.finditer(r"(?:\[(?:bron(?:nen)?|source|c\d)|\bvolgens (?:bron|rapport|onderzoek) \d+)", text, re.I)]
+    awkward_dates = [match.group(0) for match in re.finditer(r"\b(?:op )?(?:januari|februari|maart|april|mei|juni|juli|augustus|september|oktober|november|december) \d{1,2}(?:e|de|ste)?(?:,? \d{4})?\b", text, re.I)]
+    abstract = sorted({phrase for phrase in DUTCH_ABSTRACT_WORDING if phrase in lower})
+    noun_stacks = [match.group(0) for match in re.finditer(r"\b(?:[a-zà-öø-ÿ]+(?:ing|iteit|isme|proces|beleid|systeem)\s+){2,}[a-zà-öø-ÿ]+\b", lower)]
+
+    openings: list[str] = []
+    connector_openings: list[str] = []
+    for paragraph in paragraphs:
+        words = re.findall(r"\b[\w'-]+\b", paragraph.casefold())
+        if words:
+            openings.append(" ".join(words[:3]))
+            if words[0] in PARAGRAPH_CONNECTORS:
+                connector_openings.append(words[0])
+    repeated_openings = sorted({opening for opening in openings if openings.count(opening) > 1})
+    repeated_connectors = sorted({item for item in connector_openings if connector_openings.count(item) > 1})
+
+    templates: list[str] = []
+    for sentence in sentences:
+        words = re.findall(r"\b[\w'-]+\b", sentence.casefold())
+        if len(words) >= 5:
+            templates.append(" ".join(words[:4]))
+    repeated_templates = sorted({template for template in templates if templates.count(template) > 1})
+    questions = [sentence for sentence in sentences if sentence.endswith("?")]
+    dramatic_questions = [q for q in questions if re.search(r"\b(?:maar waarom|hoe kon|wat als|wie kon|wat gebeurde|wie wist|zou .* ooit)\b", q, re.I)]
+    normalized_questions = [re.sub(r"\W+", " ", q.casefold()).strip() for q in dramatic_questions]
+    repeated_questions = sorted({q for q in normalized_questions if normalized_questions.count(q) > 1})
+
+    spoken_issues: list[str] = []
+    if long_sentences: spoken_issues.append("excessively_long_sentences")
+    if noun_stacks: spoken_issues.append("excessive_noun_stacking")
+    if abstract: spoken_issues.append("abstract_or_bureaucratic_wording")
+    if parentheticals: spoken_issues.append("parenthetical_information")
+    if citations: spoken_issues.append("citation_like_phrasing")
+    if awkward_dates: spoken_issues.append("unnatural_date_or_number_phrasing")
+
+    unnatural: list[str] = []
+    unnatural.extend(abstract)
+    unnatural.extend(translated)
+    if noun_stacks: unnatural.append("excessive_noun_stacking")
+    if parentheticals: unnatural.append("parenthetical_information")
+    rejection_reasons: list[str] = []
+    if translated: rejection_reasons.append("Translated-English constructions are present.")
+    if overdramatic: rejection_reasons.append("Generic or overdramatic documentary phrases are present.")
+    if repeated_openings or repeated_templates: rejection_reasons.append("Repeated sentence or transition patterns are present.")
+    if repeated_connectors: rejection_reasons.append("Paragraph-opening connectors are repeated.")
+    if repeated_questions or len(dramatic_questions) > 1: rejection_reasons.append("Repetitive rhetorical questions are present.")
+    if spoken_issues: rejection_reasons.append("The narration contains spoken-language quality issues.")
+    return {
+        "dutch_language_quality": "pass" if not rejection_reasons else "fail",
+        "translated_english_patterns": translated,
+        "unnatural_phrasing": sorted(set(unnatural)),
+        "repeated_sentence_patterns": sorted(set(repeated_openings + repeated_templates + repeated_questions)),
+        "overdramatic_phrases": overdramatic,
+        "spoken_language_issues": spoken_issues,
+        "long_sentence_count": len(long_sentences),
+        "connector_repetition": repeated_connectors,
+        "language_rejection_reasons": rejection_reasons,
+    }
+
 
 def check_script(text: str, claims: list[dict[str, Any]], architecture: dict[str, Any]) -> dict[str, Any]:
     lower = text.casefold()
@@ -113,6 +221,13 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     required_details = [str(item.get("detail")) for item in architecture.get("research_utilization_audit", []) if isinstance(item, dict) and item.get("required") is True]
     unused_required = [detail for detail in required_details if not any(token.casefold() in text.casefold() for token in detail.split() if len(token) > 5)]
     style = check_script(text, claims, architecture)
+    language = script.get("language", config.get("language", ""))
+    dutch = analyze_dutch_language(text) if _is_dutch(language) else {
+        "dutch_language_quality": "not_applicable", "translated_english_patterns": [],
+        "unnatural_phrasing": [], "repeated_sentence_patterns": [], "overdramatic_phrases": [],
+        "spoken_language_issues": [], "long_sentence_count": 0, "connector_repetition": [],
+        "language_rejection_reasons": [],
+    }
     failures: list[str] = []
     if not architecture_report["valid"]: failures.append("Story architecture is malformed and cannot be used for script validation.")
     if word_count < minimum: failures.append(f"Script te kort: {word_count} woorden; minimum is {minimum}.")
@@ -126,6 +241,7 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     if style["unsupported_citation_ids"]: failures.append("Unsupported claim IDs are cited.")
     if style["style_violations"]: failures.append("Banned style phrases are present.")
     failures.extend(style.get("repetitive_transition_count", 0) and ["Repetitive transitions exceed the quality threshold."] or [])
+    failures.extend(dutch["language_rejection_reasons"])
     report = {
         "version": 1, "word_count": word_count, "minimum_words": minimum, "target_words": target, "maximum_words": maximum,
         "estimated_duration_minutes": round(duration, 3), "target_duration_minutes": target_minutes, "duration_tolerance": tolerance,
@@ -136,6 +252,7 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
         "unused_optional_research_details": architecture.get("unused_high_value_details", []),
         "banned_style_phrases": style["style_violations"], "repetitive_transitions": style.get("repetitive_transition_count", 0),
         "opening_quality": "pass" if not style["weak_opening"] else "fail", "ending_quality": "fail" if style["generic_conclusion"] else "pass",
+        **dutch,
         "pass": not failures, "failure_reasons": failures,
     }
     return report

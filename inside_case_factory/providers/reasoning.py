@@ -363,7 +363,7 @@ class OpenAIReasoningProvider(ReasoningProvider):
         result = self._json_response(
             project_root,
             "script",
-            "Write the final English narration at 1500-1700 words using the complete story architecture. Map every narration section to one or more stable beat_ids and cover all required beats. Write for the ear in modern conversational English with chronological tension, specific details, and natural transitions. Do not summarize the research, invent events, or use melodramatic AI clichés. Preserve all evidence provenance and attribution. " + mode_prompt(_project_content_mode(project_root)),
+            f"Write the final {language} voice-over narration at 1500-1700 words using the complete story architecture. Map every narration section to one or more stable beat_ids and cover all required beats. Write natural spoken {language}, not formal prose or a translation from English. Use a restrained documentary tone, concrete language, varied sentence rhythm, and transitions that sound natural aloud. Avoid awkward inversions, inflated vocabulary, generic suspense clichés, invented emotion, repetitive rhetorical questions, and translated-English constructions. Every paragraph must add new factual or narrative value. Preserve all evidence provenance and attribution. " + mode_prompt(_project_content_mode(project_root)),
             {
                 "research_plan": research_plan,
                 "dossier": dossier,
@@ -381,6 +381,10 @@ class OpenAIReasoningProvider(ReasoningProvider):
                     "Suspenseful but factual.",
                     "Preserve citations internally with claim IDs.",
                     "Avoid repetitive wording.",
+                    "Write natural Dutch for voice-over when video_language is Dutch or Nederlands: clear spoken Dutch, restrained and concrete, with varied sentence lengths and no literal English syntax.",
+                    "Do not use generic suspense language, invented emotion, repetitive rhetorical questions, awkward inversions, inflated vocabulary, or bureaucratic abstractions.",
+                    "Avoid parenthetical and citation-like wording in spoken narration; express dates and numbers as a Dutch speaker would say them aloud.",
+                    "Each paragraph must add new factual or narrative value; do not repeat a summary or reuse the same transition or sentence template.",
                     "Tell one continuous unfolding story rather than listing research categories. Every paragraph must either change the situation, complicate an explanation, reveal a consequence, or create a specific forward question.",
                     "Use the story architecture beats in order and perform its research-utilization audit; do not omit high-value supported details without reason.",
                 ],

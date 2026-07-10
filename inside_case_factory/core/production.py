@@ -264,7 +264,7 @@ def run_production(settings: Settings, project_root: Path) -> None:
         if not architecture_report["valid"]:
             raise RuntimeError("Malformed story architecture: " + "; ".join(architecture_report["errors"]))
         generated_script = generate_script(project_root, int(request.get("target_duration_minutes", 10)), reasoning_provider=reasoning_provider)
-        script_config = settings.script
+        script_config = {**settings.script, "language": str(request.get("language", workflow.get("language", "English")))}
         claims = approved_claims(project_root)
         quality = validate_script(generated_script, claims, architecture, script_config)
         attempts = [(1, quality)]

@@ -19,6 +19,59 @@ class ScriptAcceptanceTests(unittest.TestCase):
     def script(self, words: int, beat_ids: list[str]) -> dict[str, object]:
         return {"narration": "word " * words, "target_duration_minutes": 12, "sections": [{"beat_ids": beat_ids}]}
 
+    def language_report(self, narration: str, language: str = "Nederlands") -> dict[str, object]:
+        script = {"narration": narration, "language": language, "target_duration_minutes": 1, "sections": [{"beat_ids": ["beat_01", "beat_02", "beat_03"]}]}
+        config = {"minimum_words": 1, "maximum_words": 1000, "words_per_minute": 125, "duration_tolerance": 10}
+        return validate_script(script, self.claims, self.architecture, config)
+
+    def test_natural_dutch_narration_passes(self) -> None:
+        text = "In 1998 opent de gemeente het nieuwe station. Reizigers krijgen een rechtstreekse verbinding met de stad.\n\nDrie jaar later rijden er dagelijks zestig treinen. Dat blijkt uit de dienstregeling van dat jaar.\n\nDe verbouwing begint in mei 2004. Het oude perron blijft tijdens het werk in gebruik."
+        report = self.language_report(text)
+        self.assertTrue(report["pass"])
+        self.assertEqual(report["dutch_language_quality"], "pass")
+
+    def test_translated_english_dutch_fails(self) -> None:
+        report = self.language_report("De onderzoeker maakte zijn weg naar het gebouw. Aan het einde van de dag was het dossier compleet.")
+        self.assertFalse(report["pass"])
+        self.assertIn("maakte zijn/haar/hun weg naar", report["translated_english_patterns"])
+
+    def test_repeated_cliche_transitions_fail(self) -> None:
+        text = "Maar achter de schermen liep het onderzoek door.\n\nMaar achter de schermen zocht de politie verder."
+        report = self.language_report(text)
+        self.assertFalse(report["pass"])
+        self.assertIn("maar achter de schermen", report["overdramatic_phrases"])
+        self.assertIn("maar", report["connector_repetition"])
+
+    def test_overdramatic_language_fails(self) -> None:
+        report = self.language_report("Niemand kon vermoeden dat een duister geheim de waarheid zou veranderen.")
+        self.assertFalse(report["pass"])
+        self.assertIn("niemand kon vermoeden", report["overdramatic_phrases"])
+        self.assertIn("een duister geheim", report["overdramatic_phrases"])
+
+    def test_repeated_rhetorical_questions_fail(self) -> None:
+        report = self.language_report("Maar waarom zweeg hij? De politie onderzocht de brief. Maar waarom zweeg hij?")
+        self.assertFalse(report["pass"])
+        self.assertTrue(report["repeated_sentence_patterns"])
+        self.assertTrue(any("rhetorical" in reason for reason in report["language_rejection_reasons"]))
+
+    def test_long_awkward_spoken_sentence_is_reported(self) -> None:
+        text = "De commissie stelde na een uitvoerige vergadering waarin alle afdelingen hun afzonderlijke bevindingen toelichtten en verschillende bestuurders aanvullende vragen formuleerden uiteindelijk vast dat de geplande uitvoering van het omvangrijke besluitvormingsproces opnieuw moest worden uitgesteld tot een nader te bepalen datum."
+        report = self.language_report(text)
+        self.assertFalse(report["pass"])
+        self.assertEqual(report["long_sentence_count"], 1)
+        self.assertIn("excessively_long_sentences", report["spoken_language_issues"])
+
+    def test_factual_restrained_dutch_passes(self) -> None:
+        text = "De rechtbank hoort op 12 maart 2012 drie getuigen. Twee van hen bevestigen dat de winkel om acht uur sloot.\n\nDe camerabeelden tonen vervolgens één auto bij de achteringang. Het kenteken is niet leesbaar."
+        report = self.language_report(text)
+        self.assertTrue(report["pass"])
+
+    def test_english_script_skips_dutch_only_rules(self) -> None:
+        report = self.language_report("What happened next would change everything. What happened next would change everything.", "English")
+        self.assertEqual(report["dutch_language_quality"], "not_applicable")
+        self.assertEqual(report["translated_english_patterns"], [])
+        self.assertEqual(report["language_rejection_reasons"], [])
+
     def test_986_word_script_fails_for_12_minute_target(self) -> None:
         report = validate_script(self.script(986, ["beat_01", "beat_02", "beat_03"]), self.claims, self.architecture)
         self.assertFalse(report["pass"])
@@ -41,7 +94,7 @@ class ScriptAcceptanceTests(unittest.TestCase):
 
     def test_quality_report_has_structured_fields(self) -> None:
         report = validate_script(self.script(986, ["beat_01"]), self.claims, self.architecture)
-        for field in ("word_count", "estimated_duration_minutes", "missing_beat_ids", "unsupported_claim_ids", "unused_required_research_details", "banned_style_phrases", "repetitive_transitions", "opening_quality", "ending_quality", "failure_reasons"):
+        for field in ("word_count", "estimated_duration_minutes", "missing_beat_ids", "unsupported_claim_ids", "unused_required_research_details", "banned_style_phrases", "repetitive_transitions", "opening_quality", "ending_quality", "dutch_language_quality", "translated_english_patterns", "unnatural_phrasing", "repeated_sentence_patterns", "overdramatic_phrases", "spoken_language_issues", "long_sentence_count", "connector_repetition", "language_rejection_reasons", "failure_reasons"):
             self.assertIn(field, report)
 
     def test_revision_receives_complete_quality_report(self) -> None:
