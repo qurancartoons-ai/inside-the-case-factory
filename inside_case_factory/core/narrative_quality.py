@@ -92,6 +92,15 @@ DUTCH_ABSTRACT_WORDING = (
     "met betrekking tot", "ten aanzien van", "in het kader van", "dientengevolge",
     "derhalve", "onderhavige", "problematiek", "implementatieproces", "besluitvormingsproces",
 )
+DUTCH_UNNATURAL_PATTERNS = (
+    (re.compile(r"\bna deze schrapping\b", re.I), "na deze schrapping"),
+    (re.compile(r"\bom zo vroeg mogelijke\b", re.I), "om zo vroeg mogelijke"),
+    (re.compile(r"\been nieuw toezicht\b", re.I), "een nieuw toezicht"),
+    (
+        re.compile(r"\b(?:twintig|dertig|veertig|vijftig|zestig|zeventig|tachtig|negentig) (?:een|twee|drie|vier|vijf|zes|zeven|acht|negen)\b", re.I),
+        "incorrectly_spaced_compound_number",
+    ),
+)
 PARAGRAPH_CONNECTORS = (
     "maar", "toch", "ondertussen", "vervolgens", "echter", "daarna", "bovendien",
     "daarentegen", "intussen", "desondanks", "uiteindelijk",
@@ -119,6 +128,7 @@ def analyze_dutch_language(text: str) -> dict[str, Any]:
     citations = [match.group(0) for match in re.finditer(r"(?:\[(?:bron(?:nen)?|source|c\d)|\bvolgens (?:bron|rapport|onderzoek) \d+)", text, re.I)]
     awkward_dates = [match.group(0) for match in re.finditer(r"\b(?:op )?(?:januari|februari|maart|april|mei|juni|juli|augustus|september|oktober|november|december) \d{1,2}(?:e|de|ste)?(?:,? \d{4})?\b", text, re.I)]
     abstract = sorted({phrase for phrase in DUTCH_ABSTRACT_WORDING if phrase in lower})
+    detected_unnatural = sorted({label for pattern, label in DUTCH_UNNATURAL_PATTERNS if pattern.search(text)})
     noun_stacks = [match.group(0) for match in re.finditer(r"\b(?:[a-zà-öø-ÿ]+(?:ing|iteit|isme|proces|beleid|systeem)\s+){2,}[a-zà-öø-ÿ]+\b", lower)]
 
     openings: list[str] = []
@@ -154,10 +164,12 @@ def analyze_dutch_language(text: str) -> dict[str, Any]:
     unnatural: list[str] = []
     unnatural.extend(abstract)
     unnatural.extend(translated)
+    unnatural.extend(detected_unnatural)
     if noun_stacks: unnatural.append("excessive_noun_stacking")
     if parentheticals: unnatural.append("parenthetical_information")
     rejection_reasons: list[str] = []
     if translated: rejection_reasons.append("Translated-English constructions are present.")
+    if detected_unnatural: rejection_reasons.append("Unnatural or ungrammatical Dutch phrasing is present.")
     if overdramatic: rejection_reasons.append("Generic or overdramatic documentary phrases are present.")
     if repeated_openings or repeated_templates: rejection_reasons.append("Repeated sentence or transition patterns are present.")
     if repeated_connectors: rejection_reasons.append("Paragraph-opening connectors are repeated.")

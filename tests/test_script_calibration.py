@@ -58,6 +58,9 @@ class ScriptCalibrationTests(unittest.TestCase):
                 with patch("inside_case_factory.providers.reasoning.urlopen", side_effect=fake_urlopen):
                     report = run_dutch_script_calibration(settings, output)
             self.assertIn("300-500 words", captured["input"][1]["content"])
+            self.assertIn("narration alone must contain at least 300", captured["input"][1]["content"])
+            self.assertIn("Never put claim IDs", captured["input"][1]["content"])
+            self.assertIn("32 words or fewer", captured["input"][1]["content"])
             self.assertEqual(report["word_count"], 300)
             self.assertTrue((output / "calibration_report.json").exists())
             self.assertTrue((output / "script_candidate.json").exists())

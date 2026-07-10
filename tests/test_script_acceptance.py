@@ -35,6 +35,13 @@ class ScriptAcceptanceTests(unittest.TestCase):
         self.assertFalse(report["pass"])
         self.assertIn("maakte zijn/haar/hun weg naar", report["translated_english_patterns"])
 
+    def test_unnatural_dutch_and_split_compound_number_fail(self) -> None:
+        report = self.language_report("Na deze schrapping verving de aannemer zestig vier verbindingen om zo vroeg mogelijke schade te vinden.")
+        self.assertFalse(report["pass"])
+        self.assertIn("na deze schrapping", report["unnatural_phrasing"])
+        self.assertIn("incorrectly_spaced_compound_number", report["unnatural_phrasing"])
+        self.assertIn("Unnatural or ungrammatical Dutch phrasing is present.", report["language_rejection_reasons"])
+
     def test_repeated_cliche_transitions_fail(self) -> None:
         text = "Maar achter de schermen liep het onderzoek door.\n\nMaar achter de schermen zocht de politie verder."
         report = self.language_report(text)
