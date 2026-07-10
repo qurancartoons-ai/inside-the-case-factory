@@ -802,6 +802,12 @@ def generate_script(
         raise RuntimeError("At least one approved claim is required.")
 
     if reasoning_provider is not None and reasoning_provider.available:
+        from inside_case_factory.core.narrative_quality import validate_architecture_file
+        architecture_path = project_root / "manifests" / "story_architecture.json"
+        architecture = read_json(architecture_path) if architecture_path.exists() else {}
+        architecture_report = validate_architecture_file(project_root, architecture)
+        if not architecture_report["valid"]:
+            raise RuntimeError("Malformed story architecture: " + "; ".join(architecture_report["errors"]))
         research_plan = load_optional_manifest(project_root, "research_plan.json")
         dossier = load_optional_manifest(project_root, "dossier.json")
         language = str(workflow.get("language", research_plan.get("video_language", "English")))

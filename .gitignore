@@ -27,6 +27,7 @@ htmlcov/
 .DS_Store
 
 # Runtime-generated project data and manifests
+projects/
 projects/*/manifests/
 projects/*/workspace/
 projects/*/research/

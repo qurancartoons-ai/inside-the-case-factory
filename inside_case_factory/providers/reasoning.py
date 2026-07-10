@@ -257,7 +257,7 @@ class OpenAIReasoningProvider(ReasoningProvider):
         result = self._json_response(
             project_root,
             "story_architecture",
-            "Build a detailed continuous narrative architecture before scriptwriting. Do not summarize the research. Design 25-35 connected content story beats for a modern investigative YouTube documentary. Each beat must create a reason to continue into the next beat.",
+            "Build a detailed continuous narrative architecture before scriptwriting. Only genuine narrative events belong in beats; all audit, closing, reflection, and metadata content belongs in its dedicated top-level field.",
             {
                 "research_plan": research_plan, "dossier": dossier, "timeline": timeline,
                 "claims": compact_claims, "extracted_source_count": len(snapshots), "target_duration_minutes": target_duration_minutes,
@@ -269,6 +269,10 @@ class OpenAIReasoningProvider(ReasoningProvider):
                 ],
             }, STORY_ARCHITECTURE_SCHEMA,
         )
+        from inside_case_factory.core.narrative_quality import validate_architecture_file
+        report = validate_architecture_file(project_root, result)
+        if not report["valid"]:
+            raise ReasoningProviderError("Malformed story architecture: " + "; ".join(report["errors"]))
         write_json(project_root / "manifests/story_architecture.json", result)
         return result
 
@@ -383,7 +387,6 @@ class OpenAIReasoningProvider(ReasoningProvider):
             },
             SCRIPT_SCHEMA,
         )
-        write_json(project_root / "manifests" / "script.json", result)
         return result
 
     def generate_scenes(
@@ -884,19 +887,21 @@ STORY_ARCHITECTURE_SCHEMA = {
     "name": "story_architecture",
     "schema": {
         "type": "object", "additionalProperties": False,
-        "required": ["version", "status", "beats", "research_utilization_audit", "unused_high_value_details", "coverage_gaps"],
+        "required": ["version", "status", "beats", "research_utilization_audit", "unused_high_value_details", "coverage_gaps", "final_reflection", "closing_requirements", "supplementary_metadata"],
         "properties": {
             "version": {"type": "integer"}, "status": {"type": "string"},
-            "beats": {"type": "array", "minItems": 25, "maxItems": 35, "items": {
+            "beats": {"type": "array", "minItems": 1, "items": {
                 "type": "object", "additionalProperties": False,
-                "required": ["id", "what_happens", "viewer_learns", "why_here", "curiosity_forward", "claim_ids", "high_value_details"],
+                "required": ["beat_id", "what_happens", "viewer_learns", "why_here", "curiosity_forward", "claim_ids", "high_value_details"],
                 "properties": {
-                    "id": {"type": "string"}, "what_happens": {"type": "string"}, "viewer_learns": {"type": "string"},
+                    "beat_id": {"type": "string", "pattern": "^beat_[0-9]{2}$"}, "what_happens": {"type": "string"}, "viewer_learns": {"type": "string"},
                     "why_here": {"type": "string"}, "curiosity_forward": {"type": "string"}, "claim_ids": STRING_ARRAY, "high_value_details": STRING_ARRAY,
                 },
             }},
             "research_utilization_audit": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["detail", "claim_ids", "use_or_omit_reason"], "properties": {"detail": {"type": "string"}, "claim_ids": STRING_ARRAY, "use_or_omit_reason": {"type": "string"}}}},
             "unused_high_value_details": STRING_ARRAY, "coverage_gaps": STRING_ARRAY,
+            "final_reflection": {"type": "string"}, "closing_requirements": STRING_ARRAY,
+            "supplementary_metadata": {"type": "object"},
         },
     },
 }

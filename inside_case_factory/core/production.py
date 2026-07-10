@@ -23,7 +23,7 @@ from inside_case_factory.core.research import (
     save_manifest,
     tavily_config_from_settings,
 )
-from inside_case_factory.core.narrative_quality import validate_script
+from inside_case_factory.core.narrative_quality import validate_architecture_file, validate_script
 from inside_case_factory.providers.reasoning import (
     DisabledReasoningProvider,
     OpenAIReasoningProvider,
@@ -36,6 +36,49 @@ from inside_case_factory.providers.reasoning import (
     reasoning_provider_from_settings,
 )
 from inside_case_factory.utils.files import read_json, write_json
+
+
+def _persist_candidate(project_root: Path, candidate_id: int, script: dict[str, Any], report: dict[str, Any]) -> None:
+    manifests = project_root / "manifests"
+    write_json(manifests / f"script_candidate_{candidate_id}.json", script)
+    enriched = {**report, "candidate_id": candidate_id}
+    write_json(manifests / f"script_candidate_{candidate_id}_quality_report.json", enriched)
+
+
+def _promote_candidate(project_root: Path, candidate_id: int, script: dict[str, Any], report: dict[str, Any]) -> None:
+    manifests = project_root / "manifests"
+    accepted_script = {**script, "accepted_candidate_id": candidate_id}
+    accepted_report = {**report, "candidate_id": candidate_id, "accepted_candidate_id": candidate_id}
+    # Write both temporary files completely, then replace the accepted pair.
+    script_tmp = manifests / ".script.json.tmp"
+    report_tmp = manifests / ".script_quality_report.json.tmp"
+    write_json(script_tmp, accepted_script)
+    write_json(report_tmp, accepted_report)
+    artifact_tmp = manifests / ".accepted_script_artifact.json.tmp"
+    write_json(artifact_tmp, {"version": 1, "accepted_candidate_id": candidate_id, "script": accepted_script, "quality_report": accepted_report})
+    artifact_tmp.replace(manifests / "accepted_script_artifact.json")
+    script_tmp.replace(manifests / "script.json")
+    report_tmp.replace(manifests / "script_quality_report.json")
+
+
+def _write_generation_failure(project_root: Path, attempts: list[tuple[int, dict[str, Any]]], revision_used: bool) -> None:
+    metrics = []
+    for candidate_id, report in attempts:
+        metrics.append({
+            "candidate_id": candidate_id, "word_count": report["word_count"],
+            "estimated_duration_minutes": report["estimated_duration_minutes"],
+            "represented_beat_ids": report["represented_beat_ids"], "missing_beat_ids": report["missing_beat_ids"],
+            "unknown_beat_ids": report["unknown_beat_ids"], "duplicate_beat_ids": report["duplicate_beat_ids"],
+            "required_research_details_missing": report["unused_required_research_details"],
+            "unsupported_claim_ids": report["unsupported_claim_ids"], "style_violations": report["banned_style_phrases"],
+            "opening_failure": report["opening_quality"] != "pass", "ending_failure": report["ending_quality"] != "pass",
+            "chronology_failures": report.get("chronology_failures", []), "transition_failures": report["repetitive_transitions"],
+            "rejection_reasons": report["failure_reasons"],
+        })
+    write_json(project_root / "manifests" / "script_generation_failure.json", {
+        "version": 1, "candidate_ids": [item[0] for item in attempts], "candidates": metrics,
+        "revision_used": revision_used, "final_rejection_reason": "; ".join(attempts[-1][1]["failure_reasons"]),
+    })
 
 
 PRODUCTION_STAGES = [
@@ -215,23 +258,32 @@ def run_production(settings: Settings, project_root: Path) -> None:
         return
 
     try:
+        architecture_path = project_root / "manifests" / "story_architecture.json"
+        architecture = read_json(architecture_path) if architecture_path.exists() else {}
+        architecture_report = validate_architecture_file(project_root, architecture)
+        if not architecture_report["valid"]:
+            raise RuntimeError("Malformed story architecture: " + "; ".join(architecture_report["errors"]))
         generated_script = generate_script(project_root, int(request.get("target_duration_minutes", 10)), reasoning_provider=reasoning_provider)
         script_config = settings.script
-        architecture = read_json(project_root / "manifests" / "story_architecture.json") if (project_root / "manifests" / "story_architecture.json").exists() else {}
         claims = approved_claims(project_root)
         quality = validate_script(generated_script, claims, architecture, script_config)
-        write_json(project_root / "manifests" / "script_quality_report.json", quality)
+        attempts = [(1, quality)]
+        _persist_candidate(project_root, 1, generated_script, quality)
         if not quality["pass"] and int(script_config.get("maximum_revision_attempts", 1)) > 0 and reasoning_provider.available:
             revised = reasoning_provider.write_script(
                 project_root, read_json(project_root / "manifests" / "research_plan.json"), read_json(project_root / "manifests" / "dossier.json"),
                 read_json(project_root / "manifests" / "narrative_outline.json"), claims, int(request.get("target_duration_minutes", 10)), str(request.get("language", "English")), quality_report=quality,
             )
             quality = validate_script(revised, claims, architecture, script_config)
-            write_json(project_root / "manifests" / "script_quality_report.json", quality)
+            attempts.append((2, quality))
+            _persist_candidate(project_root, 2, revised, quality)
+            generated_script = revised
         if not quality["pass"]:
+            _write_generation_failure(project_root, attempts, len(attempts) == 2)
             update_plan_stage(project_root, "generate_script", "blocked", "; ".join(quality["failure_reasons"]))
             append_activity(project_root, "Script rejected by hard quality requirements.", stage="generate_script")
             return
+        _promote_candidate(project_root, attempts[-1][0], generated_script, quality)
         update_plan_stage(project_root, "narrative_outline", "completed" if (project_root / "manifests" / "narrative_outline.json").exists() else "pending")
         update_plan_stage(project_root, "generate_script", "completed")
         update_plan_stage(project_root, "review_edit_script", "waiting_for_review")

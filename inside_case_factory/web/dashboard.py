@@ -15,7 +15,8 @@ from inside_case_factory import __version__
 from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media
 from inside_case_factory.config.settings import Settings, load_settings
 from inside_case_factory.core.media import add_image_asset, ensure_media_manifest, load_media_manifest, update_image_review
-from inside_case_factory.core.production import ProductionRequest, start_production
+from inside_case_factory.core.production import ProductionRequest, _persist_candidate, _promote_candidate, start_production
+from inside_case_factory.core.narrative_quality import validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
 from inside_case_factory.core.project import create_project
@@ -518,11 +519,19 @@ class DashboardApp:
         form = self.read_form(environ)
         try:
             minutes = int(self.form_value(form, "target_duration_minutes", "10"))
-            generate_script(
-                self.project_root(slug),
+            project_root = self.project_root(slug)
+            script = generate_script(
+                project_root,
                 max(1, min(60, minutes)),
                 reasoning_provider=reasoning_provider_from_settings(self.settings.providers.get("reasoning", {})),
             )
+            architecture_path = project_root / "manifests" / "story_architecture.json"
+            if architecture_path.exists():
+                quality = validate_script(script, approved_claims(project_root), read_json(architecture_path), self.settings.script)
+                _persist_candidate(project_root, 1, script, quality)
+                if not quality["pass"]:
+                    raise RuntimeError("Script rejected: " + "; ".join(quality["failure_reasons"]))
+                _promote_candidate(project_root, 1, script, quality)
         except Exception as error:
             return self.html(self.page("Script Blocked", f"<section class=\"panel\"><h2>Script blocked</h2><p>{escape(str(error))}</p></section>"), "409 Conflict")
         return self.redirect(f"/projects/{slug}")
