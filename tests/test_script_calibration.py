@@ -61,6 +61,8 @@ class ScriptCalibrationTests(unittest.TestCase):
             self.assertIn("narration alone must contain at least 300", captured["input"][1]["content"])
             self.assertIn("Never put claim IDs", captured["input"][1]["content"])
             self.assertIn("32 words or fewer", captured["input"][1]["content"])
+            self.assertIn("Do not use rhetorical questions", captured["input"][1]["content"])
+            self.assertIn("Do not end with a broad lesson", captured["input"][1]["content"])
             self.assertEqual(report["word_count"], 300)
             self.assertTrue((output / "calibration_report.json").exists())
             self.assertTrue((output / "script_candidate.json").exists())

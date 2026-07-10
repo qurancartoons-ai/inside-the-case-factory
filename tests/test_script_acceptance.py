@@ -55,6 +55,13 @@ class ScriptAcceptanceTests(unittest.TestCase):
         self.assertIn("niemand kon vermoeden", report["overdramatic_phrases"])
         self.assertIn("een duister geheim", report["overdramatic_phrases"])
 
+    def test_generic_ai_conclusion_and_awkward_wording_fail(self) -> None:
+        report = self.language_report("Die kwetsuur markeerde het begin van een complexe periode. Het herstel toont aan dat techniek hand in hand gaat met vertrouwen en een nieuwe standaard schept.")
+        self.assertFalse(report["pass"])
+        self.assertIn("die kwetsuur", report["unnatural_phrasing"])
+        self.assertIn("toont aan dat", report["overdramatic_phrases"])
+        self.assertIn("hand in hand gaat met", report["overdramatic_phrases"])
+
     def test_repeated_rhetorical_questions_fail(self) -> None:
         report = self.language_report("Maar waarom zweeg hij? De politie onderzocht de brief. Maar waarom zweeg hij?")
         self.assertFalse(report["pass"])

@@ -74,6 +74,8 @@ DUTCH_OVERDRAMATIC_PHRASES = (
     "de stilte werd doorbroken", "vragen bleven onbeantwoord", "een complex web",
     "stukje bij beetje", "in de schaduw van", "op het eerste gezicht",
     "het verhaal neemt een onverwachte wending",
+    "dit markeerde het begin van een complexe periode", "maar liefst", "ging eindelijk opnieuw open",
+    "toont aan dat", "hand in hand gaat met", "een nieuwe standaard",
     "what happened next", "no one could have imagined", "the world was turned upside down",
     "behind the scenes", "nothing was what it seemed", "a dark secret",
     "the truth would change everything", "the beginning of the end", "a shocking twist",
@@ -96,6 +98,8 @@ DUTCH_UNNATURAL_PATTERNS = (
     (re.compile(r"\bna deze schrapping\b", re.I), "na deze schrapping"),
     (re.compile(r"\bom zo vroeg mogelijke\b", re.I), "om zo vroeg mogelijke"),
     (re.compile(r"\been nieuw toezicht\b", re.I), "een nieuw toezicht"),
+    (re.compile(r"\bdie kwetsuur\b", re.I), "die kwetsuur"),
+    (re.compile(r"\btransparantie richting\b", re.I), "transparantie richting"),
     (
         re.compile(r"\b(?:twintig|dertig|veertig|vijftig|zestig|zeventig|tachtig|negentig) (?:een|twee|drie|vier|vijf|zes|zeven|acht|negen)\b", re.I),
         "incorrectly_spaced_compound_number",

@@ -8,7 +8,9 @@
     "summary": "Een vaste, fictieve casus over een stadsbrug die na constructiefouten wordt hersteld.",
     "chronology": [
       "12 februari 2018: inspecteurs sluiten de brug na de vondst van scheuren.",
+      "13 februari 2018: een tijdelijke busroute en een pont voor fietsers gaan van start.",
       "2019: de gemeenteraad kiest voor herstel in plaats van sloop.",
+      "2020: monteurs vervangen de verbindingen in vier werkfasen.",
       "3 september 2021: de brug gaat opnieuw open."
     ],
     "factual_boundaries": ["Alle personen, plaatsen en gebeurtenissen in deze fixture zijn fictief en vastgelegd in de goedgekeurde claims."]
@@ -26,14 +28,20 @@
     {"id": "c004", "text": "Tijdens het herstel verving de aannemer 64 verbindingen en bracht hij sensoren aan die vervorming meten.", "date": "2020-11-20", "status": "approved"},
     {"id": "c005", "text": "De brug heropende op 3 september 2021 voor fietsers, voetgangers, auto's en stadsbussen.", "date": "2021-09-03", "status": "approved"},
     {"id": "c006", "text": "Na de heropening publiceert de gemeente elk kwartaal de meetresultaten van de sensoren.", "date": "2021-10-01", "status": "approved"}
+    ,{"id": "c007", "text": "Tijdens de sluiting reden stadsbussen via een omleiding van zes kilometer en voer overdag een tijdelijke pont voor fietsers en voetgangers.", "date": "2018-02-13", "status": "approved"}
+    ,{"id": "c008", "text": "Ingenieurs onderzochten 112 lasverbindingen met ultrasone metingen en vonden bij 18 verbindingen aanvullende gebreken.", "date": "2018-06-04", "status": "approved"}
+    ,{"id": "c009", "text": "De gemeenteraad verwierp sloop omdat vervanging volgens de raming 31 miljoen euro zou kosten en twee jaar langer zou duren.", "date": "2019-05-16", "status": "approved"}
+    ,{"id": "c010", "text": "Het herstel verliep in vier fasen, zodat monteurs telkens één deel van de constructie konden ontlasten en vervangen.", "date": "2020-03-02", "status": "approved"}
+    ,{"id": "c011", "text": "Voor de heropening belastten ingenieurs de brug met twaalf vrachtwagens en bleven de gemeten vervormingen binnen de vastgestelde grens.", "date": "2021-08-20", "status": "approved"}
+    ,{"id": "c012", "text": "De sensoren registreren elke minuut de vervorming en sturen bij een overschrijding automatisch een melding naar de gemeentelijke brugbeheerder.", "date": "2021-09-03", "status": "approved"}
   ],
   "story_architecture": {
     "version": 1,
     "status": "final",
     "beats": [
-      {"beat_id": "beat_01", "what_happens": "De brug sluit na de inspectie.", "viewer_learns": "Scheuren maken direct ingrijpen nodig.", "why_here": "Concrete opening.", "curiosity_forward": "Wat veroorzaakte de schade?", "claim_ids": ["c001"], "high_value_details": ["12 februari 2018"]},
-      {"beat_id": "beat_02", "what_happens": "Onderzoek en gemeentelijk besluit bepalen de aanpak.", "viewer_learns": "De lasverbindingen worden hersteld.", "why_here": "Verklaart oorzaak en keuze.", "curiosity_forward": "Werkt het herstel?", "claim_ids": ["c002", "c003", "c004"], "high_value_details": ["64 verbindingen", "18 miljoen euro"]},
-      {"beat_id": "beat_03", "what_happens": "De brug heropent met permanente meting.", "viewer_learns": "Openbaarheid van meetgegevens wordt onderdeel van toezicht.", "why_here": "Concreet gevolg.", "curiosity_forward": "", "claim_ids": ["c005", "c006"], "high_value_details": ["3 september 2021"]}
+      {"beat_id": "beat_01", "what_happens": "De brug sluit en tijdelijke routes gaan van start.", "viewer_learns": "Scheuren maken direct ingrijpen en een omleiding nodig.", "why_here": "Concrete opening.", "curiosity_forward": "Wat veroorzaakte de schade?", "claim_ids": ["c001", "c007"], "high_value_details": ["12 februari 2018", "omleiding van zes kilometer"]},
+      {"beat_id": "beat_02", "what_happens": "Onderzoek en gemeentelijk besluit bepalen de aanpak.", "viewer_learns": "Metingen tonen de omvang; herstel is goedkoper en sneller dan sloop.", "why_here": "Verklaart oorzaak en keuze.", "curiosity_forward": "Hoe wordt de brug hersteld?", "claim_ids": ["c002", "c003", "c008", "c009"], "high_value_details": ["112 onderzochte verbindingen", "18 miljoen euro"]},
+      {"beat_id": "beat_03", "what_happens": "Herstel, belastingproef en permanente meting maken heropening mogelijk.", "viewer_learns": "De verbindingen worden gefaseerd vervangen en daarna continu gemeten.", "why_here": "Concreet gevolg.", "curiosity_forward": "", "claim_ids": ["c004", "c005", "c006", "c010", "c011", "c012"], "high_value_details": ["64 verbindingen", "twaalf vrachtwagens", "3 september 2021"]}
     ],
     "research_utilization_audit": [],
     "unused_high_value_details": [],

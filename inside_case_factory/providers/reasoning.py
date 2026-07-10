@@ -391,6 +391,8 @@ class OpenAIReasoningProvider(ReasoningProvider):
                     "Keep claim_ids and beat_ids only in their structured section fields. Never put claim IDs, beat IDs, source markers, citations, or parenthetical metadata in narration or section text.",
                     "Keep every spoken sentence at 32 words or fewer. Split complex clauses into natural voice-over sentences.",
                     "Before returning, proofread the Dutch aloud for idiom, agreement, tense consistency, compound number spelling, concrete wording, and natural transitions. Replace literal, bureaucratic, or generic moralizing phrases.",
+                    "Do not use rhetorical questions. State the supported uncertainty directly and concretely.",
+                    "Do not end with a broad lesson, social value, new standard, restored trust, or claimed effect unless an approved claim explicitly supports it. End on the last concrete supported consequence.",
                     "Tell one continuous unfolding story rather than listing research categories. Every paragraph must either change the situation, complicate an explanation, reveal a consequence, or create a specific forward question.",
                     "Use the story architecture beats in order and perform its research-utilization audit; do not omit high-value supported details without reason.",
                 ],
