@@ -76,6 +76,7 @@ DUTCH_OVERDRAMATIC_PHRASES = (
     "het verhaal neemt een onverwachte wending",
     "dit markeerde het begin van een complexe periode", "maar liefst", "ging eindelijk opnieuw open",
     "toont aan dat", "hand in hand", "een nieuwe standaard", "markeert een keerpunt",
+    "dit traject illustreert hoe", "een nieuwe laag veiligheid", "veilig en duurzaam infrastructuurbeheer",
     "what happened next", "no one could have imagined", "the world was turned upside down",
     "behind the scenes", "nothing was what it seemed", "a dark secret",
     "the truth would change everything", "the beginning of the end", "a shocking twist",
@@ -171,7 +172,8 @@ DUTCH_NUMBER_WORDS = _dutch_number_words()
 def _concrete_numbers(text: str, *, dutch: bool) -> set[int]:
     values = {int(value.replace(".", "")) for value in re.findall(r"\b\d[\d.]*\b", text)}
     if dutch:
-        for token in re.findall(r"\b[a-zà-öø-ÿ]+\b", text.casefold()):
+        without_spoken_years = re.sub(r"\btwee\s*duizend(?:\s*[a-zë]+)?\b", " ", text.casefold())
+        for token in re.findall(r"\b[a-zà-öø-ÿ]+\b", without_spoken_years):
             normalized = token.replace("ë", "e")
             if normalized in DUTCH_NUMBER_WORDS and DUTCH_NUMBER_WORDS[normalized] >= 2:
                 values.add(DUTCH_NUMBER_WORDS[normalized])
@@ -289,6 +291,11 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     wpm = float(config.get("words_per_minute", 125))
     tolerance = float(config.get("duration_tolerance", config.get("duration_tolerance_minutes", 1.0)))
     text = str(script.get("narration", ""))
+    section_text = "\n\n".join(
+        str(section.get("text", "")).strip() for section in script.get("sections", [])
+        if isinstance(section, dict) and str(section.get("text", "")).strip()
+    )
+    narration_section_mismatch = bool(section_text and re.sub(r"\s+", " ", section_text).strip() != re.sub(r"\s+", " ", text).strip())
     word_count = len(text.split())
     duration = word_count / wpm if wpm else 0.0
     target_minutes = float(script.get("target_duration_minutes", 12) or 12)
@@ -323,7 +330,7 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     if _is_dutch(language):
         narrated_years.update(_dutch_years(text))
     unsupported_years = sorted(narrated_years - approved_years) if approved_years else []
-    approved_text = " ".join(f"{claim.get('date', '')} {claim.get('text', '')}" for claim in claims if isinstance(claim, dict))
+    approved_text = " ".join(str(claim.get("text", "")) for claim in claims if isinstance(claim, dict))
     unsupported_numbers = sorted(_concrete_numbers(text, dutch=_is_dutch(language)) - _concrete_numbers(approved_text, dutch=_is_dutch(language)))
     approved_names = _internal_capitalized_names(approved_text)
     unsupported_names = sorted(_internal_capitalized_names(text) - approved_names)
@@ -345,6 +352,7 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
         failures.append(f"Verhaalonderdelen ontbreken: {len(missing_beats)} beat IDs missing.")
     if unknown_beats: failures.append("Unknown script beat IDs are present.")
     if duplicate_beats: failures.append("Duplicate script beat IDs are present.")
+    if narration_section_mismatch: failures.append("Narration does not exactly match the ordered section text.")
     if unused_required: failures.append("Belangrijke onderzoeksdetails ontbreken: required details are unused.")
     if style["unsupported_citation_ids"]: failures.append("Unsupported claim IDs are cited.")
     if narration_metadata: failures.append("Narration contains claim IDs or metadata.")
@@ -364,6 +372,7 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
         "unsupported_narrated_years": unsupported_years,
         "unsupported_narrated_numbers": unsupported_numbers, "unsupported_narrated_names": unsupported_names,
         "narration_metadata": narration_metadata,
+        "narration_section_mismatch": narration_section_mismatch,
         "factual_lock_violations": factual_lock_violations,
         "unused_optional_research_details": architecture.get("unused_high_value_details", []),
         "banned_style_phrases": style["style_violations"], "repetitive_transitions": style.get("repetitive_transition_count", 0),

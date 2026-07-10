@@ -46,6 +46,15 @@ def build_script_repair_plan(script: dict[str, Any], report: dict[str, Any]) -> 
             if len(re.findall(r"\b[\w'-]+\b", sentence)) > 32:
                 issues.append({"category": "long_sentence", "value": len(sentence.split()), "passages": [sentence],
                                "reason": "Sentence exceeds 32 spoken words.", "action": "Split it without changing facts."})
+    if report.get("narration_section_mismatch"):
+        section_sentences = {
+            sentence for section in script.get("sections", []) if isinstance(section, dict)
+            for sentence in _sentences(str(section.get("text", "")))
+        }
+        unmatched = [sentence for sentence in sentences if sentence not in section_sentences]
+        issues.append({"category": "narration_section_mismatch", "value": "narration_vs_sections",
+                       "passages": unmatched, "reason": "Narration differs from the ordered section text.",
+                       "action": "Make narration exactly equal to the ordered section text; do not add or omit passages."})
     if any("rhetorical questions" in reason.casefold() for reason in report.get("language_rejection_reasons", [])):
         for sentence in sentences:
             if sentence.endswith("?"):

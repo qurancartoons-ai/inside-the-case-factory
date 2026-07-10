@@ -20,7 +20,7 @@ from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, Rea
 class ScriptAcceptanceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.architecture = {"version": 1, "status": "final", "beats": [{"beat_id": f"beat_{i:02}", "what_happens": "event", "viewer_learns": "fact", "why_here": "order", "curiosity_forward": "next", "claim_ids": [], "high_value_details": []} for i in range(1, 4)], "research_utilization_audit": [], "unused_high_value_details": [], "coverage_gaps": [], "final_reflection": "reflection", "closing_requirements": [], "supplementary_metadata": {}}
-        self.claims = [{"id": "c001", "text": "Goedgekeurde testfeiten: 1998, 2001, 2004, 2012, twee, drie, acht en zestig.", "date": "2012-03-12"}]
+        self.claims = [{"id": "c001", "text": "Goedgekeurde testfeiten: 1998, 2001, 2004, 2012, twee, drie, acht, twaalf en zestig.", "date": "2012-03-12"}]
 
     def script(self, words: int, beat_ids: list[str]) -> dict[str, object]:
         return {"narration": "word " * words, "target_duration_minutes": 12, "sections": [{"beat_ids": beat_ids}]}
@@ -88,6 +88,27 @@ class ScriptAcceptanceTests(unittest.TestCase):
         self.assertEqual(report["unsupported_narrated_numbers"], [13])
         self.assertEqual(report["unsupported_narrated_names"], ["Rotterdam"])
         self.assertEqual({item["category"] for item in report["factual_lock_violations"]}, {"unsupported_name", "unsupported_number"})
+
+    def test_date_components_do_not_authorize_unrelated_numbers(self) -> None:
+        self.claims = [{"id": "c001", "date": "2021-10-01", "text": "De sensoren registreren elke minuut de vervorming."}]
+        report = self.language_report("De sensoren registreren de vervorming tien keer per uur.")
+        self.assertFalse(report["pass"])
+        self.assertEqual(report["unsupported_narrated_numbers"], [10])
+
+    def test_narration_must_exactly_match_ordered_section_text(self) -> None:
+        script = {
+            "narration": "De brug opent. Dit traject illustreert hoe techniek alles oplost.",
+            "language": "Nederlands", "target_duration_minutes": 1,
+            "sections": [{"beat_ids": ["beat_01", "beat_02", "beat_03"], "text": "De brug opent."}],
+        }
+        config = {"minimum_words": 1, "maximum_words": 100, "duration_tolerance": 10}
+        report = validate_script(script, self.claims, self.architecture, config)
+        self.assertFalse(report["pass"])
+        self.assertTrue(report["narration_section_mismatch"])
+        self.assertIn("dit traject illustreert hoe", report["overdramatic_phrases"])
+        plan = build_script_repair_plan(script, report)
+        issue = next(item for item in plan["issues"] if item["category"] == "narration_section_mismatch")
+        self.assertEqual(issue["passages"], ["Dit traject illustreert hoe techniek alles oplost."])
 
     def test_critic_plan_names_exact_passage_and_forbids_new_facts(self) -> None:
         self.claims = [{"id": "c001", "text": "Het herstel begon in 2020.", "date": "2020-01-01"}]
