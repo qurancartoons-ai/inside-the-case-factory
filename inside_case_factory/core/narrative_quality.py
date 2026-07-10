@@ -191,6 +191,26 @@ def _internal_capitalized_names(text: str) -> set[str]:
     return names
 
 
+def factual_lock_issues(text: str, claims: list[dict[str, Any]], language: object = "Nederlands") -> dict[str, list[Any]]:
+    approved_claim_text = " ".join(str(claim.get("text", "")) for claim in claims if isinstance(claim, dict))
+    approved_year_text = " ".join(
+        f"{claim.get('date', '')} {claim.get('text', '')}" for claim in claims if isinstance(claim, dict)
+    )
+    approved_years = {int(item) for item in re.findall(r"\b(?:19|20)\d{2}\b", approved_year_text)}
+    narrated_years = {int(item) for item in re.findall(r"\b(?:19|20)\d{2}\b", text)}
+    if _is_dutch(language):
+        narrated_years.update(_dutch_years(text))
+    return {
+        "unsupported_years": sorted(narrated_years - approved_years) if approved_years else [],
+        "unsupported_numbers": sorted(
+            _concrete_numbers(text, dutch=_is_dutch(language))
+            - _concrete_numbers(approved_claim_text, dutch=_is_dutch(language))
+        ),
+        "unsupported_names": sorted(_internal_capitalized_names(text) - _internal_capitalized_names(approved_claim_text)),
+        "metadata": sorted(set(re.findall(r"\b(?:c\d{3}|beat_\d{2}|source[_ -]?\d+|bron[_ -]?\d+)\b", text, re.I))),
+    }
+
+
 def analyze_dutch_language(text: str) -> dict[str, Any]:
     lower = text.casefold()
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
@@ -310,7 +330,6 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     duplicate_beats = sorted({item for item in returned if returned.count(item) > 1})
     claim_ids = {str(claim.get("id")) for claim in claims}
     cited = set(re.findall(r"c\d{3}", text))
-    narration_metadata = sorted(set(re.findall(r"\b(?:c\d{3}|beat_\d{2}|source[_ -]?\d+|bron[_ -]?\d+)\b", text, re.I)))
     required_details = [str(item.get("detail")) for item in architecture.get("research_utilization_audit", []) if isinstance(item, dict) and item.get("required") is True]
     unused_required = [detail for detail in required_details if not any(token.casefold() in text.casefold() for token in detail.split() if len(token) > 5)]
     style = check_script(text, claims, architecture)
@@ -321,19 +340,11 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
         "spoken_language_issues": [], "long_sentence_count": 0, "connector_repetition": [],
         "language_rejection_reasons": [],
     }
-    approved_years = {
-        int(match.group(0))
-        for claim in claims if isinstance(claim, dict)
-        for match in re.finditer(r"\b(?:19|20)\d{2}\b", f"{claim.get('date', '')} {claim.get('text', '')}")
-    }
-    narrated_years = {int(item) for item in re.findall(r"\b(?:19|20)\d{2}\b", text)}
-    if _is_dutch(language):
-        narrated_years.update(_dutch_years(text))
-    unsupported_years = sorted(narrated_years - approved_years) if approved_years else []
-    approved_text = " ".join(str(claim.get("text", "")) for claim in claims if isinstance(claim, dict))
-    unsupported_numbers = sorted(_concrete_numbers(text, dutch=_is_dutch(language)) - _concrete_numbers(approved_text, dutch=_is_dutch(language)))
-    approved_names = _internal_capitalized_names(approved_text)
-    unsupported_names = sorted(_internal_capitalized_names(text) - approved_names)
+    factual = factual_lock_issues(text, claims, language)
+    unsupported_years = factual["unsupported_years"]
+    unsupported_numbers = factual["unsupported_numbers"]
+    unsupported_names = factual["unsupported_names"]
+    narration_metadata = factual["metadata"]
     factual_lock_violations: list[dict[str, Any]] = []
     for sentence in _sentences(text):
         sentence_years = ({int(item) for item in re.findall(r"\b(?:19|20)\d{2}\b", sentence)} | (_dutch_years(sentence) if _is_dutch(language) else set()))

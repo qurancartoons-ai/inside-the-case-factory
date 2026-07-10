@@ -11,7 +11,7 @@ from inside_case_factory.core.production import (
     _promote_candidate,
     _write_generation_failure,
 )
-from inside_case_factory.core.script_repair import build_script_repair_plan
+from inside_case_factory.core.script_repair import apply_surgical_replacements, build_script_repair_plan
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.core.project import create_project
 from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, ReasoningConfig, ReasoningProviderError
@@ -106,19 +106,57 @@ class ScriptAcceptanceTests(unittest.TestCase):
         self.assertFalse(report["pass"])
         self.assertTrue(report["narration_section_mismatch"])
         self.assertIn("dit traject illustreert hoe", report["overdramatic_phrases"])
-        plan = build_script_repair_plan(script, report)
-        issue = next(item for item in plan["issues"] if item["category"] == "narration_section_mismatch")
-        self.assertEqual(issue["passages"], ["Dit traject illustreert hoe techniek alles oplost."])
+        plan = build_script_repair_plan(script, report, self.claims)
+        repair = next(item for item in plan["repairs"] if item["original_passage"] == "Dit traject illustreert hoe techniek alles oplost.")
+        self.assertTrue(any("Narration differs" in error for error in repair["validator_errors"]))
+        self.assertTrue(any("AI cliché" in error for error in repair["validator_errors"]))
 
     def test_critic_plan_names_exact_passage_and_forbids_new_facts(self) -> None:
         self.claims = [{"id": "c001", "text": "Het herstel begon in 2020.", "date": "2020-01-01"}]
-        script = {"narration": "Het herstel begint in tweeduizendtachtig."}
+        script = {"narration": "Het herstel begint in tweeduizendtachtig.",
+                  "sections": [{"claim_ids": ["c001"], "text": "Het herstel begint in tweeduizendtachtig."}]}
         report = self.language_report(script["narration"])
-        plan = build_script_repair_plan(script, report)
-        issue = next(item for item in plan["issues"] if item["category"] == "unsupported_year")
-        self.assertEqual(issue["value"], 2080)
-        self.assertEqual(issue["passages"], [script["narration"]])
-        self.assertTrue(any("Do not introduce facts" in rule for rule in plan["constraints"]))
+        plan = build_script_repair_plan(script, report, self.claims)
+        repair = plan["repairs"][0]
+        self.assertEqual(repair["original_passage"], script["narration"])
+        self.assertIn("unsupported_year: 2080", repair["validator_errors"])
+        self.assertEqual(repair["approved_claims"][0]["id"], "c001")
+
+    def test_surgical_replacement_changes_only_exact_target(self) -> None:
+        claims = [{"id": "c001", "text": "Het herstel begon in 2020.", "date": "2020-01-01"}]
+        script = {"narration": "Eerste zin blijft. Het herstel begon in 2080. Laatste zin blijft.",
+                  "sections": [{"text": "Eerste zin blijft. Het herstel begon in 2080. Laatste zin blijft."}]}
+        plan = {"repairs": [{"target_id": "repair_01", "original_passage": "Het herstel begon in 2080."}]}
+        response = {"replacements": [{"target_id": "repair_01", "replacement_passage": "Het herstel begon in 2020."}]}
+        repaired, errors = apply_surgical_replacements(script, plan, response, claims, "Nederlands")
+        self.assertEqual(errors, [])
+        self.assertEqual(repaired["narration"], "Eerste zin blijft. Het herstel begon in 2020. Laatste zin blijft.")
+        self.assertEqual(repaired["sections"][0]["text"], repaired["narration"])
+        self.assertEqual(script["narration"], "Eerste zin blijft. Het herstel begon in 2080. Laatste zin blijft.")
+
+    def test_surgical_replacement_rejects_unsupported_number_year_and_drift_atomically(self) -> None:
+        claims = [{"id": "c001", "text": "De sensoren meten elke minuut vanaf 2021.", "date": "2021-01-01"}]
+        script = {"narration": "De sensoren meten elke minuut.", "sections": [{"text": "De sensoren meten elke minuut."}]}
+        plan = {"repairs": [{"target_id": "repair_01", "original_passage": script["narration"]}]}
+        for replacement in ("De sensoren meten tien keer per uur.", "De sensoren meten elke minuut vanaf 2080."):
+            repaired, errors = apply_surgical_replacements(
+                script, plan, {"replacements": [{"target_id": "repair_01", "replacement_passage": replacement}]},
+                claims, "Nederlands",
+            )
+            self.assertIsNone(repaired)
+            self.assertTrue(any("factual lock" in error for error in errors))
+            self.assertEqual(script["narration"], "De sensoren meten elke minuut.")
+
+    def test_ai_conclusion_can_be_removed_without_touching_prior_text(self) -> None:
+        script = {"narration": "De gemeente publiceert elk kwartaal de metingen. Dit traject illustreert hoe techniek tot duurzaam beheer leidt.",
+                  "sections": [{"text": "De gemeente publiceert elk kwartaal de metingen."}]}
+        plan = {"repairs": [{"target_id": "repair_01", "original_passage": "Dit traject illustreert hoe techniek tot duurzaam beheer leidt."}]}
+        repaired, errors = apply_surgical_replacements(
+            script, plan, {"replacements": [{"target_id": "repair_01", "replacement_passage": ""}]}, [], "Nederlands",
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(repaired["narration"], "De gemeente publiceert elk kwartaal de metingen. ")
+        self.assertEqual(repaired["sections"][0]["text"], "De gemeente publiceert elk kwartaal de metingen.")
 
     def test_any_rhetorical_question_and_hand_in_hand_cliche_fail(self) -> None:
         report = self.language_report("Wat veroorzaakte deze schade eigenlijk? Daarna gaan veiligheid en openheid hand in hand.")
@@ -235,10 +273,10 @@ class ScriptAcceptanceTests(unittest.TestCase):
             available = True
             calls = 0
 
-            def rewrite_script(self, *args, repair_plan=None, **kwargs):
+            def rewrite_script_passages(self, *args, **kwargs):
                 self.calls += 1
-                self.repair_plan = args[4] if len(args) > 4 else repair_plan
-                return {"candidate": self.calls + 1}
+                self.repair_plan = args[1]
+                return {"replacements": [{"target_id": "repair_01", "replacement_passage": "good"}]}
 
         reports = [
             {"pass": False, "failure_reasons": ["too short"]},
@@ -247,16 +285,18 @@ class ScriptAcceptanceTests(unittest.TestCase):
         provider = Provider()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / "manifests").mkdir()
-            with patch("inside_case_factory.core.script_repair.validate_script", side_effect=reports) as validator:
+            plan = {"repairs": [{"target_id": "repair_01", "original_passage": "bad"}]}
+            with patch("inside_case_factory.core.script_repair.validate_script", side_effect=reports) as validator, \
+                 patch("inside_case_factory.core.script_repair.build_script_repair_plan", return_value=plan):
                 accepted, attempts = _generate_validated_script_candidates(
-                    root, {"candidate": 1}, provider, [], {}, {"maximum_revision_attempts": 99},
+                    root, {"narration": "bad", "sections": []}, provider, [], {}, {"maximum_revision_attempts": 99},
                     {}, {}, {}, 3, "Nederlands",
                 )
-            self.assertEqual(accepted, {"candidate": 2})
+            self.assertEqual(accepted["narration"], "good")
             self.assertEqual(len(attempts), 2)
             self.assertEqual(validator.call_count, 2)
             self.assertEqual(provider.calls, 1)
-            self.assertEqual(provider.repair_plan["source_failure_reasons"], ["too short"])
+            self.assertEqual(provider.repair_plan, plan)
             self.assertEqual(read_json(root / "manifests/script.json")["accepted_candidate_id"], 2)
 
     def test_bounded_retry_never_exceeds_three_attempts(self) -> None:
@@ -264,17 +304,19 @@ class ScriptAcceptanceTests(unittest.TestCase):
             available = True
             calls = 0
 
-            def rewrite_script(self, *args, **kwargs):
+            def rewrite_script_passages(self, *args, **kwargs):
                 self.calls += 1
-                return {"candidate": self.calls + 1}
+                return {"replacements": [{"target_id": "repair_01", "replacement_passage": "still bad"}]}
 
         rejection = {"pass": False, "failure_reasons": ["validator rejection"]}
         provider = Provider()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / "manifests").mkdir()
-            with patch("inside_case_factory.core.script_repair.validate_script", return_value=rejection) as validator:
+            plan = {"repairs": [{"target_id": "repair_01", "original_passage": "bad"}]}
+            with patch("inside_case_factory.core.script_repair.validate_script", return_value=rejection) as validator, \
+                 patch("inside_case_factory.core.script_repair.build_script_repair_plan", return_value=plan):
                 accepted, attempts = _generate_validated_script_candidates(
-                    root, {"candidate": 1}, provider, [], {}, {"maximum_revision_attempts": 50},
+                    root, {"narration": "bad", "sections": []}, provider, [], {}, {"maximum_revision_attempts": 50},
                     {}, {}, {}, 3, "Nederlands",
                 )
             self.assertIsNone(accepted)
@@ -289,7 +331,7 @@ class ScriptAcceptanceTests(unittest.TestCase):
             available = True
             calls = 0
 
-            def rewrite_script(self, *args, **kwargs):
+            def rewrite_script_passages(self, *args, **kwargs):
                 self.calls += 1
                 return {}
 
@@ -304,6 +346,33 @@ class ScriptAcceptanceTests(unittest.TestCase):
             self.assertEqual(len(attempts), 1)
             self.assertEqual(provider.calls, 0)
 
+    def test_replacement_with_new_validator_error_keeps_previous_candidate_intact(self) -> None:
+        class Provider:
+            available = True
+            calls = 0
+
+            def rewrite_script_passages(self, *args, **kwargs):
+                self.calls += 1
+                return {"replacements": [{"target_id": "repair_01", "replacement_passage": "changed"}]}
+
+        old_report = {"pass": False, "failure_reasons": ["old error"]}
+        new_report = {"pass": False, "failure_reasons": ["old error", "new error"]}
+        plan = {"repairs": [{"target_id": "repair_01", "original_passage": "bad"}]}
+        provider = Provider()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "manifests").mkdir()
+            with patch("inside_case_factory.core.script_repair.validate_script", side_effect=[old_report, new_report, new_report]) as validator, \
+                 patch("inside_case_factory.core.script_repair.build_script_repair_plan", return_value=plan):
+                accepted, attempts = _generate_validated_script_candidates(
+                    root, {"narration": "bad", "sections": []}, provider, [], {},
+                    {"maximum_revision_attempts": 2}, {}, {}, {}, 3, "Nederlands",
+                )
+            self.assertIsNone(accepted)
+            self.assertEqual(provider.calls, 2)
+            self.assertEqual(read_json(root / "manifests/script_candidate_2.json")["narration"], "bad")
+            rejection = read_json(root / "manifests/script_candidate_2_replacement_rejection.json")
+            self.assertEqual(rejection["new_failure_reasons"], ["new error"])
+
     def test_rewriter_preserves_paid_confirmation_and_budget_gates(self) -> None:
         config = ReasoningConfig(enabled=True, dry_run=False, require_explicit_confirmation=True,
                                  per_project_spending_limit_usd=0.25)
@@ -311,13 +380,13 @@ class ScriptAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / "manifests").mkdir()
             with self.assertRaisesRegex(ReasoningProviderError, "Paid API call not confirmed"):
-                provider.rewrite_script(root, {}, [], {}, {"issues": []}, {}, {}, {}, 3, "Nederlands")
+                provider.rewrite_script_passages(root, {"repairs": []}, 3, "Nederlands")
             write_json(root / "manifests/paid_api_confirmation.json", {"confirmed": True})
             write_json(root / "manifests/reasoning_usage.json", {"token_based_estimated_total_cost_usd": 0.30})
             provider.config = ReasoningConfig(enabled=True, dry_run=False, require_explicit_confirmation=True,
                                               per_project_spending_limit_usd=0.25)
             with self.assertRaisesRegex(ReasoningProviderError, "budget would be exceeded"):
-                provider.rewrite_script(root, {}, [], {}, {"issues": []}, {}, {}, {}, 3, "Nederlands")
+                provider.rewrite_script_passages(root, {"repairs": []}, 3, "Nederlands")
 
 
 if __name__ == "__main__":

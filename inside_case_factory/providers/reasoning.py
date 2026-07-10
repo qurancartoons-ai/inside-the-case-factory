@@ -110,21 +110,11 @@ class ReasoningProvider(ABC):
     ) -> dict[str, Any]:
         raise NotImplementedError
 
-    def rewrite_script(
-        self,
-        project_root: Path,
-        existing_script: dict[str, Any],
-        approved_claims: list[dict[str, Any]],
-        story_architecture: dict[str, Any],
-        repair_plan: dict[str, Any],
-        research_plan: dict[str, Any],
-        dossier: dict[str, Any],
-        narrative_outline: dict[str, Any],
-        target_duration_minutes: int,
-        language: str,
-        word_range: tuple[int, int] = (1500, 1700),
+    def rewrite_script_passages(
+        self, project_root: Path, repair_plan: dict[str, Any],
+        target_duration_minutes: int, language: str,
     ) -> dict[str, Any]:
-        raise NotImplementedError("This reasoning provider does not support targeted script rewriting.")
+        raise NotImplementedError("This reasoning provider does not support surgical passage rewriting.")
 
     @abstractmethod
     def generate_scenes(
@@ -413,42 +403,26 @@ class OpenAIReasoningProvider(ReasoningProvider):
         )
         return result
 
-    def rewrite_script(
-        self,
-        project_root: Path,
-        existing_script: dict[str, Any],
-        approved_claims: list[dict[str, Any]],
-        story_architecture: dict[str, Any],
-        repair_plan: dict[str, Any],
-        research_plan: dict[str, Any],
-        dossier: dict[str, Any],
-        narrative_outline: dict[str, Any],
-        target_duration_minutes: int,
-        language: str,
-        word_range: tuple[int, int] = (1500, 1700),
+    def rewrite_script_passages(
+        self, project_root: Path, repair_plan: dict[str, Any],
+        target_duration_minutes: int, language: str,
     ) -> dict[str, Any]:
-        minimum_words, maximum_words = word_range
         return self._json_response(
             project_root,
             "script",
-            "Repair the existing script surgically. Follow the deterministic repair plan exactly. Preserve all correct passages, facts, section mappings, and chronology. Do not regenerate the story, broaden the conclusion, or introduce any new name, date, year, number, event, allegation, motive, or interpretation.",
+            "Return one minimal replacement passage per target_id. Never return or rewrite a complete script. Change only the stated original passage, address only its concrete validator errors, and use only the approved claims embedded in that repair item.",
             {
-                "existing_script": existing_script,
-                "repair_plan": repair_plan,
-                "approved_claims": approved_claims,
-                "story_architecture": story_architecture,
+                "repairs": repair_plan.get("repairs", []),
                 "target_duration_minutes": target_duration_minutes,
                 "video_language": language,
-                "word_range": {"minimum": minimum_words, "maximum": maximum_words},
                 "rules": [
-                    "Change only passages named in repair_plan, plus the minimum adjacent grammar needed.",
-                    "Copy every unaffected passage verbatim.",
-                    "Use only concrete facts explicitly present in approved_claims.",
-                    "Keep claim_ids and beat_ids in structured fields and never in narration.",
-                    "Return the complete repaired script JSON, not a patch or commentary.",
+                    "Return exactly one target_id and replacement_passage for every supplied repair.",
+                    "Do not return narration, sections, metadata, commentary, or any non-target text.",
+                    "Do not introduce a name, date, year, number, event, or conclusion absent from that repair's approved_claims.",
+                    "An empty replacement_passage is allowed when the target must be removed.",
                 ],
             },
-            SCRIPT_SCHEMA,
+            SCRIPT_REPLACEMENTS_SCHEMA,
         )
 
     def generate_scenes(
@@ -1052,6 +1026,29 @@ SCRIPT_SCHEMA = {
                         "claim_ids": STRING_ARRAY,
                         "beat_ids": STRING_ARRAY,
                         "text": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+SCRIPT_REPLACEMENTS_SCHEMA = {
+    "name": "script_replacements",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["replacements"],
+        "properties": {
+            "replacements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["target_id", "replacement_passage"],
+                    "properties": {
+                        "target_id": {"type": "string"},
+                        "replacement_passage": {"type": "string"},
                     },
                 },
             },
