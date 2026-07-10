@@ -144,6 +144,51 @@ def _dutch_years(text: str) -> set[int]:
     return years
 
 
+def _dutch_number_words() -> dict[str, int]:
+    units = {"een": 1, "twee": 2, "drie": 3, "vier": 4, "vijf": 5, "zes": 6, "zeven": 7, "acht": 8, "negen": 9}
+    values = {
+        "nul": 0, **units, "tien": 10, "elf": 11, "twaalf": 12, "dertien": 13, "veertien": 14,
+        "vijftien": 15, "zestien": 16, "zeventien": 17, "achttien": 18, "negentien": 19,
+        "twintig": 20, "dertig": 30, "veertig": 40, "vijftig": 50, "zestig": 60,
+        "zeventig": 70, "tachtig": 80, "negentig": 90, "honderd": 100,
+    }
+    for tens_word, tens_value in list(values.items()):
+        if tens_value >= 20 and tens_value < 100 and tens_value % 10 == 0:
+            for unit_word, unit_value in units.items():
+                values[f"{unit_word}en{tens_word}"] = tens_value + unit_value
+    for value in range(101, 1000):
+        hundreds, remainder = divmod(value, 100)
+        prefix = "honderd" if hundreds == 1 else next(word for word, number in units.items() if number == hundreds) + "honderd"
+        remainder_word = next((word for word, number in values.items() if number == remainder), "")
+        if remainder_word:
+            values[prefix + remainder_word] = value
+    return values
+
+
+DUTCH_NUMBER_WORDS = _dutch_number_words()
+
+
+def _concrete_numbers(text: str, *, dutch: bool) -> set[int]:
+    values = {int(value.replace(".", "")) for value in re.findall(r"\b\d[\d.]*\b", text)}
+    if dutch:
+        for token in re.findall(r"\b[a-zà-öø-ÿ]+\b", text.casefold()):
+            normalized = token.replace("ë", "e")
+            if normalized in DUTCH_NUMBER_WORDS and DUTCH_NUMBER_WORDS[normalized] >= 2:
+                values.add(DUTCH_NUMBER_WORDS[normalized])
+    return values
+
+
+def _internal_capitalized_names(text: str) -> set[str]:
+    names: set[str] = set()
+    for sentence in _sentences(text):
+        words = list(re.finditer(r"\b[\wÀ-ÖØ-öø-ÿ'-]+\b", sentence))
+        for match in words[1:]:
+            value = match.group(0)
+            if value[:1].isupper() and len(value) > 1:
+                names.add(value)
+    return names
+
+
 def analyze_dutch_language(text: str) -> dict[str, Any]:
     lower = text.casefold()
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
@@ -258,6 +303,7 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     duplicate_beats = sorted({item for item in returned if returned.count(item) > 1})
     claim_ids = {str(claim.get("id")) for claim in claims}
     cited = set(re.findall(r"c\d{3}", text))
+    narration_metadata = sorted(set(re.findall(r"\b(?:c\d{3}|beat_\d{2}|source[_ -]?\d+|bron[_ -]?\d+)\b", text, re.I)))
     required_details = [str(item.get("detail")) for item in architecture.get("research_utilization_audit", []) if isinstance(item, dict) and item.get("required") is True]
     unused_required = [detail for detail in required_details if not any(token.casefold() in text.casefold() for token in detail.split() if len(token) > 5)]
     style = check_script(text, claims, architecture)
@@ -277,6 +323,19 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     if _is_dutch(language):
         narrated_years.update(_dutch_years(text))
     unsupported_years = sorted(narrated_years - approved_years) if approved_years else []
+    approved_text = " ".join(f"{claim.get('date', '')} {claim.get('text', '')}" for claim in claims if isinstance(claim, dict))
+    unsupported_numbers = sorted(_concrete_numbers(text, dutch=_is_dutch(language)) - _concrete_numbers(approved_text, dutch=_is_dutch(language)))
+    approved_names = _internal_capitalized_names(approved_text)
+    unsupported_names = sorted(_internal_capitalized_names(text) - approved_names)
+    factual_lock_violations: list[dict[str, Any]] = []
+    for sentence in _sentences(text):
+        sentence_years = ({int(item) for item in re.findall(r"\b(?:19|20)\d{2}\b", sentence)} | (_dutch_years(sentence) if _is_dutch(language) else set()))
+        for value in sorted(sentence_years & set(unsupported_years)):
+            factual_lock_violations.append({"category": "unsupported_year", "value": value, "passage": sentence})
+        for value in sorted(_concrete_numbers(sentence, dutch=_is_dutch(language)) & set(unsupported_numbers)):
+            factual_lock_violations.append({"category": "unsupported_number", "value": value, "passage": sentence})
+        for value in sorted(_internal_capitalized_names(sentence) & set(unsupported_names)):
+            factual_lock_violations.append({"category": "unsupported_name", "value": value, "passage": sentence})
     failures: list[str] = []
     if not architecture_report["valid"]: failures.append("Story architecture is malformed and cannot be used for script validation.")
     if word_count < minimum: failures.append(f"Script te kort: {word_count} woorden; minimum is {minimum}.")
@@ -288,8 +347,11 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     if duplicate_beats: failures.append("Duplicate script beat IDs are present.")
     if unused_required: failures.append("Belangrijke onderzoeksdetails ontbreken: required details are unused.")
     if style["unsupported_citation_ids"]: failures.append("Unsupported claim IDs are cited.")
+    if narration_metadata: failures.append("Narration contains claim IDs or metadata.")
     if style["style_violations"]: failures.append("Banned style phrases are present.")
     if unsupported_years: failures.append("Narration contains years not supported by approved claims.")
+    if unsupported_numbers: failures.append("Narration contains numbers not supported by approved claims.")
+    if unsupported_names: failures.append("Narration contains names not supported by approved claims.")
     failures.extend(style.get("repetitive_transition_count", 0) and ["Repetitive transitions exceed the quality threshold."] or [])
     failures.extend(dutch["language_rejection_reasons"])
     report = {
@@ -300,6 +362,9 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
         "unknown_beat_ids": unknown_beats, "duplicate_beat_ids": duplicate_beats,
         "unsupported_claim_ids": sorted(cited - claim_ids), "unused_required_research_details": unused_required,
         "unsupported_narrated_years": unsupported_years,
+        "unsupported_narrated_numbers": unsupported_numbers, "unsupported_narrated_names": unsupported_names,
+        "narration_metadata": narration_metadata,
+        "factual_lock_violations": factual_lock_violations,
         "unused_optional_research_details": architecture.get("unused_high_value_details", []),
         "banned_style_phrases": style["style_violations"], "repetitive_transitions": style.get("repetitive_transition_count", 0),
         "opening_quality": "pass" if not style["weak_opening"] else "fail", "ending_quality": "fail" if style["generic_conclusion"] else "pass",

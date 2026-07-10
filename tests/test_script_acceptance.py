@@ -11,15 +11,16 @@ from inside_case_factory.core.production import (
     _promote_candidate,
     _write_generation_failure,
 )
+from inside_case_factory.core.script_repair import build_script_repair_plan
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.core.project import create_project
-from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, ReasoningConfig
+from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, ReasoningConfig, ReasoningProviderError
 
 
 class ScriptAcceptanceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.architecture = {"version": 1, "status": "final", "beats": [{"beat_id": f"beat_{i:02}", "what_happens": "event", "viewer_learns": "fact", "why_here": "order", "curiosity_forward": "next", "claim_ids": [], "high_value_details": []} for i in range(1, 4)], "research_utilization_audit": [], "unused_high_value_details": [], "coverage_gaps": [], "final_reflection": "reflection", "closing_requirements": [], "supplementary_metadata": {}}
-        self.claims = [{"id": "c001"}]
+        self.claims = [{"id": "c001", "text": "Goedgekeurde testfeiten: 1998, 2001, 2004, 2012, twee, drie, acht en zestig.", "date": "2012-03-12"}]
 
     def script(self, words: int, beat_ids: list[str]) -> dict[str, object]:
         return {"narration": "word " * words, "target_duration_minutes": 12, "sections": [{"beat_ids": beat_ids}]}
@@ -79,6 +80,24 @@ class ScriptAcceptanceTests(unittest.TestCase):
         self.assertFalse(report["pass"])
         self.assertEqual(report["unsupported_narrated_years"], [2022, 2080])
         self.assertIn("Narration contains years not supported by approved claims.", report["failure_reasons"])
+
+    def test_wrong_number_and_new_name_are_factually_locked(self) -> None:
+        self.claims = [{"id": "c001", "text": "De brug in Utrecht kreeg twaalf sensoren."}]
+        report = self.language_report("De brug in Rotterdam kreeg dertien sensoren.")
+        self.assertFalse(report["pass"])
+        self.assertEqual(report["unsupported_narrated_numbers"], [13])
+        self.assertEqual(report["unsupported_narrated_names"], ["Rotterdam"])
+        self.assertEqual({item["category"] for item in report["factual_lock_violations"]}, {"unsupported_name", "unsupported_number"})
+
+    def test_critic_plan_names_exact_passage_and_forbids_new_facts(self) -> None:
+        self.claims = [{"id": "c001", "text": "Het herstel begon in 2020.", "date": "2020-01-01"}]
+        script = {"narration": "Het herstel begint in tweeduizendtachtig."}
+        report = self.language_report(script["narration"])
+        plan = build_script_repair_plan(script, report)
+        issue = next(item for item in plan["issues"] if item["category"] == "unsupported_year")
+        self.assertEqual(issue["value"], 2080)
+        self.assertEqual(issue["passages"], [script["narration"]])
+        self.assertTrue(any("Do not introduce facts" in rule for rule in plan["constraints"]))
 
     def test_any_rhetorical_question_and_hand_in_hand_cliche_fail(self) -> None:
         report = self.language_report("Wat veroorzaakte deze schade eigenlijk? Daarna gaan veiligheid en openheid hand in hand.")
@@ -195,9 +214,9 @@ class ScriptAcceptanceTests(unittest.TestCase):
             available = True
             calls = 0
 
-            def write_script(self, *args, quality_report=None, **kwargs):
+            def rewrite_script(self, *args, repair_plan=None, **kwargs):
                 self.calls += 1
-                self.previous_report = quality_report
+                self.repair_plan = args[4] if len(args) > 4 else repair_plan
                 return {"candidate": self.calls + 1}
 
         reports = [
@@ -207,7 +226,7 @@ class ScriptAcceptanceTests(unittest.TestCase):
         provider = Provider()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / "manifests").mkdir()
-            with patch("inside_case_factory.core.production.validate_script", side_effect=reports) as validator:
+            with patch("inside_case_factory.core.script_repair.validate_script", side_effect=reports) as validator:
                 accepted, attempts = _generate_validated_script_candidates(
                     root, {"candidate": 1}, provider, [], {}, {"maximum_revision_attempts": 99},
                     {}, {}, {}, 3, "Nederlands",
@@ -216,7 +235,7 @@ class ScriptAcceptanceTests(unittest.TestCase):
             self.assertEqual(len(attempts), 2)
             self.assertEqual(validator.call_count, 2)
             self.assertEqual(provider.calls, 1)
-            self.assertEqual(provider.previous_report["failure_reasons"], ["too short"])
+            self.assertEqual(provider.repair_plan["source_failure_reasons"], ["too short"])
             self.assertEqual(read_json(root / "manifests/script.json")["accepted_candidate_id"], 2)
 
     def test_bounded_retry_never_exceeds_three_attempts(self) -> None:
@@ -224,7 +243,7 @@ class ScriptAcceptanceTests(unittest.TestCase):
             available = True
             calls = 0
 
-            def write_script(self, *args, **kwargs):
+            def rewrite_script(self, *args, **kwargs):
                 self.calls += 1
                 return {"candidate": self.calls + 1}
 
@@ -232,7 +251,7 @@ class ScriptAcceptanceTests(unittest.TestCase):
         provider = Provider()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / "manifests").mkdir()
-            with patch("inside_case_factory.core.production.validate_script", return_value=rejection) as validator:
+            with patch("inside_case_factory.core.script_repair.validate_script", return_value=rejection) as validator:
                 accepted, attempts = _generate_validated_script_candidates(
                     root, {"candidate": 1}, provider, [], {}, {"maximum_revision_attempts": 50},
                     {}, {}, {}, 3, "Nederlands",
@@ -241,26 +260,43 @@ class ScriptAcceptanceTests(unittest.TestCase):
             self.assertEqual(len(attempts), 3)
             self.assertEqual(validator.call_count, 3)
             self.assertEqual(provider.calls, 2)
+            self.assertFalse((root / "manifests/script.json").exists())
+            self.assertFalse((root / "manifests/accepted_script_artifact.json").exists())
 
     def test_bounded_retry_requires_real_validator_reasons(self) -> None:
         class Provider:
             available = True
             calls = 0
 
-            def write_script(self, *args, **kwargs):
+            def rewrite_script(self, *args, **kwargs):
                 self.calls += 1
                 return {}
 
         provider = Provider()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / "manifests").mkdir()
-            with patch("inside_case_factory.core.production.validate_script", return_value={"pass": False, "failure_reasons": []}):
+            with patch("inside_case_factory.core.script_repair.validate_script", return_value={"pass": False, "failure_reasons": []}):
                 accepted, attempts = _generate_validated_script_candidates(
                     root, {}, provider, [], {}, {"maximum_revision_attempts": 2}, {}, {}, {}, 3, "Nederlands",
                 )
             self.assertIsNone(accepted)
             self.assertEqual(len(attempts), 1)
             self.assertEqual(provider.calls, 0)
+
+    def test_rewriter_preserves_paid_confirmation_and_budget_gates(self) -> None:
+        config = ReasoningConfig(enabled=True, dry_run=False, require_explicit_confirmation=True,
+                                 per_project_spending_limit_usd=0.25)
+        provider = OpenAIReasoningProvider(config, api_key="test-key")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "manifests").mkdir()
+            with self.assertRaisesRegex(ReasoningProviderError, "Paid API call not confirmed"):
+                provider.rewrite_script(root, {}, [], {}, {"issues": []}, {}, {}, {}, 3, "Nederlands")
+            write_json(root / "manifests/paid_api_confirmation.json", {"confirmed": True})
+            write_json(root / "manifests/reasoning_usage.json", {"token_based_estimated_total_cost_usd": 0.30})
+            provider.config = ReasoningConfig(enabled=True, dry_run=False, require_explicit_confirmation=True,
+                                              per_project_spending_limit_usd=0.25)
+            with self.assertRaisesRegex(ReasoningProviderError, "budget would be exceeded"):
+                provider.rewrite_script(root, {}, [], {}, {"issues": []}, {}, {}, {}, 3, "Nederlands")
 
 
 if __name__ == "__main__":

@@ -110,6 +110,22 @@ class ReasoningProvider(ABC):
     ) -> dict[str, Any]:
         raise NotImplementedError
 
+    def rewrite_script(
+        self,
+        project_root: Path,
+        existing_script: dict[str, Any],
+        approved_claims: list[dict[str, Any]],
+        story_architecture: dict[str, Any],
+        repair_plan: dict[str, Any],
+        research_plan: dict[str, Any],
+        dossier: dict[str, Any],
+        narrative_outline: dict[str, Any],
+        target_duration_minutes: int,
+        language: str,
+        word_range: tuple[int, int] = (1500, 1700),
+    ) -> dict[str, Any]:
+        raise NotImplementedError("This reasoning provider does not support targeted script rewriting.")
+
     @abstractmethod
     def generate_scenes(
         self,
@@ -367,12 +383,8 @@ class OpenAIReasoningProvider(ReasoningProvider):
             "script",
             f"Write the final {language} voice-over narration at {minimum_words}-{maximum_words} words using the complete story architecture. Map every narration section to one or more stable beat_ids and cover all required beats. Write natural spoken {language}, not formal prose or a translation from English. Use a restrained documentary tone, concrete language, varied sentence rhythm, and transitions that sound natural aloud. Avoid awkward inversions, inflated vocabulary, generic suspense clichés, invented emotion, repetitive rhetorical questions, and translated-English constructions. Every paragraph must add new factual or narrative value. Preserve all evidence provenance and attribution. " + mode_prompt(_project_content_mode(project_root)),
             {
-                "research_plan": research_plan,
-                "dossier": dossier,
-                "narrative_outline": narrative_outline,
                 "story_architecture": read_json(project_root / "manifests/story_architecture.json") if (project_root / "manifests/story_architecture.json").exists() else {},
                 "approved_claims": approved_claims,
-                "existing_script_draft": read_json(project_root / "manifests" / "script.json") if (project_root / "manifests" / "script.json").exists() else {},
                 "previous_quality_report": quality_report or {},
                 "target_duration_minutes": target_duration_minutes,
                 "video_language": language,
@@ -400,6 +412,44 @@ class OpenAIReasoningProvider(ReasoningProvider):
             SCRIPT_SCHEMA,
         )
         return result
+
+    def rewrite_script(
+        self,
+        project_root: Path,
+        existing_script: dict[str, Any],
+        approved_claims: list[dict[str, Any]],
+        story_architecture: dict[str, Any],
+        repair_plan: dict[str, Any],
+        research_plan: dict[str, Any],
+        dossier: dict[str, Any],
+        narrative_outline: dict[str, Any],
+        target_duration_minutes: int,
+        language: str,
+        word_range: tuple[int, int] = (1500, 1700),
+    ) -> dict[str, Any]:
+        minimum_words, maximum_words = word_range
+        return self._json_response(
+            project_root,
+            "script",
+            "Repair the existing script surgically. Follow the deterministic repair plan exactly. Preserve all correct passages, facts, section mappings, and chronology. Do not regenerate the story, broaden the conclusion, or introduce any new name, date, year, number, event, allegation, motive, or interpretation.",
+            {
+                "existing_script": existing_script,
+                "repair_plan": repair_plan,
+                "approved_claims": approved_claims,
+                "story_architecture": story_architecture,
+                "target_duration_minutes": target_duration_minutes,
+                "video_language": language,
+                "word_range": {"minimum": minimum_words, "maximum": maximum_words},
+                "rules": [
+                    "Change only passages named in repair_plan, plus the minimum adjacent grammar needed.",
+                    "Copy every unaffected passage verbatim.",
+                    "Use only concrete facts explicitly present in approved_claims.",
+                    "Keep claim_ids and beat_ids in structured fields and never in narration.",
+                    "Return the complete repaired script JSON, not a patch or commentary.",
+                ],
+            },
+            SCRIPT_SCHEMA,
+        )
 
     def generate_scenes(
         self,

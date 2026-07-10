@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from inside_case_factory.config.settings import Settings
-from inside_case_factory.core.narrative_quality import validate_script, validate_story_architecture
+from inside_case_factory.core.narrative_quality import validate_story_architecture
+from inside_case_factory.core.script_repair import run_writer_critic_rewriter
 from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, reasoning_config_from_settings
 from inside_case_factory.utils.files import read_json, write_json
 
@@ -73,27 +74,21 @@ def run_dutch_script_calibration(settings: Settings, output_root: Path, *, maxim
     })
 
     provider = OpenAIReasoningProvider(config)
-    attempts: list[dict[str, Any]] = []
-    quality: dict[str, Any] | None = None
-    script: dict[str, Any] | None = None
-    for attempt in range(1, maximum_attempts + 1):
-        script = provider.write_script(
-            output_root, fixture["research_plan"], fixture["dossier"], fixture["narrative_outline"],
-            fixture["approved_claims"], 3, "Nederlands", quality_report=quality,
-            word_range=(300, 500),
-        )
-        quality = validate_script(script, fixture["approved_claims"], architecture, CALIBRATION_LIMITS)
-        write_json(output_root / f"script_candidate_{attempt}.json", script)
-        write_json(output_root / f"script_candidate_{attempt}_quality_report.json", quality)
-        attempts.append({
-            "attempt": attempt, "overall_acceptance": quality["pass"],
-            "word_count": quality["word_count"], "rejection_reasons": quality["failure_reasons"],
-        })
-        if quality["pass"]:
-            break
-        if not quality.get("failure_reasons"):
-            break
-    assert script is not None and quality is not None
+    initial_script = provider.write_script(
+        output_root, fixture["research_plan"], fixture["dossier"], fixture["narrative_outline"],
+        fixture["approved_claims"], 3, "Nederlands", word_range=(300, 500),
+    )
+    script, raw_attempts = run_writer_critic_rewriter(
+        output_root, initial_script, provider, fixture["approved_claims"], architecture,
+        CALIBRATION_LIMITS, fixture["research_plan"], fixture["dossier"], fixture["narrative_outline"],
+        3, "Nederlands", maximum_model_calls=maximum_attempts, artifact_directory=output_root,
+    )
+    final_script = script or read_json(output_root / f"script_candidate_{len(raw_attempts)}.json")
+    quality = raw_attempts[-1][1]
+    attempts = [{
+        "attempt": attempt, "overall_acceptance": report["pass"],
+        "word_count": report["word_count"], "rejection_reasons": report["failure_reasons"],
+    } for attempt, report in raw_attempts]
     usage_manifest = read_json(manifests / "reasoning_usage.json")
     usage_calls = usage_manifest["calls"]
     usage = usage_calls[-1]
@@ -110,7 +105,7 @@ def run_dutch_script_calibration(settings: Settings, output_root: Path, *, maxim
         "attempts": attempts,
         "word_count": quality["word_count"],
         "estimated_narration_duration_minutes": quality["estimated_duration_minutes"],
-        "narration": script["narration"],
+        "narration": final_script["narration"],
         "dutch_language_quality": quality["dutch_language_quality"],
         "translated_english_patterns": quality["translated_english_patterns"],
         "unnatural_phrasing": quality["unnatural_phrasing"],
@@ -130,6 +125,6 @@ def run_dutch_script_calibration(settings: Settings, output_root: Path, *, maxim
         },
     }
     write_json(output_root / "calibration_report.json", report)
-    if quality["pass"]:
+    if script is not None:
         write_json(output_root / "best_valid_script_candidate.json", script)
     return report

@@ -23,7 +23,8 @@ from inside_case_factory.core.research import (
     save_manifest,
     tavily_config_from_settings,
 )
-from inside_case_factory.core.narrative_quality import validate_architecture_file, validate_script
+from inside_case_factory.core.narrative_quality import validate_architecture_file
+from inside_case_factory.core.script_repair import run_writer_critic_rewriter
 from inside_case_factory.providers.reasoning import (
     DisabledReasoningProvider,
     OpenAIReasoningProvider,
@@ -94,25 +95,13 @@ def _generate_validated_script_candidates(
     target_duration_minutes: int,
     language: str,
 ) -> tuple[dict[str, Any] | None, list[tuple[int, dict[str, Any]]]]:
-    """Validate immediately and retry only validator-rejected scripts, at most 3 calls total."""
     maximum_attempts = min(3, max(1, 1 + int(script_config.get("maximum_revision_attempts", 2))))
-    candidate = initial_script
-    attempts: list[tuple[int, dict[str, Any]]] = []
-    for candidate_id in range(1, maximum_attempts + 1):
-        quality = validate_script(candidate, claims, architecture, script_config)
-        attempts.append((candidate_id, quality))
-        _persist_candidate(project_root, candidate_id, candidate, quality)
-        if quality["pass"]:
-            _promote_candidate(project_root, candidate_id, candidate, quality)
-            return candidate, attempts
-        # A retry is allowed only in response to concrete validator failures.
-        if not quality.get("failure_reasons") or candidate_id == maximum_attempts or not provider.available:
-            break
-        candidate = provider.write_script(
-            project_root, research_plan, dossier, narrative_outline, claims,
-            target_duration_minutes, language, quality_report=quality,
-        )
-    return None, attempts
+    return run_writer_critic_rewriter(
+        project_root, initial_script, provider, claims, architecture, script_config,
+        research_plan, dossier, narrative_outline, target_duration_minutes, language,
+        maximum_model_calls=maximum_attempts, artifact_directory=project_root / "manifests",
+        promote=lambda candidate_id, script, report: _promote_candidate(project_root, candidate_id, script, report),
+    )
 
 
 PRODUCTION_STAGES = [

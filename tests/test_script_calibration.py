@@ -79,9 +79,10 @@ class ScriptCalibrationTests(unittest.TestCase):
                           "beat_ids": ["beat_01", "beat_02", "beat_03"], "text": "tekst"}],
         }
         bad = {**base, "narration": "Te kort."}
+        starts = "Vandaag Daarna Vervolgens Intussen Tegelijk Later Eerst Ook Hierdoor Daarom Bovendien Inmiddels Uiteindelijk Vervolgensertijd Aansluitend Nadien Verder Daarbij Daarnaast Vervolgensaanvullend Daarnaopnieuw Vervolgenslater Intussenook Tegelijkook Laterook Eerstook Hierdoorook Daaromook Inmiddelsook Uiteindelijkook".split()
         good_text = " ".join(
-            f"Fase nummer {number} toont dat de brug vandaag veilig open blijft."
-            for number in range(1, 31)
+            f"{start} blijft de brug tijdens gepland onderhoud veilig open voor verkeer."
+            for start in starts
         )
         good = {**base, "narration": good_text,
                 "sections": [{**base["sections"][0], "text": good_text}]}
@@ -110,9 +111,43 @@ class ScriptCalibrationTests(unittest.TestCase):
             self.assertEqual(report["attempts_used"], 2)
             self.assertFalse(report["attempts"][0]["overall_acceptance"])
             self.assertTrue(report["attempts"][1]["overall_acceptance"])
-            self.assertIn("previous_quality_report", requests[1]["input"][1]["content"])
+            self.assertNotIn('"dossier"', requests[0]["input"][1]["content"])
+            self.assertNotIn('"research_plan"', requests[0]["input"][1]["content"])
+            self.assertIn("repair_plan", requests[1]["input"][1]["content"])
+            self.assertIn("existing_script", requests[1]["input"][1]["content"])
+            self.assertNotIn('"dossier"', requests[1]["input"][1]["content"])
+            self.assertIn("Change only passages", requests[1]["input"][1]["content"])
             self.assertTrue((output / "best_valid_script_candidate.json").exists())
             self.assertEqual(len(read_json(output / "manifests/reasoning_usage.json")["calls"]), 2)
+
+    def test_three_rejected_calibration_candidates_never_create_final_artifact(self) -> None:
+        rejected = {
+            "version": 1, "title": "Brug", "target_duration_minutes": 3, "language": "Nederlands",
+            "status": "final", "generated_from": ["c001"], "opening_hook": "Kort.",
+            "narration": "Te kort.",
+            "sections": [{"id": "s1", "heading": "Brug", "claim_ids": ["c001"],
+                          "beat_ids": ["beat_01", "beat_02", "beat_03"], "text": "Te kort."}],
+        }
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return None
+            def read(self):
+                return json.dumps({"output_text": json.dumps(rejected), "usage": {
+                    "input_tokens": 10, "output_tokens": 10,
+                }}).encode()
+
+        settings = load_settings(ROOT)
+        with tempfile.TemporaryDirectory() as parent:
+            output = Path(parent) / "failed-calibration"
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "local-test-key"}):
+                with patch("inside_case_factory.providers.reasoning.urlopen", return_value=Response()) as api:
+                    report = run_dutch_script_calibration(settings, output, maximum_attempts=3)
+            self.assertEqual(api.call_count, 3)
+            self.assertEqual(report["attempts_used"], 3)
+            self.assertFalse(report["overall_acceptance"])
+            self.assertFalse((output / "best_valid_script_candidate.json").exists())
+            self.assertTrue((output / "script_candidate_3_quality_report.json").exists())
 
     def test_calibration_attempt_limit_and_budget_are_bounded(self) -> None:
         settings = load_settings(ROOT)
