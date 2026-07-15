@@ -26,7 +26,7 @@ from inside_case_factory.core.research import (
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.config.env import load_dotenv
 from inside_case_factory.config.settings import load_settings
-from inside_case_factory.pipeline.generator import _select_voice_provider
+from inside_case_factory.pipeline.generator import _approved_project, _select_voice_provider
 from inside_case_factory.pipeline.stages import describe_pipeline
 from inside_case_factory.providers.elevenlabs import (
     DEFAULT_MODEL_ID,
@@ -78,6 +78,45 @@ class ProjectScaffoldTests(unittest.TestCase):
         self.assertEqual(stages[0]["kind"], "topic")
         self.assertTrue(any(stage["requires_review"] for stage in stages))
         self.assertTrue(any(stage["expensive"] for stage in stages))
+
+    def test_factual_render_requires_script_scene_and_media_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = create_project(Path(tmp), "Approved Case")
+            write_json(project.root / "manifests" / "script.json", {
+                "version": 1, "title": "Approved Case", "status": "draft", "narration": "Feitelijke tekst."
+            })
+            write_json(project.root / "manifests" / "scenes.json", {
+                "version": 1, "scenes": [{"id": "s01", "narration": "Feitelijke tekst."}]
+            })
+
+            with self.assertRaisesRegex(RuntimeError, "script must be explicitly approved"):
+                _approved_project(project.root)
+
+    def test_factual_render_accepts_only_fully_reviewed_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = create_project(Path(tmp), "Approved Case")
+            write_json(project.root / "manifests" / "script.json", {
+                "version": 1, "title": "Approved Case", "status": "approved", "narration": "Feitelijke tekst."
+            })
+            workflow = read_json(project.root / "manifests" / "workflow.json")
+            workflow.update({"script_approved": True, "scenes_generated": True})
+            write_json(project.root / "manifests" / "workflow.json", workflow)
+            write_json(project.root / "manifests" / "scenes.json", {
+                "version": 1, "scenes": [{"id": "s01", "narration": "Feitelijke tekst."}]
+            })
+            write_json(project.root / "manifests" / "media_sources.json", {
+                "version": 1,
+                "assets": [
+                    {"id": "image-1", "review_status": "approved"},
+                    {"id": "image-2", "review_status": "rejected"},
+                ],
+            })
+
+            loaded_project, script, scenes = _approved_project(project.root)
+
+            self.assertEqual(loaded_project.slug, project.slug)
+            self.assertEqual(script["status"], "approved")
+            self.assertEqual([scene["id"] for scene in scenes], ["s01"])
 
     def test_voice_provider_falls_back_without_api_key(self) -> None:
         settings = load_settings(Path.cwd())

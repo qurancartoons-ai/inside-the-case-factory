@@ -149,6 +149,18 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_render_project(args: argparse.Namespace) -> int:
+    settings = load_settings(Path(args.root))
+    project_root = settings.projects_dir / args.project
+    result = generate_video_project(settings, args.project, existing_project_root=project_root)
+    _print_json({
+        "project": result.project_slug,
+        "final_video": str(result.final_video),
+        "duration_seconds": round(result.duration_seconds, 3),
+    })
+    return 0
+
+
 def _elevenlabs_provider_from_args(args: argparse.Namespace) -> ElevenLabsVoiceOverProvider:
     settings = load_settings(Path(args.root))
     voice_settings = settings.providers.get("voice_over", {})
@@ -346,6 +358,12 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("topic", help="Video topic or case working title")
     generate.add_argument("--slug", help="Optional project slug")
     generate.set_defaults(func=cmd_generate)
+
+    render_project = subparsers.add_parser(
+        "render-project", help="Render an existing approved factual project end to end"
+    )
+    render_project.add_argument("project", help="Approved project slug under the projects directory")
+    render_project.set_defaults(func=cmd_render_project)
 
     elevenlabs = subparsers.add_parser("elevenlabs", help="ElevenLabs TTS utilities")
     elevenlabs_subparsers = elevenlabs.add_subparsers(dest="elevenlabs_command", required=True)

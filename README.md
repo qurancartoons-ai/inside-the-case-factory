@@ -205,6 +205,14 @@ The project page shows the production plan, current activity, recent activity lo
 
 Real documentary projects use an approval-gated factual workflow. Do not use the legacy one-step sample generator for factual cases.
 
+Once the factual script and scenes are approved and every discovered media item has been reviewed (with at least one approved asset), render that same manifest-backed project without regenerating sample narration:
+
+```bash
+python3 -m inside_case_factory render-project PROJECT_SLUG
+```
+
+The command preserves the approved narration, uses the approved scene plan and media mappings, creates voice-over, subtitles, a render plan and the final MP4, then records `voiceover_generated`, `video_rendered`, and `render_complete` in `workflow.json`. It refuses to cross any script, scene, or media review gate.
+
 Each project now has these research manifests:
 
 - `manifests/sources.json`

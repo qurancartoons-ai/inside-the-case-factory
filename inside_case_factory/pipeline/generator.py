@@ -6,6 +6,7 @@ import subprocess
 
 from inside_case_factory.config.settings import Settings
 from inside_case_factory.core.media import ensure_media_manifest, image_for_scene
+from inside_case_factory.core.models import ProductionProject, ReviewStatus
 from inside_case_factory.core.project import create_project
 from inside_case_factory.pipeline.sample_content import build_sample_script, build_visual_prompt
 from inside_case_factory.providers.elevenlabs import (
@@ -14,7 +15,7 @@ from inside_case_factory.providers.elevenlabs import (
 )
 from inside_case_factory.providers.offline_media import FFmpegFliteVoiceOverProvider, SVGPlaceholderImageProvider
 from inside_case_factory.rendering.probe import media_duration_seconds
-from inside_case_factory.utils.files import write_json
+from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.utils.text import compact_whitespace, svg_escape
 
 
@@ -341,14 +342,53 @@ def _select_voice_provider(settings: Settings) -> tuple[object, str]:
     return FFmpegFliteVoiceOverProvider(), "FFmpeg Flite TTS"
 
 
-def generate_video_project(settings: Settings, topic: str, slug: str | None = None) -> GeneratedVideo:
+def _approved_project(project_root: Path) -> tuple[ProductionProject, dict[str, object], list[dict[str, object]]]:
+    manifests = project_root / "manifests"
+    workflow = read_json(manifests / "workflow.json")
+    script = read_json(manifests / "script.json")
+    scene_manifest = read_json(manifests / "scenes.json")
+    media = read_json(manifests / "media_sources.json")
+    if not workflow.get("script_approved") or script.get("status") != "approved":
+        raise RuntimeError("The factual script must be explicitly approved before rendering.")
+    raw_scenes = scene_manifest.get("scenes", [])
+    if not workflow.get("scenes_generated") or not isinstance(raw_scenes, list) or not raw_scenes:
+        raise RuntimeError("Approved factual scenes are required before rendering.")
+    assets = media.get("assets", [])
+    if not isinstance(assets, list) or not assets:
+        raise RuntimeError("Media review must contain at least one approved asset before rendering.")
+    statuses = {str(asset.get("review_status", "pending_review")) for asset in assets if isinstance(asset, dict)}
+    if "pending_review" in statuses or "approved" not in statuses:
+        raise RuntimeError("Media review must be complete and contain at least one approved asset before rendering.")
+    project_data = read_json(manifests / "project.json")
+    project = ProductionProject(
+        slug=str(project_data.get("slug", project_root.name)),
+        topic=str(project_data.get("topic", script.get("title", project_root.name))),
+        root=project_root,
+        status=ReviewStatus.DRAFT,
+    )
+    return project, script, [scene for scene in raw_scenes if isinstance(scene, dict)]
+
+
+def generate_video_project(
+    settings: Settings,
+    topic: str,
+    slug: str | None = None,
+    *,
+    existing_project_root: Path | None = None,
+) -> GeneratedVideo:
     width = int(settings.video.get("width", 1920))
     height = int(settings.video.get("height", 1080))
     fps = int(settings.video.get("fps", 24))
     transition = 0.75
 
-    _progress("creating project workspace")
-    project = create_project(settings.projects_dir, topic, slug)
+    if existing_project_root is None:
+        _progress("creating project workspace")
+        project = create_project(settings.projects_dir, topic, slug)
+        script = build_sample_script(topic)
+        source_scenes: list[dict[str, object]] | None = None
+    else:
+        _progress("loading approved factual project")
+        project, script, source_scenes = _approved_project(existing_project_root)
     manifests_dir = project.root / "manifests"
     assets_dir = project.root / "assets"
     generated_dir = assets_dir / "generated"
@@ -358,16 +398,27 @@ def generate_video_project(settings: Settings, topic: str, slug: str | None = No
     exports_dir.mkdir(parents=True, exist_ok=True)
     media_manifest = ensure_media_manifest(project.root)
 
-    _progress("generating sample documentary narration")
-    script = build_sample_script(topic)
-    write_json(manifests_dir / "script.json", script)
-
-    _progress("dividing narration into cinematic scenes")
-    sections = list(script["sections"])  # type: ignore[index]
-    prompts = [
-        build_visual_prompt(section, str(script["title"]), index)
-        for index, section in enumerate(sections, start=1)
-    ]
+    if source_scenes is None:
+        _progress("generating sample documentary narration")
+        write_json(manifests_dir / "script.json", script)
+        sections = list(script["sections"])  # type: ignore[index]
+    else:
+        _progress("using approved factual narration and scene plan")
+        sections = [
+            {
+                "id": str(scene.get("id", f"s{index:02}")),
+                "heading": str(scene.get("heading", f"Scene {index}")),
+                "narration": str(scene.get("narration", "")),
+            }
+            for index, scene in enumerate(source_scenes, start=1)
+        ]
+    prompts = []
+    for index, section in enumerate(sections, start=1):
+        prompt = build_visual_prompt(section, str(script["title"]), index)
+        if source_scenes is not None:
+            source = source_scenes[index - 1]
+            prompt["prompt"] = str(source.get("ai_visual_prompt", prompt["prompt"]))
+        prompts.append(prompt)
     write_json(manifests_dir / "visual_prompts.json", {"prompts": prompts})
 
     voice, voice_label = _select_voice_provider(settings)
@@ -387,8 +438,10 @@ def generate_video_project(settings: Settings, topic: str, slug: str | None = No
         duration = max(2.5, media_duration_seconds(wav_path))
         end = start + duration
         prompt = prompts[index - 1]
+        approved_scene = source_scenes[index - 1] if source_scenes is not None else {}
         scenes.append(
             {
+                **approved_scene,
                 "id": scene_id,
                 "index": index,
                 "heading": section["heading"],
@@ -523,5 +576,11 @@ def generate_video_project(settings: Settings, topic: str, slug: str | None = No
     _mux_subtitles_and_audio(silent_video_path, voiceover_path, subtitles_path, final_video_path)
 
     duration = media_duration_seconds(final_video_path)
+    if existing_project_root is not None:
+        workflow = read_json(manifests_dir / "workflow.json")
+        workflow["voiceover_generated"] = True
+        workflow["video_rendered"] = True
+        workflow["stage"] = "render_complete"
+        write_json(manifests_dir / "workflow.json", workflow)
     _progress(f"complete: {final_video_path} ({duration:.1f}s)")
     return GeneratedVideo(project.slug, project.root, final_video_path, duration)
