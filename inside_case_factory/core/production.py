@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import fcntl
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,7 @@ from inside_case_factory.core.research import (
 )
 from inside_case_factory.core.narrative_quality import validate_architecture_file
 from inside_case_factory.core.script_repair import run_writer_critic_rewriter
+from inside_case_factory.pipeline.generator import generate_video_project
 from inside_case_factory.providers.reasoning import (
     DisabledReasoningProvider,
     OpenAIReasoningProvider,
@@ -228,107 +230,182 @@ def start_production(settings: Settings, request: ProductionRequest) -> dict[str
     return {"project_slug": project.slug, "project_root": str(project.root), "topic": topic}
 
 
+def _orchestration_state(project_root: Path) -> dict[str, Any]:
+    path = production_manifest_path(project_root, "orchestration.json")
+    if path.exists():
+        return read_json(path)
+    return {"version": 1, "status": "idle", "current_stage": "", "completed_stages": [], "run_count": 0}
+
+
+def _save_orchestration(project_root: Path, state: dict[str, Any], **updates: Any) -> None:
+    state.update(updates)
+    state["updated_at"] = datetime.now(UTC).isoformat()
+    write_json(production_manifest_path(project_root, "orchestration.json"), state)
+
+
+def _complete_stage(project_root: Path, state: dict[str, Any], stage: str) -> None:
+    completed = state.setdefault("completed_stages", [])
+    if stage not in completed:
+        completed.append(stage)
+    _save_orchestration(project_root, state, status="running", current_stage=stage, waiting_for="", last_error="")
+
+
+def _wait_for_approval(project_root: Path, state: dict[str, Any], gate: str) -> None:
+    _save_orchestration(project_root, state, status="waiting_for_approval", current_stage=gate, waiting_for=gate)
+
+
 def run_production(settings: Settings, project_root: Path) -> None:
+    """Resume a production idempotently until the next approval gate or completion."""
+    lock_path = production_manifest_path(project_root, ".orchestration.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        _run_production_locked(settings, project_root)
+
+
+def _run_production_locked(settings: Settings, project_root: Path) -> None:
     workflow = load_manifest(project_root, "workflow.json")
     plan = read_json(production_manifest_path(project_root, "production_plan.json"))
     request = read_json(production_manifest_path(project_root, "production_request.json"))
-    autonomy = str(plan.get("autonomy_mode", "review"))
     topic = str(plan.get("topic", project_root.name))
     reasoning_provider = reasoning_provider_from_settings(settings.providers.get("reasoning", {}))
+    state = _orchestration_state(project_root)
+    state["run_count"] = int(state.get("run_count", 0)) + 1
+    _save_orchestration(project_root, state, status="running", waiting_for="", last_error="")
 
-    try:
-        research_plan = create_research_plan(project_root, request, topic, reasoning_provider)
-        update_plan_stage(project_root, "research_plan", "completed")
-    except ReasoningProviderError as error:
-        research = load_manifest(project_root, "research.json")
-        research.update(
-            {
-                "provider": "openai",
-                "status": "blocked",
-                "topic": topic,
-                "message": str(error),
-                "ran_at": datetime.now(UTC).isoformat(),
-            }
-        )
-        save_manifest(project_root, "research.json", research)
-        append_activity(project_root, f"Reasoning paused safely: {error}", stage="research_plan")
-        update_plan_stage(project_root, "research", "blocked", str(error))
-        return
-
-    append_activity(project_root, "Starting research stage.", stage="research")
-    research_result = run_research(settings, project_root, topic, reasoning_provider=reasoning_provider, research_plan=research_plan)
-    update_plan_stage(
-        project_root,
-        "research",
-        "completed" if research_result.get("ok") else "blocked",
-        str(research_result.get("message", "")),
-    )
-    if research_result.get("ok"):
-        update_plan_stage(project_root, "analyze_sources", "completed" if (project_root / "manifests" / "source_analysis.json").exists() else "pending")
-        update_plan_stage(project_root, "extract_claims", "completed" if int(research_result.get("claims_added", 0) or 0) else "waiting_for_review")
-        update_plan_stage(project_root, "build_dossier", "completed" if (project_root / "manifests" / "dossier.json").exists() else "pending")
-    update_plan_stage(project_root, "review_sources_claims", "waiting_for_review")
-    append_activity(project_root, "Research stage complete. Review sources and claims.", stage="review_sources_claims")
-
-    if autonomy == "review":
-        append_activity(project_root, "Review Mode pause: approve research before script generation.", stage="approve_research")
-        update_plan_stage(project_root, "approve_research", "waiting_for_review")
-        return
-
-    if not (approved_sources(project_root) and approved_claims(project_root) and workflow.get("research_approved")):
-        append_activity(project_root, "Automatic Mode paused because research approval is still required.", stage="approve_research")
-        update_plan_stage(project_root, "approve_research", "waiting_for_review")
-        return
-
-    try:
-        architecture_path = project_root / "manifests" / "story_architecture.json"
-        architecture = read_json(architecture_path) if architecture_path.exists() else {}
-        architecture_report = validate_architecture_file(project_root, architecture)
-        if not architecture_report["valid"]:
-            raise RuntimeError("Malformed story architecture: " + "; ".join(architecture_report["errors"]))
-        generated_script = generate_script(project_root, int(request.get("target_duration_minutes", 10)), reasoning_provider=reasoning_provider)
-        script_config = {**settings.script, "language": str(request.get("language", workflow.get("language", "English")))}
-        claims = approved_claims(project_root)
-        generated_script, attempts = _generate_validated_script_candidates(
-            project_root, generated_script, reasoning_provider, claims, architecture, script_config,
-            read_json(project_root / "manifests" / "research_plan.json"),
-            read_json(project_root / "manifests" / "dossier.json"),
-            read_json(project_root / "manifests" / "narrative_outline.json"),
-            int(request.get("target_duration_minutes", 10)), str(request.get("language", "English")),
-        )
-        if generated_script is None:
-            quality = attempts[-1][1]
-            _write_generation_failure(project_root, attempts, len(attempts) > 1)
-            update_plan_stage(project_root, "generate_script", "blocked", "; ".join(quality["failure_reasons"]))
-            append_activity(project_root, "Script rejected by hard quality requirements.", stage="generate_script")
+    research_plan_path = project_root / "manifests" / "research_plan.json"
+    if not research_plan_path.exists():
+        try:
+            research_plan = create_research_plan(project_root, request, topic, reasoning_provider)
+            update_plan_stage(project_root, "research_plan", "completed")
+            _complete_stage(project_root, state, "research_plan")
+        except ReasoningProviderError as error:
+            research = load_manifest(project_root, "research.json")
+            research.update({
+                "provider": "openai", "status": "blocked", "topic": topic,
+                "message": str(error), "ran_at": datetime.now(UTC).isoformat(),
+            })
+            save_manifest(project_root, "research.json", research)
+            append_activity(project_root, f"Reasoning paused safely: {error}", stage="research_plan")
+            _save_orchestration(project_root, state, status="blocked", current_stage="research_plan", last_error=str(error))
+            update_plan_stage(project_root, "research_plan", "blocked", str(error))
             return
-        update_plan_stage(project_root, "narrative_outline", "completed" if (project_root / "manifests" / "narrative_outline.json").exists() else "pending")
-        update_plan_stage(project_root, "generate_script", "completed")
-        update_plan_stage(project_root, "review_edit_script", "waiting_for_review")
-    except Exception as error:
-        update_plan_stage(project_root, "generate_script", "blocked", str(error))
-        append_activity(project_root, f"Script generation blocked: {error}", stage="generate_script")
-        return
+    else:
+        research_plan = read_json(research_plan_path)
+        _complete_stage(project_root, state, "research_plan")
 
+    if not workflow.get("research_approved"):
+        if "research" not in state.get("completed_stages", []):
+            sources_ready = bool(load_manifest(project_root, "sources.json").get("sources"))
+            claims_ready = bool(load_manifest(project_root, "claims.json").get("claims"))
+            if sources_ready and claims_ready:
+                _complete_stage(project_root, state, "research")
+            else:
+                _save_orchestration(project_root, state, status="running", current_stage="research")
+                result = run_research(settings, project_root, topic, reasoning_provider=reasoning_provider, research_plan=research_plan)
+                update_plan_stage(project_root, "research", "completed" if result.get("ok") else "blocked", str(result.get("message", "")))
+                if result.get("ok"):
+                    _complete_stage(project_root, state, "research")
+                else:
+                    append_activity(
+                        project_root,
+                        f"Review Mode pause: research is blocked until prerequisites are available. {result.get('message', '')}",
+                        stage="research",
+                    )
+                    _save_orchestration(project_root, state, status="blocked", current_stage="research", last_error=str(result.get("message", "")))
+                    return
+        append_activity(project_root, "Research complete. Waiting for definitive research approval.", stage="approve_research")
+        update_plan_stage(project_root, "approve_research", "waiting_for_review")
+        _wait_for_approval(project_root, state, "research_approval")
+        return
+    _complete_stage(project_root, state, "research_approval")
+
+    script_path = project_root / "manifests" / "script.json"
+    if not script_path.exists() or not read_json(script_path).get("narration"):
+        try:
+            architecture_path = project_root / "manifests" / "story_architecture.json"
+            architecture = read_json(architecture_path) if architecture_path.exists() else {}
+            architecture_report = validate_architecture_file(project_root, architecture)
+            if not architecture_report["valid"]:
+                raise RuntimeError("Malformed story architecture: " + "; ".join(architecture_report["errors"]))
+            generated_script = generate_script(project_root, int(request.get("target_duration_minutes", 10)), reasoning_provider=reasoning_provider)
+            script_config = {**settings.script, "language": str(request.get("language", workflow.get("language", "English")))}
+            claims = approved_claims(project_root)
+            generated_script, attempts = _generate_validated_script_candidates(
+                project_root, generated_script, reasoning_provider, claims, architecture, script_config,
+                read_json(project_root / "manifests" / "research_plan.json"),
+                read_json(project_root / "manifests" / "dossier.json"),
+                read_json(project_root / "manifests" / "narrative_outline.json"),
+                int(request.get("target_duration_minutes", 10)), str(request.get("language", "English")),
+            )
+            if generated_script is None:
+                quality = attempts[-1][1]
+                _write_generation_failure(project_root, attempts, len(attempts) > 1)
+                update_plan_stage(project_root, "generate_script", "blocked", "; ".join(quality["failure_reasons"]))
+                append_activity(project_root, "Script rejected by hard quality requirements.", stage="generate_script")
+                _save_orchestration(project_root, state, status="blocked", current_stage="generate_script", last_error="; ".join(quality["failure_reasons"]))
+                return
+            update_plan_stage(project_root, "narrative_outline", "completed" if (project_root / "manifests" / "narrative_outline.json").exists() else "pending")
+            update_plan_stage(project_root, "generate_script", "completed")
+            update_plan_stage(project_root, "review_edit_script", "waiting_for_review")
+            _complete_stage(project_root, state, "generate_script")
+        except Exception as error:
+            update_plan_stage(project_root, "generate_script", "blocked", str(error))
+            append_activity(project_root, f"Script generation blocked: {error}", stage="generate_script")
+            _save_orchestration(project_root, state, status="blocked", current_stage="generate_script", last_error=str(error))
+            return
+
+    workflow = load_manifest(project_root, "workflow.json")
     if not workflow.get("script_approved"):
-        append_activity(project_root, "Automatic Mode paused because script approval is required.", stage="approve_script")
+        append_activity(project_root, "Waiting for definitive script approval.", stage="approve_script")
         update_plan_stage(project_root, "approve_script", "waiting_for_review")
+        _wait_for_approval(project_root, state, "script_approval")
         return
+    _complete_stage(project_root, state, "script_approval")
 
-    try:
-        generate_scenes(project_root, reasoning_provider=reasoning_provider)
-        update_plan_stage(project_root, "generate_scenes", "completed")
-        append_activity(project_root, "Scenes generated.", stage="generate_scenes")
-    except Exception as error:
-        update_plan_stage(project_root, "generate_scenes", "blocked", str(error))
-        append_activity(project_root, f"Scene generation blocked: {error}", stage="generate_scenes")
-        return
+    scenes_path = project_root / "manifests" / "scenes.json"
+    existing_scenes = read_json(scenes_path).get("scenes", []) if scenes_path.exists() else []
+    if not existing_scenes:
+        try:
+            generate_scenes(project_root, reasoning_provider=reasoning_provider)
+            update_plan_stage(project_root, "generate_scenes", "completed")
+            _complete_stage(project_root, state, "generate_scenes")
+        except Exception as error:
+            _save_orchestration(project_root, state, status="blocked", current_stage="generate_scenes", last_error=str(error))
+            return
+    else:
+        _complete_stage(project_root, state, "generate_scenes")
 
-    if (project_root / "manifests" / "scenes.json").exists():
-        discover_archival_media(project_root, DiscoveryQuery(topic=topic, limit_per_source=4))
+    if "discover_media" not in state.get("completed_stages", []):
+        _save_orchestration(project_root, state, status="running", current_stage="discover_media")
+        existing_media = read_json(project_root / "manifests" / "media_sources.json").get("assets", [])
+        if not existing_media:
+            discover_archival_media(project_root, DiscoveryQuery(topic=topic, limit_per_source=4))
         update_plan_stage(project_root, "discover_media", "completed")
+        _complete_stage(project_root, state, "discover_media")
+
+    media = read_json(project_root / "manifests" / "media_sources.json")
+    assets = media.get("assets", []) if isinstance(media, dict) else []
+    statuses = [str(asset.get("review_status", "pending_review")) for asset in assets if isinstance(asset, dict)]
+    if not statuses or "pending_review" in statuses or "approved" not in statuses:
         update_plan_stage(project_root, "review_media", "waiting_for_review")
-        append_activity(project_root, "Media discovery complete. Review media before voice-over or render.", stage="review_media")
+        append_activity(project_root, "Media discovery complete. Waiting for definitive media review.", stage="review_media")
+        _wait_for_approval(project_root, state, "media_approval")
+        return
+    _complete_stage(project_root, state, "media_approval")
+
+    final_video = project_root / "exports" / "final_video.mp4"
+    if not final_video.exists():
+        try:
+            generate_video_project(settings, topic, existing_project_root=project_root)
+        except Exception as error:
+            _save_orchestration(project_root, state, status="interrupted", current_stage="render_video", last_error=str(error))
+            raise
+    update_plan_stage(project_root, "generate_voiceover", "completed")
+    update_plan_stage(project_root, "render_video", "completed")
+    _complete_stage(project_root, state, "render_video")
+    _save_orchestration(project_root, state, status="completed", current_stage="completed", waiting_for="", last_error="")
+    append_activity(project_root, "Production completed end to end.", stage="render_video")
 
 
 def create_research_plan(

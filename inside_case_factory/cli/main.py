@@ -14,6 +14,7 @@ from inside_case_factory.core.autonomous_checks import run_autonomous_checks
 from inside_case_factory.core.research import TavilyResearchProvider, tavily_config_from_settings
 from inside_case_factory.config.settings import load_settings
 from inside_case_factory.core.project import create_project
+from inside_case_factory.core.production import run_production
 from inside_case_factory.pipeline.generator import generate_video_project
 from inside_case_factory.pipeline.stages import describe_pipeline
 from inside_case_factory.providers.elevenlabs import (
@@ -22,6 +23,7 @@ from inside_case_factory.providers.elevenlabs import (
     elevenlabs_config_from_settings,
 )
 from inside_case_factory.rendering.ffmpeg import ffmpeg_available, ffmpeg_version
+from inside_case_factory.utils.files import read_json
 from inside_case_factory.providers.reasoning import estimate_reasoning_cost, reasoning_config_from_settings
 from inside_case_factory.web.dashboard import run_dashboard
 
@@ -158,6 +160,14 @@ def cmd_render_project(args: argparse.Namespace) -> int:
         "final_video": str(result.final_video),
         "duration_seconds": round(result.duration_seconds, 3),
     })
+    return 0
+
+
+def cmd_resume_project(args: argparse.Namespace) -> int:
+    settings = load_settings(Path(args.root))
+    project_root = settings.projects_dir / args.project
+    run_production(settings, project_root)
+    _print_json(read_json(project_root / "manifests" / "orchestration.json"))
     return 0
 
 
@@ -364,6 +374,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     render_project.add_argument("project", help="Approved project slug under the projects directory")
     render_project.set_defaults(func=cmd_render_project)
+
+    resume_project = subparsers.add_parser(
+        "resume-project", help="Resume an autonomous production from its persisted stage"
+    )
+    resume_project.add_argument("project", help="Project slug under the projects directory")
+    resume_project.set_defaults(func=cmd_resume_project)
 
     elevenlabs = subparsers.add_parser("elevenlabs", help="ElevenLabs TTS utilities")
     elevenlabs_subparsers = elevenlabs.add_subparsers(dest="elevenlabs_command", required=True)

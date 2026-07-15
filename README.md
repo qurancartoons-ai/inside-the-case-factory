@@ -213,6 +213,12 @@ python3 -m inside_case_factory render-project PROJECT_SLUG
 
 The command preserves the approved narration, uses the approved scene plan and media mappings, creates voice-over, subtitles, a render plan and the final MP4, then records `voiceover_generated`, `video_rendered`, and `render_complete` in `workflow.json`. It refuses to cross any script, scene, or media review gate.
 
+Production runs also maintain `manifests/orchestration.json`. Each dashboard approval automatically resumes the state machine until the next approval gate. Concurrent resumes are serialized with a project lock, completed stages are reconciled from their durable artifacts, and JSON manifests are replaced atomically. After a process or machine restart, resume explicitly with:
+
+```bash
+python3 -m inside_case_factory resume-project PROJECT_SLUG
+```
+
 Each project now has these research manifests:
 
 - `manifests/sources.json`

@@ -31,6 +31,12 @@ def _progress(message: str) -> None:
     print(f"[case-factory] {message}", flush=True)
 
 
+def _ensure_voice_segment(voice: object, text: str, wav_path: Path, text_path: Path) -> None:
+    if wav_path.exists() and wav_path.stat().st_size > 0:
+        return
+    voice.synthesize_to_file(text, wav_path, text_path)  # type: ignore[attr-defined]
+
+
 def _run(command: list[str]) -> None:
     if command and command[0] == "ffmpeg":
         command = ["ffmpeg", "-hide_banner", "-loglevel", "error", *command[1:]]
@@ -434,7 +440,7 @@ def generate_video_project(
         scene_id = str(section["id"])
         wav_path = audio_dir / f"{scene_id}_voice.wav"
         text_path = workspace_dir / f"{scene_id}_voice.txt"
-        voice.synthesize_to_file(text, wav_path, text_path)
+        _ensure_voice_segment(voice, text, wav_path, text_path)
         duration = max(2.5, media_duration_seconds(wav_path))
         end = start + duration
         prompt = prompts[index - 1]

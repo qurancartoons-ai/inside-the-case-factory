@@ -15,7 +15,7 @@ from inside_case_factory import __version__
 from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media
 from inside_case_factory.config.settings import Settings, load_settings
 from inside_case_factory.core.media import add_image_asset, ensure_media_manifest, load_media_manifest, update_image_review
-from inside_case_factory.core.production import ProductionRequest, _persist_candidate, _promote_candidate, start_production
+from inside_case_factory.core.production import ProductionRequest, _persist_candidate, _promote_candidate, run_production, start_production
 from inside_case_factory.core.narrative_quality import validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
@@ -132,6 +132,11 @@ class DashboardApp:
 
     def redirect(self, location: str) -> Response:
         return "303 See Other", [("Location", location), ("Content-Type", "text/plain")], b""
+
+    def resume_managed_production(self, project_root: Path) -> None:
+        manifests = project_root / "manifests"
+        if (manifests / "production_plan.json").exists() and (manifests / "production_request.json").exists():
+            run_production(self.settings, project_root)
 
     def read_form(self, environ: dict[str, Any]) -> FieldStorage:
         body_size = int(environ.get("CONTENT_LENGTH") or 0)
@@ -505,7 +510,8 @@ class DashboardApp:
         return self.redirect(f"/projects/{slug}")
 
     def approve_research(self, slug: str) -> Response:
-        if not approve_research(self.project_root(slug)):
+        project_root = self.project_root(slug)
+        if not approve_research(project_root):
             return self.html(
                 self.page(
                     "Research Not Ready",
@@ -513,6 +519,7 @@ class DashboardApp:
                 ),
                 "409 Conflict",
             )
+        self.resume_managed_production(project_root)
         return self.redirect(f"/projects/{slug}")
 
     def generate_script(self, slug: str, environ: dict[str, Any]) -> Response:
@@ -546,8 +553,10 @@ class DashboardApp:
         return self.redirect(f"/projects/{slug}")
 
     def approve_script(self, slug: str) -> Response:
-        if not approve_script(self.project_root(slug)):
+        project_root = self.project_root(slug)
+        if not approve_script(project_root):
             return self.html(self.page("Script Not Ready", "<section class=\"panel\"><p>Save a script draft before approval.</p></section>"), "409 Conflict")
+        self.resume_managed_production(project_root)
         return self.redirect(f"/projects/{slug}")
 
     def generate_scenes(self, slug: str) -> Response:
@@ -585,6 +594,7 @@ class DashboardApp:
         project_root = self.project_root(slug)
         status = "approved" if action == "approve" else "rejected"
         update_image_review(project_root, media_id, status)
+        self.resume_managed_production(project_root)
         return self.redirect(f"/projects/{slug}")
 
     def add_media(self, slug: str, environ: dict[str, Any]) -> Response:
