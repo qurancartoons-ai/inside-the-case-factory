@@ -5,7 +5,8 @@ from pathlib import Path
 import subprocess
 
 from inside_case_factory.config.settings import Settings
-from inside_case_factory.core.media import ensure_media_manifest, image_for_scene
+from inside_case_factory.core.media import ensure_media_manifest
+from inside_case_factory.core.visual_direction import write_cinematic_plan
 from inside_case_factory.core.models import ProductionProject, ReviewStatus
 from inside_case_factory.core.project import create_project
 from inside_case_factory.pipeline.sample_content import build_sample_script, build_visual_prompt
@@ -183,20 +184,51 @@ def _render_svg_to_png(svg_path: Path, png_path: Path, width: int, height: int) 
     )
 
 
-def _render_scene_video(image_path: Path, output_path: Path, duration: float, fps: int, index: int) -> None:
+def _render_scene_video(
+    image_path: Path,
+    output_path: Path,
+    duration: float,
+    fps: int,
+    index: int,
+    *,
+    motion: str = "slow_zoom_in",
+    style: dict[str, object] | None = None,
+    width: int = 1920,
+    height: int = 1080,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     frames = max(1, int(round(duration * fps)))
     drift_x = 22 + index * 3
     drift_y = 14 + index * 2
     zoom_speed = 0.00055 + (index % 3) * 0.00012
+    zoom = {
+        "slow_zoom_out": f"max(1.16-on*{zoom_speed},1.0)",
+        "rack_focus": "1.06",
+        "ken_burns_pan": "1.08",
+        "parallax": f"min(1.0+on*{zoom_speed * 0.7},1.12)",
+        "controlled_push_in": f"min(1.0+on*{zoom_speed * 1.25},1.18)",
+    }.get(motion, f"min(1.0+on*{zoom_speed},1.16)")
+    x_expr = f"iw/2-(iw/zoom/2)+sin(on/52)*{drift_x}"
+    y_expr = f"ih/2-(ih/zoom/2)+cos(on/67)*{drift_y}"
+    if motion == "ken_burns_pan":
+        x_expr = f"(iw-iw/zoom)*on/{max(1, frames - 1)}"
+    elif motion == "parallax":
+        x_expr = f"iw/2-(iw/zoom/2)+sin(on/34)*{drift_x * 1.4}"
+    elif motion == "rack_focus":
+        x_expr = "iw/2-(iw/zoom/2)"
+        y_expr = "ih/2-(ih/zoom/2)"
+    profile = style or {}
+    saturation = float(profile.get("saturation", 0.88))
+    contrast = float(profile.get("contrast", 1.06))
+    grain = max(0, min(20, int(float(profile.get("grain", 0.035)) * 100)))
+    blur = ",gblur=sigma=0.8" if motion == "rack_focus" else ""
     filtergraph = (
         "scale=2304:1296:force_original_aspect_ratio=increase,"
         "crop=2304:1296,"
-        f"zoompan=z='min(1.0+on*{zoom_speed},1.16)':"
-        f"x='iw/2-(iw/zoom/2)+sin(on/52)*{drift_x}':"
-        f"y='ih/2-(ih/zoom/2)+cos(on/67)*{drift_y}':"
-        f"d={frames}:s=1920x1080:fps={fps},"
-        "noise=alls=5:allf=t,"
+        f"zoompan=z='{zoom}':x='{x_expr}':y='{y_expr}':"
+        f"d={frames}:s={width}x{height}:fps={fps}"
+        f"{blur},eq=contrast={contrast}:saturation={saturation},"
+        f"noise=alls={grain}:allf=t,"
         "vignette=PI/5,"
         "format=yuv420p"
     )
@@ -224,6 +256,35 @@ def _render_scene_video(image_path: Path, output_path: Path, duration: float, fp
     )
 
 
+def _render_asset_video(
+    asset_path: Path,
+    output_path: Path,
+    duration: float,
+    fps: int,
+    index: int,
+    *,
+    motion: str,
+    style: dict[str, object],
+    width: int,
+    height: int,
+) -> None:
+    if asset_path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+        _render_scene_video(
+            asset_path, output_path, duration, fps, index, motion=motion, style=style, width=width, height=height
+        )
+        return
+    saturation = float(style.get("saturation", 0.88))
+    contrast = float(style.get("contrast", 1.06))
+    filtergraph = (
+        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},fps={fps},eq=contrast={contrast}:saturation={saturation},vignette=PI/5,format=yuv420p"
+    )
+    _run([
+        "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(asset_path), "-t", f"{duration:.3f}", "-vf", filtergraph,
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(output_path),
+    ])
+
+
 def _concat_audio(audio_paths: list[Path], list_path: Path, output_path: Path) -> None:
     list_path.parent.mkdir(parents=True, exist_ok=True)
     list_path.write_text(
@@ -247,7 +308,13 @@ def _concat_audio(audio_paths: list[Path], list_path: Path, output_path: Path) -
     )
 
 
-def _xfade_videos(scene_videos: list[Path], narration_durations: list[float], transition: float, output_path: Path) -> None:
+def _xfade_videos(
+    scene_videos: list[Path],
+    narration_durations: list[float],
+    transition: float,
+    output_path: Path,
+    transitions: list[str] | None = None,
+) -> None:
     if len(scene_videos) == 1:
         _run(["ffmpeg", "-y", "-i", str(scene_videos[0]), "-c", "copy", str(output_path)])
         return
@@ -259,10 +326,14 @@ def _xfade_videos(scene_videos: list[Path], narration_durations: list[float], tr
     filters: list[str] = []
     previous = "[0:v]"
     cumulative = narration_durations[0]
-    transitions = ["fade", "smoothleft", "circleopen", "distance", "fadeblack"]
+    transition_map = {
+        "hard_cut": "fade", "cross_dissolve": "fade", "dip_to_black": "fadeblack", "match_cut": "distance",
+        "directional_wipe": "smoothleft", "document_to_scene": "circleopen", "blur": "fade",
+    }
+    planned = transitions or ["cross_dissolve", "directional_wipe", "document_to_scene", "match_cut", "dip_to_black"]
     for index in range(1, len(scene_videos)):
         out_label = f"[vx{index}]"
-        transition_name = transitions[(index - 1) % len(transitions)]
+        transition_name = transition_map.get(planned[(index - 1) % len(planned)], "fade")
         filters.append(
             f"{previous}[{index}:v]xfade=transition={transition_name}:duration={transition:.3f}:"
             f"offset={cumulative:.3f}{out_label}"
@@ -299,34 +370,55 @@ def _mux_subtitles_and_audio(video_path: Path, audio_path: Path, subtitles_path:
     )
     _run(
         [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(video_path),
-            "-i",
-            str(audio_path),
-            "-vf",
-            subtitle_filter,
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            str(output_path),
+            "ffmpeg", "-y", "-i", str(video_path), "-i", str(audio_path), "-vf", subtitle_filter,
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(output_path),
         ]
     )
+
+
+def _mix_sound_design(
+    voiceover_path: Path,
+    project_root: Path,
+    sound_design: dict[str, object],
+    output_path: Path,
+) -> list[dict[str, object]]:
+    cues = sound_design.get("cues", [])
+    usable = []
+    for cue in cues if isinstance(cues, list) else []:
+        if not isinstance(cue, dict):
+            continue
+        path = project_root / "assets" / "sound" / f"{cue.get('kind', '')}.wav"
+        if path.is_file():
+            usable.append((cue, path))
+    if not usable:
+        _run(["ffmpeg", "-y", "-i", str(voiceover_path), "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", str(output_path)])
+        return []
+    command = ["ffmpeg", "-y", "-i", str(voiceover_path)]
+    filters = ["[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[voice]"]
+    sfx_labels = []
+    used = []
+    for index, (cue, path) in enumerate(usable, start=1):
+        command.extend(["-i", str(path)])
+        delay = max(0, int(float(cue.get("start_seconds", 0)) * 1000))
+        gain = min(-18.0, float(cue.get("gain_db", -24.0)))
+        duration = max(0.2, float(cue.get("duration_seconds", 1.0)))
+        fade_in = max(0.02, float(cue.get("fade_in_seconds", 0.08)))
+        fade_out = max(0.02, float(cue.get("fade_out_seconds", 0.12)))
+        fade_out_start = max(fade_in, duration - fade_out)
+        label = f"sfx{index}"
+        filters.append(
+            f"[{index}:a]atrim=0:{duration:.3f},afade=t=in:st=0:d={fade_in:.3f},"
+            f"afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f},volume={gain}dB,adelay={delay}|{delay}[{label}]"
+        )
+        sfx_labels.append(f"[{label}]")
+        used.append({**cue, "path": str(path.relative_to(project_root))})
+    filters.append(f"{''.join(sfx_labels)}amix=inputs={len(sfx_labels)}:normalize=0:dropout_transition=0[sfxbus]")
+    filters.append("[sfxbus][voice]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[ducked]")
+    filters.append("[voice][ducked]amix=inputs=2:normalize=0:dropout_transition=0,alimiter=limit=0.89[mix]")
+    command.extend(["-filter_complex", ";".join(filters), "-map", "[mix]", str(output_path)])
+    _run(command)
+    return used
 
 
 def _select_voice_provider(settings: Settings) -> tuple[object, str]:
@@ -483,6 +575,11 @@ def generate_video_project(
         },
     )
 
+    _progress("building and validating cinematic visual direction")
+    cinematic_plan = write_cinematic_plan(project.root, scenes, width=width, height=height)
+    style_profile = cinematic_plan["style_profile"]
+    direction_by_scene = {str(item["scene_id"]): item for item in cinematic_plan["scenes"]}
+
     _progress("creating subtitles")
     subtitles_path = manifests_dir / "subtitles.srt"
     _write_srt(subtitles_path, scenes)
@@ -503,52 +600,51 @@ def generate_video_project(
         },
     )
 
-    _progress("selecting scene images")
+    _progress("rendering directed cinematic shots")
     scene_videos: list[Path] = []
     scene_image_sources: list[dict[str, object]] = []
+    shot_durations: list[float] = []
+    shot_transitions: list[str] = []
+    shot_number = 0
     for index, scene in enumerate(scenes, start=1):
         scene_id = str(scene["id"])
-        real_image = image_for_scene(project.root, scene_id)
-        video_path = generated_dir / f"{scene_id}_animated.mp4"
-
-        if real_image:
-            image_path = project.root / str(real_image["path"])
+        direction = direction_by_scene[scene_id]
+        rendered_shots = []
+        for shot in direction["shots"]:
+            shot_number += 1
+            asset = shot["asset"]
+            asset_path = str(asset.get("path", ""))
+            if asset_path:
+                image_path = project.root / asset_path
+            else:
+                svg_path = generated_dir / f"{shot['id']}.svg"
+                png_path = generated_dir / f"{shot['id']}.png"
+                graphic_scene = {**scene, "heading": shot.get("text_overlay") or scene.get("heading", "Evidence")}
+                image_provider.write_svg(svg_path, _scene_svg(str(script["title"]), graphic_scene, shot_number))
+                _render_svg_to_png(svg_path, png_path, width, height)
+                image_path = png_path
+                asset_path = str(png_path.relative_to(project.root))
+            video_path = generated_dir / f"{shot['id']}_animated.mp4"
+            shot_duration = float(shot["duration_seconds"])
+            render_duration = shot_duration + transition
+            _render_asset_video(
+                image_path, video_path, render_duration, fps, shot_number,
+                motion=str(shot["motion"]), style=style_profile, width=width, height=height,
+            )
             source_info = {
-                "kind": "real_image",
-                "media_id": real_image.get("id", ""),
-                "path": str(image_path.relative_to(project.root)),
-                "source_url": real_image.get("source_url", ""),
-                "credit": real_image.get("credit", ""),
-                "license_notes": real_image.get("license_notes", ""),
-                "usage_notes": real_image.get("usage_notes", ""),
-                "scene_relevance": real_image.get("scene_relevance", ""),
+                **asset,
+                "path": asset_path,
+                "shot_id": shot["id"],
+                "motion": shot["motion"],
+                "duration_seconds": shot_duration,
+                "provenance_claim_ids": shot["claim_ids"],
             }
-        else:
-            svg_path = generated_dir / f"{scene_id}.svg"
-            png_path = generated_dir / f"{scene_id}.png"
-            image_provider.write_svg(svg_path, _scene_svg(str(script["title"]), scene, index))
-            _render_svg_to_png(svg_path, png_path, width, height)
-            image_path = png_path
-            source_info = {
-                "kind": "generated_placeholder",
-                "svg": str(svg_path.relative_to(project.root)),
-                "path": str(png_path.relative_to(project.root)),
-                "source_url": "",
-                "credit": "Inside the Case Factory local SVG placeholder",
-                "license_notes": "Generated local placeholder; replace with licensed or owned real media.",
-                "usage_notes": "Fallback only when no mapped real image exists for the scene.",
-                "scene_relevance": str(scene["visual_summary"]),
-            }
-
-        video_duration = float(scene["duration_seconds"]) + (transition if index < len(scenes) else 0.0)
-        _render_scene_video(image_path, video_path, video_duration, fps, index)
-        scene["asset_paths"] = {
-            "image": source_info["path"],
-            "animated_video": str(video_path.relative_to(project.root)),
-        }
-        scene["media_source"] = source_info
-        scene_image_sources.append({"scene_id": scene_id, **source_info})
-        scene_videos.append(video_path)
+            rendered_shots.append({**shot, "asset": source_info, "animated_video": str(video_path.relative_to(project.root))})
+            scene_image_sources.append({"scene_id": scene_id, **source_info})
+            scene_videos.append(video_path)
+            shot_durations.append(shot_duration)
+            shot_transitions.append(str(direction["transition_to_next"]))
+        scene["directed_shots"] = rendered_shots
 
     write_json(manifests_dir / "scenes.json", {"scenes": scenes})
 
@@ -556,9 +652,13 @@ def generate_video_project(
     voiceover_path = audio_dir / "voiceover.wav"
     _concat_audio(scene_audio_paths, workspace_dir / "voiceover_concat.txt", voiceover_path)
 
+    _progress("mixing optional scene-bound sound design with voice-over ducking")
+    mastered_audio_path = audio_dir / "mastered_voiceover.wav"
+    used_sound_cues = _mix_sound_design(voiceover_path, project.root, cinematic_plan["sound_design"], mastered_audio_path)
+
     _progress("animating scenes and adding transitions")
     silent_video_path = workspace_dir / "xfade_silent.mp4"
-    _xfade_videos(scene_videos, narration_durations, transition, silent_video_path)
+    _xfade_videos(scene_videos, shot_durations, transition, silent_video_path, shot_transitions)
 
     _progress("writing render plan")
     render_plan = {
@@ -568,7 +668,11 @@ def generate_video_project(
         "fps": fps,
         "transition_seconds": transition,
         "media_manifest": str(media_manifest.relative_to(project.root)),
-        "voiceover": str(voiceover_path.relative_to(project.root)),
+        "voiceover": str(mastered_audio_path.relative_to(project.root)),
+        "sound_design": {**cinematic_plan["sound_design"], "used_cues": used_sound_cues},
+        "visual_direction": "manifests/visual_direction.json",
+        "visual_style_profile": "manifests/visual_style_profile.json",
+        "visual_quality_report": "manifests/visual_quality_report.json",
         "subtitles": str(subtitles_path.relative_to(project.root)),
         "scene_images": scene_image_sources,
         "scene_videos": [str(path.relative_to(project.root)) for path in scene_videos],
@@ -579,7 +683,7 @@ def generate_video_project(
 
     _progress("rendering final MP4 with subtitles and synchronized narration")
     final_video_path = exports_dir / "final_video.mp4"
-    _mux_subtitles_and_audio(silent_video_path, voiceover_path, subtitles_path, final_video_path)
+    _mux_subtitles_and_audio(silent_video_path, mastered_audio_path, subtitles_path, final_video_path)
 
     duration = media_duration_seconds(final_video_path)
     if existing_project_root is not None:

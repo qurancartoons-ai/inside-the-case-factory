@@ -213,6 +213,18 @@ python3 -m inside_case_factory render-project PROJECT_SLUG
 
 The command preserves the approved narration, uses the approved scene plan and media mappings, creates voice-over, subtitles, a render plan and the final MP4, then records `voiceover_generated`, `video_rendered`, and `render_complete` in `workflow.json`. It refuses to cross any script, scene, or media review gate.
 
+### Cinematic visual and edit pipeline
+
+`render-project` now creates and validates three production manifests before FFmpeg rendering:
+
+- `visual_style_profile.json` keeps color, contrast, saturation, grain, vignette, typography, subtitle and archival treatment consistent.
+- `visual_direction.json` directs every scene and shot: approved asset, provenance, claims, duration, framing, focus, motion, overlay, document/map/timeline treatment, composition, emotional intensity, transition and optional sound cues.
+- `visual_quality_report.json` blocks slideshow-like static shots, repeated assets or effects, unsafe rights, missing provenance, unreadable overlays, invalid aspect ratios and unsafe audio hierarchy.
+
+The replaceable visual provider chain prefers approved archival media, then approved local media, internally generated evidence graphics, and finally an owned offline documentary graphic. Unknown, pending or unapproved rights are never selected for the final render. Paid visual generation is disabled in `config/providers.toml` and is not used as an implicit fallback.
+
+The FFmpeg edit uses bounded multi-shot scene timing, varied motivated zoom/pan/push/parallax/focus treatments, restrained narrative transitions, consistent grading, optional scene-bound ambience and effects, fades, voice normalization and safe effect limiting. Music is not required. Existing completed voice segments remain resumable and are not generated twice.
+
 Production runs also maintain `manifests/orchestration.json`. Each dashboard approval automatically resumes the state machine until the next approval gate. Concurrent resumes are serialized with a project lock, completed stages are reconciled from their durable artifacts, and JSON manifests are replaced atomically. After a process or machine restart, resume explicitly with:
 
 ```bash

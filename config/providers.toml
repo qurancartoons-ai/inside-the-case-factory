@@ -80,6 +80,19 @@ output_cost_per_million_tokens_usd = 0.40
 [image_generation]
 provider = "local_svg_placeholder"
 
+[visual_assets]
+fallback_order = ["approved_archive", "approved_local_media", "evidence_graphics", "offline_safe_fallback"]
+require_approved_rights = true
+preserve_claim_provenance = true
+paid_generation_enabled = false
+
+[sound_design]
+enabled = true
+optional = true
+voice_target_lufs = -16.0
+effects_peak_db = -18.0
+automatic_ducking = true
+
 [image_to_video]
 provider = "ffmpeg_local"
 
