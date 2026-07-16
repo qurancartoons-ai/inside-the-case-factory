@@ -75,12 +75,12 @@ def build_visual_prompt(section: dict[str, object], topic_title: str, index: int
     ]
     return {
         "scene_id": section["id"],
-        "provider": "local_svg_placeholder",
+        "provider": "local_evidence_graphics",
         "prompt": (
             f"Cinematic true-crime documentary still for {topic_title}: "
             f"{motifs[(index - 1) % len(motifs)]}. {camera[(index - 1) % len(camera)]}."
         ),
         "negative_prompt": "cartoon, comedy, bright cheerful colors, illegible text, gore, exploitative imagery",
         "camera_motion": camera[(index - 1) % len(camera)],
-        "replacement_note": "Replace this local SVG placeholder with generated or licensed imagery later.",
+        "replacement_note": "Owned local evidence graphic; external or licensed imagery may replace it when configured.",
     }

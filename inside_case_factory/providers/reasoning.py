@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -668,7 +669,69 @@ def reasoning_provider_from_settings(settings: dict[str, Any]) -> ReasoningProvi
     config = reasoning_config_from_settings(settings)
     if config.provider == "openai":
         return OpenAIReasoningProvider(config)
+    if config.provider in {"gemini", "claude", "local"}:
+        return StructuredTextReasoningProvider(config)
     return DisabledReasoningProvider()
+
+
+class StructuredTextReasoningProvider(OpenAIReasoningProvider):
+    """Runs the existing schema-driven documentary operations on non-OpenAI text providers."""
+
+    def __init__(self, config: ReasoningConfig) -> None:
+        from inside_case_factory.providers.production import (
+            ClaudeTextProvider, GeminiTextProvider, LocalTextProvider, ProviderConfig,
+        )
+        self.config = config
+        mapping = {
+            "gemini": (GeminiTextProvider, "GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"),
+            "claude": (ClaudeTextProvider, "ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/messages"),
+            "local": (LocalTextProvider, "", str((config.stages or {}).get("endpoint", "http://127.0.0.1:11434/v1/chat/completions"))),
+        }
+        provider_class, key_env, endpoint = mapping[config.provider]
+        model = config.model
+        endpoint = endpoint.format(model=model)
+        self.adapter = provider_class(ProviderConfig(
+            name=f"{config.provider}_text", kind="text", model=model, enabled=config.enabled,
+            api_key_env=key_env, endpoint=endpoint, estimated_cost_usd=config.estimated_cost_per_call_usd,
+        ))
+        self.name = config.provider
+
+    @property
+    def available(self) -> bool:
+        return self.adapter.available and not self.config.dry_run
+
+    def _ensure_callable(self, project_root: Path, operation: str) -> None:
+        if not self.available:
+            raise ReasoningProviderError(f"{self.name} reasoning is not available.")
+        if self.name != "local" and self.config.require_explicit_confirmation and not paid_api_confirmed(project_root):
+            raise ReasoningProviderError("Paid API call not confirmed for this project.")
+        if current_estimated_spend(project_root) + self.config.estimated_cost_per_call_usd > self.config.per_project_spending_limit_usd:
+            raise ReasoningProviderError(f"Project reasoning budget would be exceeded before {operation}.")
+
+    def _json_response(
+        self, project_root: Path, operation: str, instruction: str,
+        payload: dict[str, Any], schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        from inside_case_factory.providers.production import ProductionRequest as RoutedRequest
+        self._ensure_callable(project_root, operation)
+        prompt = json.dumps({
+            "system": "Return only valid JSON matching the supplied JSON Schema. Preserve provenance and never invent facts.",
+            "instruction": instruction, "input": payload, "json_schema": schema["schema"],
+        }, ensure_ascii=False)
+        try:
+            response = self.adapter.generate(RoutedRequest("text", operation, prompt, project_root, options={"max_tokens": self.config.max_output_tokens}))
+            text = response.content.strip()
+            if text.startswith("```"):
+                text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+            parsed = json.loads(text)
+        except (ValueError, json.JSONDecodeError, RuntimeError) as error:
+            raise ReasoningProviderError(f"{self.name} returned invalid structured output: {error}") from error
+        usage_path = project_root / "manifests" / "reasoning_usage.json"
+        usage = read_json(usage_path) if usage_path.exists() else {"version": 1, "calls": [], "estimated_total_cost_usd": 0.0}
+        usage["calls"].append({"operation": operation, "provider": self.name, "model": self.config.model, "estimated_cost_usd": response.cost_usd})
+        usage["estimated_total_cost_usd"] = round(float(usage.get("estimated_total_cost_usd", 0)) + response.cost_usd, 6)
+        write_json(usage_path, usage)
+        return parsed
 
 
 def fallback_research_plan(request: dict[str, Any], message: str = "") -> dict[str, Any]:

@@ -383,3 +383,11 @@ Recommended order for real integrations:
 9. Upload and scheduling only after explicit approval workflows exist.
 
 See [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for the detailed roadmap.
+
+## Production Provider Router
+
+The production pipeline has one provider interface and registry for text, voice, and images. Shipped adapters cover OpenAI Responses, Gemini GenerateContent, Anthropic Messages, local OpenAI-compatible models (including Ollama-style endpoints), ElevenLabs, OpenAI TTS, OpenAI Images, Gemini image output, and asynchronous Flux generation. Approved archives and locally rendered evidence graphics remain the final owned visual fallback; FFmpeg Flite remains the final local voice fallback.
+
+Global provider definitions live in `config/providers.toml`. A project can override budget, retries, task preference order, caching, and external-call authorization in `manifests/provider_config.json` or through **Geavanceerde instellingen → Production providers**. External provider calls are disabled by default even when API keys exist. Enabling them is an explicit per-project action; keys stay in environment variables.
+
+For every task the router filters unavailable providers, applies the project's preferred order, then considers priority, quality, and estimated cost. Calls use bounded retries, content-addressed caching, a persisted `provider_usage.json` budget ledger, and ordered fallbacks. `provider_selection.json` records the selected text, voice, and image providers. Producer, Director, and Critic reports also record their task-specific selection. Provider cache files live under `workspace/provider_cache` and generated binary results are written atomically through the project workflow.

@@ -48,6 +48,7 @@ class DirectorEngine:
     def plan(
         self, project_root: Path, scenes: list[dict[str, Any]], *, width: int, height: int,
         render_number: int = 1, criticism: dict[str, Any] | None = None,
+        provider_router: Any | None = None,
     ) -> dict[str, Any]:
         plan = build_cinematic_plan(project_root, scenes)
         producer_path = project_root / "manifests" / "producer_blueprint.json"
@@ -100,6 +101,7 @@ class DirectorEngine:
             "shot_count": report["shot_count"], "improvements": improvements,
             "approved_lessons_applied": [str(item.get("id", "")) for item in lessons],
             "decision_summary": "Effects are restrained; clean frames are deliberately preserved between motivated camera moves.",
+            "provider_selection": self._provider_selection(provider_router, "director_plan"),
         }
         plan["director"] = director_report
         write_json(project_root / "manifests" / "director_plan.json", plan)
@@ -107,6 +109,11 @@ class DirectorEngine:
         write_json(project_root / "manifests" / "visual_direction.json", plan)
         write_json(project_root / "manifests" / "visual_quality_report.json", report)
         return plan
+
+    @staticmethod
+    def _provider_selection(router: Any | None, task: str) -> dict[str, str]:
+        provider = router.choose("text", task) if router is not None else None
+        return {"provider": provider.name if provider else "local_deterministic", "model": provider.config.model if provider else "built_in"}
 
     def review_revisions(self, project_root: Path, scenes: list[dict[str, Any]], scene_ids: list[str]) -> dict[str, Any]:
         scene_ids_set = set(scene_ids)
@@ -127,7 +134,7 @@ class DirectorEngine:
 class CriticEngine:
     """Scores the finished edit from render evidence, without modifying approved content."""
 
-    def analyze(self, project_root: Path, *, render_number: int, duration_seconds: float) -> dict[str, Any]:
+    def analyze(self, project_root: Path, *, render_number: int, duration_seconds: float, provider_router: Any | None = None) -> dict[str, Any]:
         plan = read_json(project_root / "manifests" / "director_plan.json")
         scenes = plan.get("scenes", [])
         shots = [shot for scene in scenes for shot in scene.get("shots", [])]
@@ -160,6 +167,7 @@ class CriticEngine:
             "version": 1, "render_number": render_number, "analyzed_at": datetime.now(UTC).isoformat(),
             "scores": scores, "overall_score": overall, "weak_categories": weak,
             "main_criticisms": criticisms[:5], "evidence": {"duration_seconds": round(duration_seconds, 3), "shot_count": len(shots), "average_shot_seconds": round(avg_shot, 3)},
+            "provider_selection": DirectorEngine._provider_selection(provider_router, "critic_review"),
         }
         write_json(project_root / "manifests" / f"critic_report_render_{render_number}.json", report)
         write_json(project_root / "manifests" / "critic_report.json", report)

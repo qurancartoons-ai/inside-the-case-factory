@@ -33,10 +33,16 @@ class FFmpegFliteVoiceOverProvider:
         return output_path
 
 
-class SVGPlaceholderImageProvider:
-    name = "local_svg_placeholder"
+class LocalEvidenceGraphicProvider:
+    """Production-safe owned graphic renderer used after external image fallbacks fail."""
+
+    name = "local_evidence_graphics"
 
     def write_svg(self, output_path: Path, svg: str) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(svg, encoding="utf-8")
         return output_path
+
+
+# Backward-compatible import name for existing extensions.
+SVGPlaceholderImageProvider = LocalEvidenceGraphicProvider

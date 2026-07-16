@@ -51,6 +51,7 @@ class ProducerEngine:
         *,
         render_number: int = 1,
         previous_review: dict[str, Any] | None = None,
+        provider_router: Any | None = None,
     ) -> dict[str, Any]:
         total_duration = sum(max(1.0, float(scene.get("duration_seconds", 10.0))) for scene in scenes)
         previous_review = previous_review or {}
@@ -126,9 +127,15 @@ class ProducerEngine:
             "pacing_analysis": pacing_issues, "attention_analysis": attention,
             "cinematic_rules": {"unique_scene_builds": True, "vary_intro": True, "climax_after_fraction": .65, "strong_outro": True},
             "revision_scope": sorted(weak),
+            "provider_selection": self._provider_selection(provider_router, "producer_blueprint"),
         }
         write_json(project_root / "manifests" / "producer_blueprint.json", blueprint)
         return blueprint
+
+    @staticmethod
+    def _provider_selection(router: Any | None, task: str) -> dict[str, str]:
+        provider = router.choose("text", task) if router is not None else None
+        return {"provider": provider.name if provider else "local_deterministic", "model": provider.config.model if provider else "built_in"}
 
     def detect_pacing(self, scenes: list[dict[str, Any]], sections: list[dict[str, Any]]) -> dict[str, Any]:
         issues: list[dict[str, Any]] = []
@@ -170,7 +177,7 @@ class ProducerEngine:
         risks.extend({"scene_id": issue["scene_id"], "reasons": [issue["kind"]]} for issue in pacing["issues"])
         return {"risk_points": risks, "director_replan_recommended": bool(risks), "lowest_retention": min((p["estimated_retention"] for p in retention), default=0)}
 
-    def review_render(self, project_root: Path, critic_report: dict[str, Any]) -> dict[str, Any]:
+    def review_render(self, project_root: Path, critic_report: dict[str, Any], *, provider_router: Any | None = None) -> dict[str, Any]:
         blueprint = read_json(project_root / "manifests" / "producer_blueprint.json")
         issues = blueprint.get("pacing_analysis", {}).get("issues", [])
         retention = blueprint.get("retention_curve", [])
@@ -191,6 +198,7 @@ class ProducerEngine:
             "overall_score": overall, "weak_categories": weak,
             "improvement_plan": [f"Revise only {category.replace('_', ' ')}; preserve approved content and unaffected scenes." for category in weak],
             "director_replan_required": bool(weak), "critic_validation_score": critic_score,
+            "provider_selection": self._provider_selection(provider_router, "producer_review"),
         }
         write_json(project_root / "manifests" / "producer_report.json", report)
         return report

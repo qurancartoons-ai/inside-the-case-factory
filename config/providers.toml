@@ -1,5 +1,5 @@
 [research]
-provider = "local_stub"
+provider = "auto"
 
 [research.tavily]
 enabled = true
@@ -9,7 +9,7 @@ include_domains = []
 exclude_domains = []
 
 [text_generation]
-provider = "local_stub"
+provider = "production_router"
 
 [reasoning]
 provider = "openai"
@@ -78,7 +78,7 @@ input_cost_per_million_tokens_usd = 0.10
 output_cost_per_million_tokens_usd = 0.40
 
 [image_generation]
-provider = "local_svg_placeholder"
+provider = "production_router"
 
 [visual_assets]
 fallback_order = ["approved_archive", "approved_local_media", "evidence_graphics", "offline_safe_fallback"]
@@ -112,3 +112,92 @@ output_format = "mp3_44100_128"
 
 [publishing]
 provider = "disabled"
+
+# Unified production providers. A provider is selectable only when enabled and
+# its key is present. Per-project overrides live in manifests/provider_config.json.
+[production]
+budget_usd = 1.00
+retries = 2
+cache_enabled = true
+external_calls_enabled = false
+
+[production.providers.openai_text]
+kind = "text"
+enabled = true
+model = "gpt-4.1-mini"
+api_key_env = "OPENAI_API_KEY"
+priority = 10
+quality = 0.92
+estimated_cost_usd = 0.05
+
+[production.providers.gemini_text]
+kind = "text"
+enabled = true
+model = "gemini-2.5-flash"
+api_key_env = "GEMINI_API_KEY"
+priority = 20
+quality = 0.88
+estimated_cost_usd = 0.04
+
+[production.providers.claude_text]
+kind = "text"
+enabled = true
+model = "claude-sonnet-4-5"
+api_key_env = "ANTHROPIC_API_KEY"
+priority = 15
+quality = 0.93
+estimated_cost_usd = 0.06
+
+[production.providers.local_text]
+kind = "text"
+enabled = true
+model = "qwen2.5:14b"
+endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+priority = 90
+quality = 0.70
+estimated_cost_usd = 0.0
+
+[production.providers.elevenlabs]
+kind = "voice"
+enabled = true
+model = "eleven_v3"
+api_key_env = "ELEVENLABS_API_KEY"
+priority = 10
+quality = 0.94
+estimated_cost_usd = 0.08
+
+[production.providers.openai_tts]
+kind = "voice"
+enabled = true
+model = "gpt-4o-mini-tts"
+api_key_env = "OPENAI_API_KEY"
+priority = 20
+quality = 0.90
+estimated_cost_usd = 0.04
+
+[production.providers.openai_images]
+kind = "image"
+enabled = true
+model = "gpt-image-1.5"
+api_key_env = "OPENAI_API_KEY"
+priority = 10
+quality = 0.94
+estimated_cost_usd = 0.08
+
+[production.providers.gemini_images]
+kind = "image"
+enabled = true
+model = "gemini-3-pro-image-preview"
+api_key_env = "GEMINI_API_KEY"
+priority = 20
+quality = 0.90
+estimated_cost_usd = 0.06
+
+[production.providers.flux]
+kind = "image"
+enabled = true
+model = "flux-2-pro"
+api_key_env = "BFL_API_KEY"
+priority = 30
+quality = 0.91
+estimated_cost_usd = 0.05

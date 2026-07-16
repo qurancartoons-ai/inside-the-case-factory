@@ -22,7 +22,9 @@ from inside_case_factory.providers.elevenlabs import (
     ElevenLabsVoiceOverProvider,
     elevenlabs_config_from_settings,
 )
-from inside_case_factory.providers.offline_media import FFmpegFliteVoiceOverProvider, SVGPlaceholderImageProvider
+from inside_case_factory.providers.offline_media import FFmpegFliteVoiceOverProvider, LocalEvidenceGraphicProvider
+from inside_case_factory.providers.production import ProductionProviderError, ProductionProviderRouter
+from inside_case_factory.providers.runtime_media import FailoverVoiceOverProvider, RoutedImageProvider, RoutedVoiceOverProvider
 from inside_case_factory.rendering.probe import media_duration_seconds
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.utils.text import compact_whitespace, svg_escape
@@ -429,7 +431,11 @@ def _mix_sound_design(
     return used
 
 
-def _select_voice_provider(settings: Settings) -> tuple[object, str]:
+def _select_voice_provider(settings: Settings, router: ProductionProviderRouter | None = None, project_root: Path | None = None) -> tuple[object, str]:
+    if router is not None and project_root is not None:
+        selected = router.choose("voice", "voice_over")
+        if selected is not None:
+            return FailoverVoiceOverProvider(RoutedVoiceOverProvider(router, project_root), FFmpegFliteVoiceOverProvider()), f"{selected.name} / {selected.config.model} (local fallback)"
     voice_settings = settings.providers.get("voice_over", {})
     provider_name = str(voice_settings.get("provider", "ffmpeg_flite"))
     elevenlabs_settings = voice_settings.get("elevenlabs", {})
@@ -498,6 +504,11 @@ def generate_video_project(
         _progress("loading approved factual project")
         project, script, source_scenes = _approved_project(existing_project_root)
     manifests_dir = project.root / "manifests"
+    provider_router = ProductionProviderRouter.from_settings(project.root, settings.providers)
+    provider_router.selection_manifest([
+        ("producer_blueprint", "text"), ("director_plan", "text"), ("critic_review", "text"),
+        ("voice_over", "voice"), ("scene_image", "image"),
+    ])
     if _quality_render_number is None:
         cycle_path = manifests_dir / "quality_cycle.json"
         cycle = read_json(cycle_path) if cycle_path.exists() else {}
@@ -534,8 +545,9 @@ def generate_video_project(
         prompts.append(prompt)
     write_json(manifests_dir / "visual_prompts.json", {"prompts": prompts})
 
-    voice, voice_label = _select_voice_provider(settings)
-    image_provider = SVGPlaceholderImageProvider()
+    voice, voice_label = _select_voice_provider(settings, provider_router, project.root)
+    image_provider = LocalEvidenceGraphicProvider()
+    routed_image_provider = RoutedImageProvider(provider_router, project.root) if provider_router.choose("image", "scene_image") else None
 
     _progress(f"creating voice-over segments with {voice_label}")
     scene_audio_paths: list[Path] = []
@@ -592,12 +604,13 @@ def generate_video_project(
 
     _progress(f"Producer AI is building story blueprint {_quality_render_number}")
     producer_blueprint = ProducerEngine().plan(
-        project.root, scenes, render_number=_quality_render_number, previous_review=_previous_criticism,
+        project.root, scenes, render_number=_quality_render_number, previous_review=_previous_criticism, provider_router=provider_router,
     )
     _progress(f"Director AI is building render plan {_quality_render_number}")
     cinematic_plan = DirectorEngine().plan(
         project.root, scenes, width=width, height=height, render_number=_quality_render_number,
         criticism=_previous_criticism,
+        provider_router=provider_router,
     )
     style_profile = cinematic_plan["style_profile"]
     direction_by_scene = {str(item["scene_id"]): item for item in cinematic_plan["scenes"]}
@@ -642,8 +655,16 @@ def generate_video_project(
                 svg_path = generated_dir / f"{shot['id']}.svg"
                 png_path = generated_dir / f"{shot['id']}.png"
                 graphic_scene = {**scene, "heading": shot.get("text_overlay") or scene.get("heading", "Evidence")}
-                image_provider.write_svg(svg_path, _scene_svg(str(script["title"]), graphic_scene, shot_number))
-                _render_svg_to_png(svg_path, png_path, width, height)
+                generated = False
+                if routed_image_provider is not None:
+                    try:
+                        routed_image_provider.generate_to_file(str(scene.get("visual_summary", "Documentary evidence image")), png_path)
+                        generated = True
+                    except (ProductionProviderError, RuntimeError):
+                        generated = False
+                if not generated:
+                    image_provider.write_svg(svg_path, _scene_svg(str(script["title"]), graphic_scene, shot_number))
+                    _render_svg_to_png(svg_path, png_path, width, height)
                 image_path = png_path
                 asset_path = str(png_path.relative_to(project.root))
             video_path = generated_dir / f"{shot['id']}_animated.mp4"
@@ -711,9 +732,9 @@ def generate_video_project(
     duration = media_duration_seconds(final_video_path)
     _progress(f"Film Critic AI is evaluating render {_quality_render_number}")
     critic_report = CriticEngine().analyze(
-        project.root, render_number=_quality_render_number, duration_seconds=duration
+        project.root, render_number=_quality_render_number, duration_seconds=duration, provider_router=provider_router,
     )
-    producer_report = ProducerEngine().review_render(project.root, critic_report)
+    producer_report = ProducerEngine().review_render(project.root, critic_report, provider_router=provider_router)
     combined_report = {
         **critic_report,
         "overall_score": min(float(critic_report["overall_score"]), float(producer_report["overall_score"])),

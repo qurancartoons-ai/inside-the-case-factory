@@ -127,6 +127,8 @@ class DashboardApp:
                 return self.select_reference(parts[1], parts[3], environ)
             if len(parts) == 4 and parts[2] == "draft-review" and parts[3] == "revise":
                 return self.revise_draft(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "providers" and parts[3] == "configure":
+                return self.configure_project_providers(parts[1], environ)
             if len(parts) == 5 and parts[2] == "draft-review" and parts[4] == "approve":
                 return self.approve_draft_scene(parts[1], parts[3])
             if len(parts) == 3 and parts[2] == "discover":
@@ -599,6 +601,7 @@ class DashboardApp:
               <a class="button ghost" href="/projects/{escape(slug)}">Terug naar productie</a>
             </section>
             {self.reasoning_settings_panel(project_root)}
+            {self.production_provider_panel(project_root, slug)}
             {self.research_panel(project_root, slug)}
             {self.script_panel(project_root, slug)}
             {self.scenes_panel(project_root, slug)}
@@ -985,6 +988,42 @@ class DashboardApp:
           <p class="muted">OPENAI_API_KEY wordt alleen uit omgevingsvariabelen gelezen en wordt hier niet getoond of opgeslagen.</p>
         </section>
         """
+
+    def production_provider_panel(self, project_root: Path, slug: str) -> str:
+        config = self.read_manifest(project_root / "manifests" / "provider_config.json")
+        tasks = config.get("tasks", {}) if isinstance(config, dict) else {}
+        checked = "checked" if config.get("external_calls_enabled") else ""
+        return f"""
+        <section class="panel"><h2>Production providers</h2>
+          <p class="muted">Keuzevolgordes zijn kommagescheiden. Externe calls blijven uit tot ze hier expliciet worden ingeschakeld; omgevingssleutels worden nooit opgeslagen.</p>
+          <form method="post" action="/projects/{escape(slug)}/providers/configure" class="grid-form">
+            <label>Projectbudget USD <input name="budget_usd" type="number" min="0" step="0.01" value="{escape(str(config.get('budget_usd', 1.0)))}"></label>
+            <label>Retries <input name="retries" type="number" min="0" max="5" value="{escape(str(config.get('retries', 2)))}"></label>
+            <label class="wide"><input type="checkbox" name="external_calls_enabled" value="yes" {checked}> Externe production-providercalls voor dit project inschakelen</label>
+            <label>Producer <input name="producer_blueprint" value="{escape(', '.join(tasks.get('producer_blueprint', [])))}" placeholder="claude_text, openai_text, local_text"></label>
+            <label>Director <input name="director_plan" value="{escape(', '.join(tasks.get('director_plan', [])))}" placeholder="openai_text, gemini_text, local_text"></label>
+            <label>Critic <input name="critic_review" value="{escape(', '.join(tasks.get('critic_review', [])))}" placeholder="gemini_text, openai_text, local_text"></label>
+            <label>Voice-over <input name="voice_over" value="{escape(', '.join(tasks.get('voice_over', [])))}" placeholder="elevenlabs, openai_tts"></label>
+            <label>Scènebeelden <input name="scene_image" value="{escape(', '.join(tasks.get('scene_image', [])))}" placeholder="openai_images, gemini_images, flux"></label>
+            <button type="submit">Providerkeuze opslaan</button>
+          </form>
+        </section>"""
+
+    def configure_project_providers(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        try:
+            budget = max(0.0, float(self.form_value(form, "budget_usd", "1.0")))
+            retries = max(0, min(5, int(self.form_value(form, "retries", "2"))))
+        except ValueError:
+            return self.html(self.page("Ongeldige providerconfiguratie", '<section class="panel"><p>Budget en retries moeten getallen zijn.</p></section>'), "400 Bad Request")
+        tasks = {}
+        for task in ("producer_blueprint", "director_plan", "critic_review", "voice_over", "scene_image"):
+            tasks[task] = [item.strip() for item in self.form_value(form, task).split(",") if item.strip()]
+        write_json(self.project_root(slug) / "manifests" / "provider_config.json", {
+            "version": 1, "external_calls_enabled": self.form_value(form, "external_calls_enabled") == "yes",
+            "budget_usd": budget, "retries": retries, "cache_enabled": True, "tasks": tasks,
+        })
+        return self.redirect(f"/projects/{slug}/advanced")
 
     def workflow_panel(self, project_root: Path, slug: str) -> str:
         stages = self.simple_progress(project_root)
