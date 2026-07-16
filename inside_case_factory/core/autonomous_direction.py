@@ -50,15 +50,20 @@ class DirectorEngine:
         render_number: int = 1, criticism: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         plan = build_cinematic_plan(project_root, scenes)
+        producer_path = project_root / "manifests" / "producer_blueprint.json"
+        producer = read_json(producer_path) if producer_path.exists() else {}
+        producer_sections = {str(item.get("id")): item for item in producer.get("sections", [])}
         critique = criticism or {}
         weak = set(critique.get("weak_categories", []))
         improvements: list[str] = []
         global_shot_index = 0
         for index, scene in enumerate(plan["scenes"]):
             position = index / max(1, len(plan["scenes"]) - 1)
-            role = "hook" if index == 0 else "outro" if index == len(plan["scenes"]) - 1 else "climax" if position >= .65 else "development"
+            producer_section = producer_sections.get(str(scene.get("scene_id")), {})
+            role = str(producer_section.get("role") or ("hook" if index == 0 else "outro" if index == len(plan["scenes"]) - 1 else "climax" if position >= .65 else "development"))
             scene["story_role"] = role
-            scene["pacing"] = "urgent" if role in {"hook", "climax"} else "resolved" if role == "outro" else "measured"
+            scene["pacing"] = str(producer_section.get("visual_rhythm") or ("urgent" if role in {"hook", "climax"} else "resolved" if role in {"outro", "closing"} else "measured"))
+            scene["producer_ratios"] = producer_section.get("ratios", {})
             scene["effect_policy"] = "restrained"
             scene["asset_strategy"] = sorted({str(shot["asset"].get("kind", "archive")) for shot in scene["shots"]})
             if role == "climax":
@@ -89,7 +94,8 @@ class DirectorEngine:
             raise RuntimeError("Director plan rejected: " + "; ".join(report["errors"]))
         lessons = _approved_lessons(project_root)
         director_report = {
-            "version": 1, "render_number": render_number, "status": "ready", "story_arc": ["hook", "development", "climax", "outro"],
+            "version": 1, "render_number": render_number, "status": "ready", "producer_blueprint": "manifests/producer_blueprint.json" if producer else None,
+            "story_arc": [s["story_role"] for s in plan["scenes"]],
             "chapter_pacing": [{"scene_id": s["scene_id"], "role": s["story_role"], "pacing": s["pacing"], "intensity": s["emotional_intensity"]} for s in plan["scenes"]],
             "shot_count": report["shot_count"], "improvements": improvements,
             "approved_lessons_applied": [str(item.get("id", "")) for item in lessons],
@@ -118,7 +124,7 @@ class CriticEngine:
         pacing = max(55.0, 100.0 - abs(avg_shot - 6.0) * 7.0)
         scores = {
             "documentary_feel": 88.0 if shots else 0.0,
-            "tension_arc": 90.0 if {s.get("story_role") for s in scenes} >= {"hook", "climax", "outro"} else 65.0,
+            "tension_arc": 90.0 if {s.get("story_role") for s in scenes} >= {"hook", "climax"} and {s.get("story_role") for s in scenes} & {"outro", "closing"} else 65.0,
             "pacing": pacing,
             "shot_variation": min(96.0, 65.0 + unique_motion_ratio * 35.0),
             "visual_quality": 86.0,

@@ -13,6 +13,7 @@ from inside_case_factory.core.autonomous_direction import (
     record_feedback,
     save_improvement_state,
 )
+from inside_case_factory.core.producer import ProducerEngine
 from inside_case_factory.core.media import ensure_media_manifest
 from inside_case_factory.core.models import ProductionProject, ReviewStatus
 from inside_case_factory.core.project import create_project
@@ -589,6 +590,10 @@ def generate_video_project(
         },
     )
 
+    _progress(f"Producer AI is building story blueprint {_quality_render_number}")
+    producer_blueprint = ProducerEngine().plan(
+        project.root, scenes, render_number=_quality_render_number, previous_review=_previous_criticism,
+    )
     _progress(f"Director AI is building render plan {_quality_render_number}")
     cinematic_plan = DirectorEngine().plan(
         project.root, scenes, width=width, height=height, render_number=_quality_render_number,
@@ -688,6 +693,7 @@ def generate_video_project(
         "voiceover": str(mastered_audio_path.relative_to(project.root)),
         "sound_design": {**cinematic_plan["sound_design"], "used_cues": used_sound_cues},
         "visual_direction": "manifests/visual_direction.json",
+        "producer_blueprint": "manifests/producer_blueprint.json",
         "visual_style_profile": "manifests/visual_style_profile.json",
         "visual_quality_report": "manifests/visual_quality_report.json",
         "subtitles": str(subtitles_path.relative_to(project.root)),
@@ -707,9 +713,17 @@ def generate_video_project(
     critic_report = CriticEngine().analyze(
         project.root, render_number=_quality_render_number, duration_seconds=duration
     )
+    producer_report = ProducerEngine().review_render(project.root, critic_report)
+    combined_report = {
+        **critic_report,
+        "overall_score": min(float(critic_report["overall_score"]), float(producer_report["overall_score"])),
+        "weak_categories": sorted(set(critic_report.get("weak_categories", [])) | set(producer_report.get("weak_categories", []))),
+        "producer_score": producer_report["overall_score"],
+        "producer_improvement_plan": producer_report["improvement_plan"],
+    }
     policy = QualityPolicy.from_pipeline(settings.pipeline)
-    decision = improvement_decision(critic_report, policy, _quality_render_number)
-    save_improvement_state(project.root, decision, critic_report)
+    decision = improvement_decision(combined_report, policy, _quality_render_number)
+    save_improvement_state(project.root, decision, combined_report)
     record_feedback(project.root, critic_report.get("main_criticisms", []))
     director_report = read_json(manifests_dir / "director_report.json")
     director_report["critic_score"] = critic_report["overall_score"]
@@ -720,7 +734,7 @@ def generate_video_project(
         _progress(decision["reason"])
         return generate_video_project(
             settings, topic, slug, existing_project_root=existing_project_root or project.root,
-            _quality_render_number=_quality_render_number + 1, _previous_criticism=critic_report,
+            _quality_render_number=_quality_render_number + 1, _previous_criticism=combined_report,
         )
     if existing_project_root is not None:
         workflow = read_json(manifests_dir / "workflow.json")

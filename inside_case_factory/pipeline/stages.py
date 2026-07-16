@@ -11,6 +11,7 @@ class StageKind(StrEnum):
     FACT_CHECK = "fact_check"
     SCRIPT = "script"
     SCENE_PLAN = "scene_plan"
+    PRODUCER_BLUEPRINT = "producer_blueprint"
     IMAGE_PROMPTS = "image_prompts"
     ASSET_GENERATION = "asset_generation"
     VOICE_OVER = "voice_over"
@@ -37,6 +38,7 @@ PIPELINE_STAGES: tuple[PipelineStage, ...] = (
     PipelineStage(StageKind.FACT_CHECK, "Claims and source map", "research/claims.json", True),
     PipelineStage(StageKind.SCRIPT, "Documentary script", "manifests/script.json", True),
     PipelineStage(StageKind.SCENE_PLAN, "Cinematic scene breakdown", "manifests/scenes.json", True),
+    PipelineStage(StageKind.PRODUCER_BLUEPRINT, "Producer story rhythm blueprint", "manifests/producer_blueprint.json", False),
     PipelineStage(StageKind.IMAGE_PROMPTS, "Image generation prompts", "manifests/image_prompts.json", True),
     PipelineStage(StageKind.ASSET_GENERATION, "Images, clips, and motion assets", "assets/", True, True),
     PipelineStage(StageKind.VOICE_OVER, "Voice-over audio", "assets/audio/voiceover.wav", True, True),

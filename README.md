@@ -352,9 +352,11 @@ Nothing enters the edit plan until the operator checks **Door gebruiker geselect
 
 ## Autonomous Director and Film Critic
 
-Before every render, the Director Engine writes `director_plan.json` and `director_report.json`. The plan controls the hook, development, climax and outro; chapter pacing; shot length and selection; camera movement; transitions; emotional intensity; asset strategy; and deliberately effect-free shots.
+Before every render, the Producer Engine writes `producer_blueprint.json`. It owns the complete documentary structure, information and media ratios, interview placement, visual rhythm, emotional arc, attention risks and estimated retention curve. The dashboard visualizes these decisions. The Producer does not choose individual shots.
 
-After rendering, the Film Critic writes a scored `critic_report.json`. When its overall score is below `pipeline.director_quality_threshold`, the factory changes only the direction/edit plan, reuses existing voice and media assets, and renders again. `director_max_renders` and `director_rerender_budget_usd` are hard stops. `quality_cycle.json` makes attempts resumable and idempotent.
+The Director Engine then consumes the Producer Blueprint and writes `director_plan.json` and `director_report.json`. It controls shot length and selection, camera movement, transitions, asset strategy, and deliberately effect-free shots within the Producer's story roles and pacing decisions.
+
+After rendering, the Film Critic writes a scored `critic_report.json`, and the Producer writes `producer_report.json` for story rhythm, tension, emotion, density, retention, variation and professionalism. When the combined score is below `pipeline.director_quality_threshold`, the Producer scopes an improvement plan and the Director changes only affected direction/edit decisions, reusing existing voice and media assets. The Critic validates the next render. `director_max_renders` and `director_rerender_budget_usd` are hard stops. `quality_cycle.json` makes attempts resumable and idempotent.
 
 Criticism is queued in `critic_feedback.json` with `pending_review` status. The Director only learns from entries explicitly approved in the project dashboard; unapproved and rejected feedback is never applied.
 

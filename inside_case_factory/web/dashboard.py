@@ -441,8 +441,41 @@ class DashboardApp:
     def direction_reports(self, project_root: Path, slug: str) -> str:
         director = self.read_manifest(project_root / "manifests" / "director_report.json")
         critic = self.read_manifest(project_root / "manifests" / "critic_report.json")
-        if not director and not critic:
+        producer = self.read_manifest(project_root / "manifests" / "producer_blueprint.json")
+        producer_report = self.read_manifest(project_root / "manifests" / "producer_report.json")
+        if not director and not critic and not producer:
             return ""
+        arc = producer.get("emotional_arc", []) if isinstance(producer, dict) else []
+        retention = producer.get("retention_curve", []) if isinstance(producer, dict) else []
+        sections = producer.get("sections", []) if isinstance(producer, dict) else []
+        def bars(key: str, points: list[dict[str, Any]]) -> str:
+            return "".join(
+                f'<div class="chart-row"><span>{escape(str(point.get("scene_id", "")))}</span>'
+                f'<i style="width:{max(0, min(100, float(point.get(key, 0))))}%"></i>'
+                f'<strong>{escape(str(point.get(key, 0)))}</strong></div>' for point in points
+            )
+        ratio_totals = {
+            key: round(sum(float(item.get("ratios", {}).get(key, 0)) for item in sections) / max(1, len(sections)) * 100, 1)
+            for key in ("voice_over", "interview", "b_roll")
+        }
+        structure_rows = "".join(
+            f"<tr><td>{escape(str(item.get('role', '')).replace('_', ' ').title())}</td>"
+            f"<td>{escape(str(item.get('purpose', '')))}</td><td>{escape(str(item.get('visual_rhythm', '')))}</td>"
+            f"<td>{escape(str(item.get('estimated_duration_seconds', 0)))} sec</td></tr>" for item in sections
+        )
+        producer_panel = f"""
+        <section class="panel"><h2>Producer Blueprint</h2>
+          <div class="summary-grid">
+            <div><span>Voice-over</span><strong>{ratio_totals['voice_over']}%</strong></div>
+            <div><span>Interview</span><strong>{ratio_totals['interview']}%</strong></div>
+            <div><span>B-roll</span><strong>{ratio_totals['b_roll']}%</strong></div>
+            <div><span>Producer-score</span><strong>{escape(str(producer_report.get('overall_score', '—')))}/100</strong></div>
+          </div>
+          <h3>Spanningsgrafiek</h3><div class="producer-chart">{bars('tension', arc)}</div>
+          <h3>Emotiegrafiek</h3><div class="producer-chart emotion">{bars('emotion', arc)}</div>
+          <h3>Geschatte retentiecurve</h3><div class="producer-chart retention">{bars('estimated_retention', retention)}</div>
+          <h3>Documentairestructuur</h3><table><thead><tr><th>Sectie</th><th>Doel</th><th>Ritme</th><th>Duur</th></tr></thead><tbody>{structure_rows}</tbody></table>
+        </section>""" if producer else ""
         scores = critic.get("scores", {}) if isinstance(critic, dict) else {}
         score_rows = "".join(
             f"<tr><td>{escape(str(name).replace('_', ' ').title())}</td><td>{escape(str(score))}/100</td></tr>"
@@ -457,7 +490,7 @@ class DashboardApp:
             f"<form class=\"inline\" method=\"post\" action=\"/projects/{escape(slug)}/critic-feedback/{escape(str(item.get('id', '')))}/reject\"><button type=\"submit\" class=\"secondary\">Afwijzen</button></form></li>"
             for item in feedback if item.get("approval_status") == "pending_review"
         )
-        return f"""
+        return f"""{producer_panel}
         <section class="panel"><h2>Director Report</h2>
           <p>Render {escape(str(director.get('render_number', '—')))} · {escape(str(director.get('shot_count', '—')))} shots</p>
           <ul>{improvements}</ul><p><strong>Besluit:</strong> {escape(str(director.get('rerender_reason', 'Nog niet gerenderd.')))}</p>
@@ -1239,6 +1272,11 @@ class DashboardApp:
     .workflow li.review span {{ background:var(--warn); color:#fff; }}
     .workflow li.active {{ border-color:#b9d8d0; background:#eef8f6; }}
     .workflow li.active span {{ background:var(--accent); color:#fff; }}
+    .producer-chart {{ display:grid; gap:6px; margin-bottom:18px; }}
+    .chart-row {{ display:grid; grid-template-columns:55px 1fr 45px; gap:8px; align-items:center; }}
+    .chart-row i {{ display:block; height:12px; border-radius:999px; background:#b44b42; min-width:2px; }}
+    .producer-chart.emotion .chart-row i {{ background:#8761a8; }}
+    .producer-chart.retention .chart-row i {{ background:#2f806c; }}
     @media (max-width: 900px) {{ .workflow {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .start-grid, .summary-grid {{ grid-template-columns:1fr 1fr; }} .review-card, .project-card {{ align-items:flex-start; flex-direction:column; }} .actions {{ justify-content:flex-start; }} }}
     @media (max-width: 620px) {{ header, .project-head {{ display:block; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .workflow, .start-grid, .summary-grid {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} }}
   </style>
