@@ -9,6 +9,7 @@ import tempfile
 import traceback
 from typing import Any, Callable
 from urllib.parse import unquote
+from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
 from inside_case_factory import __version__
@@ -23,6 +24,7 @@ from inside_case_factory.core.project import create_project
 from inside_case_factory.core.draft_review import approve_scene, create_review_draft, revise_draft
 from inside_case_factory.core.user_experience import apply_dossier_instruction, production_progress, revision_change_plan, supported_script_map, youtube_draft
 from inside_case_factory.core.reference_intake import create_reference_intake, select_reference_match
+from inside_case_factory.core.research_panel import ResearchPanelService
 from inside_case_factory.core.research import (
     add_claim,
     add_source,
@@ -50,6 +52,7 @@ Response = tuple[str, list[tuple[str, str]], bytes]
 class DashboardApp:
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or Path.cwd()
+        self._manifest_cache: dict[Path, tuple[int, int, dict[str, Any]]] = {}
 
     def __call__(self, environ: dict[str, Any], start_response: Callable[..., Any]) -> list[bytes]:
         try:
@@ -102,8 +105,14 @@ class DashboardApp:
                 return self.html(self.production_overview_page(parts[1]))
             if len(parts) == 3 and parts[2] == "dossier-review":
                 return self.html(self.dossier_review_page(parts[1]))
+            if len(parts) == 3 and parts[2] == "research-panel":
+                return self.html(self.research_panel_page(parts[1]))
             if len(parts) == 3 and parts[2] == "youtube-draft":
                 return self.html(self.youtube_draft_page(parts[1]))
+            if len(parts) == 3 and parts[2] == "research-data":
+                return self.research_data(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "research-transcript":
+                return self.research_transcript(parts[1], parts[3], environ)
             if len(parts) == 4 and parts[2] == "preview" and parts[3] == "video":
                 return self.video_preview(parts[1])
             if len(parts) == 5 and parts[2] == "preview" and parts[3] == "thumbnail":
@@ -152,6 +161,8 @@ class DashboardApp:
                 return self.save_youtube_draft(parts[1], environ)
             if len(parts) == 4 and parts[2] == "youtube-draft" and parts[3] == "confirm-upload":
                 return self.confirm_youtube_upload(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "research-analysis" and parts[3] == "queue":
+                return self.queue_research_analysis(parts[1], environ)
             if len(parts) == 4 and parts[2] == "providers" and parts[3] == "configure":
                 return self.configure_project_providers(parts[1], environ)
             if len(parts) == 5 and parts[2] == "draft-review" and parts[4] == "approve":
@@ -173,6 +184,10 @@ class DashboardApp:
 
     def html(self, content: str, status: str = "200 OK") -> Response:
         return status, [("Content-Type", "text/html; charset=utf-8")], content.encode("utf-8")
+
+    def json_response(self, payload: object, status: str = "200 OK") -> Response:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        return status, [("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(body)))], body
 
     def redirect(self, location: str) -> Response:
         return "303 See Other", [("Location", location), ("Content-Type", "text/plain")], b""
@@ -437,6 +452,7 @@ class DashboardApp:
               <div class="actions">
                 <a class="button ghost" href="/projects/{escape(slug)}/production">Productieoverzicht</a>
                 <a class="button ghost" href="/projects/{escape(slug)}/dossier-review">Dossier & bronnen</a>
+                <a class="button ghost" href="/projects/{escape(slug)}/research-panel">Research Panel</a>
                 <a class="button" href="/projects/{escape(slug)}/draft-review">Draft beoordelen</a>
                 <a class="button ghost" href="/projects/{escape(slug)}/youtube-draft">YouTube draft</a>
                 <a class="button ghost" href="/projects/{escape(slug)}/advanced">Geavanceerde instellingen</a>
@@ -1308,18 +1324,12 @@ class DashboardApp:
         return mapping.get(stage, "Bezig")
 
     def research_panel(self, project_root: Path, slug: str) -> str:
-        sources = self.read_manifest(project_root / "manifests" / "sources.json").get("sources", [])
-        claims = self.read_manifest(project_root / "manifests" / "claims.json").get("claims", [])
-        source_rows = self.source_rows(slug, sources if isinstance(sources, list) else [])
-        claim_rows = self.claim_rows(slug, claims if isinstance(claims, list) else [])
+        # Intentionally no manifest, provider, thumbnail, or transcript reads here.
+        # The browser receives a fast shell and requests one page at a time.
         return f"""
-        <section class="panel">
-          <h2>Research</h2>
-          <p class="muted">Current automated provider: Tavily when <code>TAVILY_API_KEY</code> is set. Results are never approved automatically.</p>
-          <form method="post" action="/projects/{escape(slug)}/research/automated" class="grid-form">
-            <label>Research Topic <input name="topic" value="{escape(str(self.read_manifest(project_root / 'manifests' / 'project.json').get('topic', project_root.name)))}"></label>
-            <button type="submit">Run Automated Research</button>
-          </form>
+        <section class="panel" id="research-panel" data-project="{escape(slug)}">
+          <h2>Research</h2><p class="muted">Snelle weergave actief. Bronnen, claims en transcripties worden alleen per pagina en op verzoek geladen.</p>
+          <div id="research-loading" class="status-pill">Researchoverzicht laden…</div>
           <form method="post" action="/projects/{escape(slug)}/research/source" class="grid-form">
             <label>Title <input name="title" required></label>
             <label>URL <input name="url" required></label>
@@ -1329,8 +1339,7 @@ class DashboardApp:
             <label class="wide">Reliability Notes <textarea name="reliability_notes" rows="2"></textarea></label>
             <button type="submit">Add Source</button>
           </form>
-          <h3>Sources</h3>
-          <table><thead><tr><th>ID</th><th>Title</th><th>Publisher</th><th>Status</th><th>Review</th></tr></thead><tbody>{source_rows}</tbody></table>
+          <h3>Bronnen</h3><div id="research-sources"><p class="muted">Loading…</p></div><div id="source-pages" class="pagination"></div>
           <form method="post" action="/projects/{escape(slug)}/research/claim" class="grid-form">
             <label class="wide">Claim <textarea name="text" rows="3" required></textarea></label>
             <label>Source IDs <input name="source_ids" placeholder="source-id, another-source"></label>
@@ -1341,11 +1350,53 @@ class DashboardApp:
             <label>Events <input name="events"></label>
             <button type="submit">Add Claim</button>
           </form>
-          <h3>Claims</h3>
-          <table><thead><tr><th>ID</th><th>Claim</th><th>Sources</th><th>Status</th><th>Review</th></tr></thead><tbody>{claim_rows}</tbody></table>
+          <h3>Claims</h3><div id="research-claims"><p class="muted">Loading…</p></div><div id="claim-pages" class="pagination"></div>
+          <details><summary>Zware researchanalyse</summary><p>Analyse start nooit bij het openen van dit panel.</p><form method="post" action="/projects/{escape(slug)}/research-analysis/queue"><label>Analyseopdracht<textarea name="instruction" required></textarea></label><button>Run Automated Research (background task)</button></form></details>
           <form method="post" action="/projects/{escape(slug)}/research/approve"><button type="submit">Approve Research</button></form>
         </section>
+        <script>
+        (() => {{
+          const slug={json.dumps(slug)}; const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+          async function load(kind,page=1) {{
+            const data=await fetch(`/projects/${{slug}}/research-data?kind=${{kind}}&page=${{page}}&page_size=25`).then(r=>r.json());
+            const rows=data.items.map(item=>kind==='sources'
+              ? `<tr><td><code>${{esc(item.id)}}</code></td><td><a href="${{esc(item.url)}}">${{esc(item.title)}}</a><p>${{esc(item.transcript_preview)}}</p><div>${{(item.attachments||[]).map(a=>`<img loading="lazy" src="${{esc(a.url)}}" alt="${{esc(a.title)}}" width="120">`).join('')}}</div>${{item.has_transcript?`<button data-transcript="${{esc(item.id)}}" type="button">Transcript laden</button><pre id="transcript-${{esc(item.id)}}"></pre>`:''}}</td><td>${{esc(item.publisher)}}</td><td>${{esc(item.review_status)}}</td><td>${{review(kind,item.id)}}</td></tr>`
+              : `<tr><td><code>${{esc(item.id)}}</code></td><td>${{esc(item.text)}}</td><td>${{esc((item.source_ids||[]).join(', '))}}</td><td>${{esc(item.review_status)}}</td><td>${{review(kind,item.id)}}</td></tr>`).join('');
+            document.querySelector(`#research-${{kind}}`).innerHTML=`<table><tbody>${{rows||'<tr><td>Geen resultaten.</td></tr>'}}</tbody></table>`;
+            const pages=Math.ceil(data.total/data.page_size); document.querySelector(`#${{kind==='sources'?'source':'claim'}}-pages`).innerHTML=Array.from({{length:Math.min(pages,20)}},(_,i)=>`<button type="button" data-page="${{i+1}}" data-kind="${{kind}}">${{i+1}}</button>`).join(' ');
+            document.querySelector('#research-loading').textContent=`${{data.total}} ${{kind}} · pagina ${{data.page}}`;
+          }}
+          function review(kind,id) {{ return `<div class="actions"><form method="post" action="/projects/${{slug}}/research/${{kind.slice(0,-1)}}/${{esc(id)}}/approve"><button>Approve</button></form><form method="post" action="/projects/${{slug}}/research/${{kind.slice(0,-1)}}/${{esc(id)}}/reject"><button class="secondary">Reject</button></form></div>`; }}
+          document.querySelector('#research-panel').addEventListener('click',async e=>{{ const b=e.target.closest('button'); if(!b)return; if(b.dataset.page)load(b.dataset.kind,+b.dataset.page); if(b.dataset.transcript){{const d=await fetch(`/projects/${{slug}}/research-transcript/${{b.dataset.transcript}}?limit=2000`).then(r=>r.json());document.querySelector(`#transcript-${{b.dataset.transcript}}`).textContent=d.text;b.remove();}} }});
+          requestAnimationFrame(()=>{{load('sources');load('claims');}});
+        }})();
+        </script>
         """
+
+    def research_panel_page(self, slug: str) -> str:
+        return self.page("Research Panel", f'<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Research Panel</strong></nav>{self.research_panel(self.project_root(slug), slug)}')
+
+    def research_data(self, slug: str, environ: dict[str, Any]) -> Response:
+        query = parse_qs(str(environ.get("QUERY_STRING", "")))
+        try:
+            page = int(query.get("page", ["1"])[0]); page_size = int(query.get("page_size", ["25"])[0])
+            result = ResearchPanelService(self.project_root(slug)).page(query.get("kind", ["sources"])[0], page, page_size)
+        except (ValueError, OSError) as error:
+            return self.json_response({"error": str(error)}, "400 Bad Request")
+        return self.json_response(result.payload())
+
+    def research_transcript(self, slug: str, source_id: str, environ: dict[str, Any]) -> Response:
+        query = parse_qs(str(environ.get("QUERY_STRING", "")))
+        try:
+            payload = ResearchPanelService(self.project_root(slug)).transcript(source_id, int(query.get("offset", ["0"])[0]), int(query.get("limit", ["2000"])[0]))
+        except KeyError:
+            return self.json_response({"error": "source not found"}, "404 Not Found")
+        return self.json_response(payload)
+
+    def queue_research_analysis(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        ResearchPanelService(self.project_root(slug)).queue_analysis(self.form_value(form, "instruction"))
+        return self.redirect(f"/projects/{slug}/advanced")
 
     def source_rows(self, slug: str, sources: list[dict[str, Any]]) -> str:
         if not sources:
@@ -1482,8 +1533,14 @@ class DashboardApp:
     def read_manifest(self, path: Path) -> dict[str, Any]:
         if not path.exists():
             return {}
+        stat = path.stat()
+        cached = self._manifest_cache.get(path)
+        if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+            return cached[2]
         data = read_json(path)
-        return data if isinstance(data, dict) else {}
+        result = data if isinstance(data, dict) else {}
+        self._manifest_cache[path] = (stat.st_mtime_ns, stat.st_size, result)
+        return result
 
     def page(self, title: str, body: str) -> str:
         return f"""<!doctype html>
