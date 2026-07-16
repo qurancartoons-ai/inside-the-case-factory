@@ -344,6 +344,12 @@ Map one image to multiple scenes with `--scene s01,s03`, or use `--scene "*"` as
 
 The render plan records the selected media for each scene in `manifests/render_plan.json`, and each scene records its selected `media_source` in `manifests/scenes.json`.
 
+## Screenshot and Interview Clip Intake
+
+Open a project and choose **Open clip-intake** to upload a screenshot, local video/audio clip, or enter a YouTube URL. A note, visible subtitle text, and timestamp or range are optional. The resolver writes `manifests/reference_intent.json` with the best match, confidence, alternatives, source and clip boundaries. OCR and YouTube access are adapters: deployments can supply local screenshot analysis and metadata/transcript resolvers; offline tests use deterministic fixtures and local media can use a neighboring `<filename>.<ext>.json` sidecar.
+
+Nothing enters the edit plan until the operator checks **Door gebruiker geselecteerd voor montage**. Confirmation creates source provenance, attributed research context, before/after script passages, and a clip edit plan with context card, speaker labels, subtitles, J/L cuts, silence trimming, normalization and intelligibility safeguards. Interview statements remain attributed claims requiring corroboration. Rights decisions and Content ID handling remain with the user; missing rights status does not block an explicitly selected edit, and the planner never adds detection-evasion transformations.
+
 ## Autonomous Director and Film Critic
 
 Before every render, the Director Engine writes `director_plan.json` and `director_report.json`. The plan controls the hook, development, climax and outro; chapter pacing; shot length and selection; camera movement; transitions; emotional intensity; asset strategy; and deliberately effect-free shots.

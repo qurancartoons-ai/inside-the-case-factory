@@ -6,6 +6,7 @@ from enum import StrEnum
 
 class StageKind(StrEnum):
     TOPIC = "topic"
+    REFERENCE_INTAKE = "reference_intake"
     RESEARCH = "research"
     FACT_CHECK = "fact_check"
     SCRIPT = "script"
@@ -31,6 +32,7 @@ class PipelineStage:
 
 PIPELINE_STAGES: tuple[PipelineStage, ...] = (
     PipelineStage(StageKind.TOPIC, "Topic intake", "manifests/topic.json", False),
+    PipelineStage(StageKind.REFERENCE_INTAKE, "Screenshot and interview clip intake", "manifests/reference_intent.json", True),
     PipelineStage(StageKind.RESEARCH, "Source-backed research dossier", "research/dossier.json", True),
     PipelineStage(StageKind.FACT_CHECK, "Claims and source map", "research/claims.json", True),
     PipelineStage(StageKind.SCRIPT, "Documentary script", "manifests/script.json", True),

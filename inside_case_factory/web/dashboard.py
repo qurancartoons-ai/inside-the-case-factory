@@ -20,6 +20,7 @@ from inside_case_factory.core.narrative_quality import validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
 from inside_case_factory.core.project import create_project
+from inside_case_factory.core.reference_intake import create_reference_intake, select_reference_match
 from inside_case_factory.core.research import (
     add_claim,
     add_source,
@@ -87,6 +88,8 @@ class DashboardApp:
                 return self.html(self.project_detail(parts[1]))
             if len(parts) == 3 and parts[2] == "advanced":
                 return self.html(self.project_advanced(parts[1]))
+            if len(parts) == 3 and parts[2] == "reference-intake":
+                return self.html(self.reference_intake_page(parts[1]))
             if len(parts) == 4 and parts[2] == "download" and parts[3] == "final":
                 return self.download_final(parts[1])
             if len(parts) == 5 and parts[2] == "media" and parts[4] == "preview":
@@ -115,6 +118,10 @@ class DashboardApp:
                 return self.generate_scenes(parts[1])
             if len(parts) == 3 and parts[2] == "media":
                 return self.add_media(parts[1], environ)
+            if len(parts) == 3 and parts[2] == "reference-intake":
+                return self.add_reference_intake(parts[1], environ)
+            if len(parts) == 5 and parts[2] == "reference-intake" and parts[4] == "select":
+                return self.select_reference(parts[1], parts[3], environ)
             if len(parts) == 3 and parts[2] == "discover":
                 return self.discover_media(parts[1], environ)
             if len(parts) == 5 and parts[2] == "media" and parts[4] in {"approve", "reject"}:
@@ -305,10 +312,119 @@ class DashboardApp:
               </div>
             </section>
             {self.production_panel(project_root)}
+            {self.reference_intake_summary(project_root, slug)}
             {self.direction_reports(project_root, slug)}
             {self.review_action_card(project_root, slug)}
             """,
         )
+
+    def reference_intake_summary(self, project_root: Path, slug: str) -> str:
+        intent = self.read_manifest(project_root / "manifests" / "reference_intent.json")
+        if not intent:
+            detail = "Upload een screenshot of fragment, of voer een YouTube-link in."
+        else:
+            detail = (
+                f"{escape(str(intent.get('video_title') or intent.get('suspected_topic') or 'Match gevonden'))} — "
+                f"{escape(str(intent.get('start_seconds', 0)))}s tot {escape(str(intent.get('end_seconds', 0)))}s — "
+                f"confidence {escape(str(intent.get('confidence', 0)))}"
+            )
+        return f"""
+        <section class="panel">
+          <h2>Screenshot & interviewclip</h2>
+          <p>{detail}</p>
+          <a class="button" href="/projects/{escape(slug)}/reference-intake">Open clip-intake</a>
+        </section>
+        """
+
+    def reference_intake_page(self, slug: str) -> str:
+        project_root = self.project_root(slug)
+        if not project_root.is_dir():
+            return self.page("Project Not Found", "<section class=\"panel\"><p>Project niet gevonden.</p></section>")
+        intent = self.read_manifest(project_root / "manifests" / "reference_intent.json")
+        alternatives = intent.get("alternative_matches", []) if isinstance(intent, dict) else []
+        options = '<option value="0">Beste match</option>' + "".join(
+            f'<option value="{index}">Alternatief {index}: {escape(str(item.get("title") or item.get("text") or "match"))} '
+            f'({escape(str(item.get("confidence", 0)))})</option>'
+            for index, item in enumerate(alternatives, start=1)
+        )
+        review = ""
+        if intent:
+            review = f"""
+            <section class="panel">
+              <h2>Gevonden fragment controleren</h2>
+              <div class="summary-grid">
+                <div><span>Video</span><strong>{escape(str(intent.get('video_title') or 'Onbekend'))}</strong></div>
+                <div><span>Kanaal</span><strong>{escape(str(intent.get('channel') or 'Onbekend'))}</strong></div>
+                <div><span>Start</span><strong>{escape(str(intent.get('start_seconds')))} sec</strong></div>
+                <div><span>Einde</span><strong>{escape(str(intent.get('end_seconds')))} sec</strong></div>
+              </div>
+              <p><strong>Passage:</strong> {escape(str(intent.get('intended_interview_passage') or 'Nog niet herkend'))}</p>
+              <form method="post" action="/projects/{escape(slug)}/reference-intake/{escape(str(intent.get('intake_id')))}/select" class="grid-form">
+                <label>Match <select name="match_index">{options}</select></label>
+                <label class="wide">Waarom is dit relevant? <textarea name="why_relevant" rows="3">{escape(str(intent.get('why_relevant', '')))}</textarea></label>
+                <label class="wide"><input type="checkbox" name="user_selected_for_edit" value="yes" required> Door gebruiker geselecteerd voor montage</label>
+                <button type="submit">Fragment bevestigen</button>
+              </form>
+              <p class="muted">Publicatierechten en eventuele Content ID-claims blijven de verantwoordelijkheid van de gebruiker.</p>
+            </section>
+            """
+        return self.page("Clip-intake", f"""
+        <nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Clip-intake</strong></nav>
+        <section class="panel">
+          <h2>Screenshot, YouTube of lokaal fragment</h2>
+          <form method="post" enctype="multipart/form-data" action="/projects/{escape(slug)}/reference-intake" class="grid-form">
+            <label class="wide">Screenshot, video of audio <input type="file" name="reference_file" accept="image/png,image/jpeg,image/webp,video/*,audio/*"></label>
+            <label class="wide">YouTube-URL <input type="url" name="source_url" placeholder="https://www.youtube.com/watch?v=..."></label>
+            <label>Timestamp of range <input name="timestamp" placeholder="12:34 of 12:34-12:51"></label>
+            <label class="wide">Zichtbare tekst / ondertitels <textarea name="visible_text" rows="3" placeholder="Vul dit aan wanneer lokale OCR niet beschikbaar is."></textarea></label>
+            <label class="wide">Notitie en bedoelde relevantie <textarea name="note" rows="3"></textarea></label>
+            <button type="submit">Bron en fragment herkennen</button>
+          </form>
+        </section>
+        {review}
+        """)
+
+    def add_reference_intake(self, slug: str, environ: dict[str, Any]) -> Response:
+        project_root = self.project_root(slug)
+        if not project_root.is_dir():
+            return self.html(self.page("Project Not Found", "<section class=\"panel\"><p>Project niet gevonden.</p></section>"), "404 Not Found")
+        form = self.read_form(environ)
+        upload = form["reference_file"] if "reference_file" in form else None
+        temp_path: Path | None = None
+        filename = ""
+        try:
+            if upload is not None and not isinstance(upload, list) and getattr(upload, "filename", ""):
+                filename = Path(str(upload.filename)).name
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as handle:
+                    temp_path = Path(handle.name)
+                    handle.write(upload.file.read())
+            source_url = self.form_value(form, "source_url").strip()
+            if temp_path is None and not source_url:
+                raise ValueError("Upload een bestand of voer een YouTube-URL in.")
+            create_reference_intake(
+                project_root, source_url=source_url, local_path=temp_path, original_filename=filename,
+                note=self.form_value(form, "note"), timestamp=self.form_value(form, "timestamp"),
+                visible_text=self.form_value(form, "visible_text"),
+            )
+        except (OSError, ValueError) as error:
+            return self.html(self.page("Intake mislukt", f"<section class=\"panel\"><p>{escape(str(error))}</p></section>"), "400 Bad Request")
+        finally:
+            if temp_path:
+                temp_path.unlink(missing_ok=True)
+        return self.redirect(f"/projects/{slug}/reference-intake")
+
+    def select_reference(self, slug: str, intake_id: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        try:
+            select_reference_match(
+                self.project_root(slug), intake_id,
+                match_index=int(self.form_value(form, "match_index", "0")),
+                why_relevant=self.form_value(form, "why_relevant"),
+                user_selected_for_edit=self.form_value(form, "user_selected_for_edit") == "yes",
+            )
+        except (OSError, ValueError, IndexError, KeyError) as error:
+            return self.html(self.page("Selectie mislukt", f"<section class=\"panel\"><p>{escape(str(error))}</p></section>"), "400 Bad Request")
+        return self.redirect(f"/projects/{slug}/reference-intake")
 
     def review_critic_feedback(self, slug: str, feedback_id: str, action: str) -> Response:
         project_root = self.project_root(slug)

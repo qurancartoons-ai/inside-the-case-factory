@@ -828,6 +828,9 @@ def generate_script(
             target_duration_minutes,
             language,
         )
+        from inside_case_factory.core.reference_intake import apply_reference_to_script
+        script = apply_reference_to_script(project_root, script)
+        save_manifest(project_root, "script.json", script)
         workflow["stage"] = "review_script"
         workflow["target_duration_minutes"] = target_duration_minutes
         save_manifest(project_root, "workflow.json", workflow)
@@ -864,6 +867,8 @@ def generate_script(
             for index, claim in enumerate(ordered, start=1)
         ],
     }
+    from inside_case_factory.core.reference_intake import apply_reference_to_script
+    script = apply_reference_to_script(project_root, script)
     save_manifest(project_root, "script.json", script)
     workflow["stage"] = "review_script"
     workflow["target_duration_minutes"] = target_duration_minutes
