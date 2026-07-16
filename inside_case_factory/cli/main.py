@@ -26,6 +26,7 @@ from inside_case_factory.rendering.ffmpeg import ffmpeg_available, ffmpeg_versio
 from inside_case_factory.utils.files import read_json
 from inside_case_factory.providers.reasoning import estimate_reasoning_cost, reasoning_config_from_settings
 from inside_case_factory.web.dashboard import run_dashboard
+from inside_case_factory.core.review_demo import create_offline_review_demo
 
 
 DEFAULT_ELEVENLABS_TEST_TEXT = (
@@ -321,6 +322,13 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_demo(args: argparse.Namespace) -> int:
+    settings = load_settings(Path(args.root))
+    root = create_offline_review_demo(settings.projects_dir)
+    _print_json({"ok": True, "project_slug": root.name, "project_root": str(root), "video": str(root / "exports/final_video.mp4"), "report": str(root / "review/demo_review_report.html")})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="case-factory")
     parser.add_argument("--root", default=".", help="Project root containing config/defaults.toml")
@@ -427,6 +435,9 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--host", default="127.0.0.1", help="Host interface to bind")
     dashboard.add_argument("--port", type=int, default=8000, help="Port to listen on")
     dashboard.set_defaults(func=cmd_dashboard)
+
+    review_demo = subparsers.add_parser("review-demo", help="Create the complete offline visual review demo")
+    review_demo.set_defaults(func=cmd_review_demo)
 
     return parser
 

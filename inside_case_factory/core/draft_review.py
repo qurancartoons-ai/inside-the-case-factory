@@ -106,6 +106,8 @@ def _directives(command: str) -> list[dict[str, Any]]:
         directives.append({"kind": "tone", "value": "more_tense", "components": ["script", "voice_over", "producer"]})
     if "emotioneler" in lowered:
         directives.append({"kind": "voice_delivery", "value": "more_emotional", "components": ["voice_over"]})
+    if "warmer" in lowered and "voice-over" in lowered:
+        directives.append({"kind": "voice_delivery", "value": "warmer", "components": ["voice_over"]})
     if "close-up" in lowered or "closeups" in lowered or "close-ups" in lowered:
         directives.append({"kind": "camera", "value": "more_close_ups", "components": ["director", "edit"]})
     if "krachtiger" in lowered and ("outro" in lowered or "eind" in lowered):
@@ -118,6 +120,14 @@ def _directives(command: str) -> list[dict[str, Any]]:
         directives.append({"kind": "add_interview", "query": interview.group(1), "components": ["clips", "script", "edit"]})
     if "mijn screenshot" in lowered:
         directives.append({"kind": "add_screenshot", "query": "user screenshot", "components": ["media", "director", "edit"]})
+    if "vervang dit beeld" in lowered:
+        directives.append({"kind": "replace_media", "components": ["media", "director", "edit"]})
+    if "haal deze zin weg" in lowered:
+        directives.append({"kind": "remove_sentence", "components": ["script", "voice_over"]})
+    if "meer context" in lowered:
+        directives.append({"kind": "add_context", "components": ["script", "producer"]})
+    if "interview eerder" in lowered:
+        directives.append({"kind": "interview_timing", "value": "earlier", "components": ["clips", "edit"]})
     if not directives:
         directives.append({"kind": "natural_revision", "instruction": command.strip(), "components": ["script", "producer", "director"]})
     return directives
@@ -168,6 +178,15 @@ def revise_draft(project_root: Path, command: str, *, selected_scene_id: str | N
             elif directive["kind"] == "ending":
                 scene["ending_style"] = directive["value"]
                 scene["script_revision_brief"] = "End decisively on the strongest supported conclusion without overstating certainty."
+            elif directive["kind"] == "remove_sentence":
+                sentences = re.split(r"(?<=[.!?])\s+", str(scene.get("narration", "")))
+                scene["narration"] = " ".join(sentences[:-1]) if len(sentences) > 1 else ""
+            elif directive["kind"] == "add_context":
+                scene["script_revision_brief"] = "Add concise, source-backed context using only approved claims."
+            elif directive["kind"] == "replace_media":
+                scene["media_replacement_required"] = True
+            elif directive["kind"] == "interview_timing":
+                scene["interview_timing"] = "earlier"
             elif directive["kind"] == "add_screenshot":
                 candidates = [asset for asset in media_manifest.get("assets", []) if "screenshot" in " ".join(str(asset.get(key, "")) for key in ("id", "title", "path", "usage_notes")).lower()]
                 if not candidates:
@@ -212,11 +231,24 @@ def revise_draft(project_root: Path, command: str, *, selected_scene_id: str | N
         original == current for original, current in zip(before, scene_manifest["scenes"], strict=True)
         if str(original.get("id")) not in changed
     )
+    visual_review = []
+    for scene_id in changed:
+        old_scene = next(item for item in before if str(item.get("id")) == scene_id)
+        new_scene = next(item for item in scene_manifest["scenes"] if str(item.get("id")) == scene_id)
+        visual_review.append({
+            "scene_id": scene_id,
+            "old_fragment": {"narration": old_scene.get("narration", ""), "duration_seconds": old_scene.get("duration_seconds", old_scene.get("estimated_duration_seconds")), "thumbnail": f"assets/thumbnails/scene-{int(old_scene.get('index') or 1):02}.png"},
+            "proposed_change": command,
+            "new_version": {"narration": new_scene.get("narration", ""), "duration_seconds": new_scene.get("duration_seconds", new_scene.get("estimated_duration_seconds")), "thumbnail": f"assets/thumbnails/scene-{int(new_scene.get('index') or 1):02}.png"},
+            "reason": "User-requested scoped revision; unchanged scenes are preserved.",
+            "cost_usd": 0.0,
+        })
     entry = {
         "id": revision_id, "requested_at": datetime.now(UTC).isoformat(), "command": command,
         "idempotency_key": idempotency_key,
         "changed_scene_ids": changed, "regenerated_components": sorted(components),
         "unchanged_scenes_preserved": unchanged_preserved, "evaluations": evaluations,
+        "visual_review": visual_review,
     }
     draft.setdefault("revision_history", []).append(entry)
     write_json(project_root / "manifests" / "review_draft.json", draft)

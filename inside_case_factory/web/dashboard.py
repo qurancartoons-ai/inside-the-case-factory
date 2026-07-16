@@ -21,6 +21,7 @@ from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
 from inside_case_factory.core.project import create_project
 from inside_case_factory.core.draft_review import approve_scene, create_review_draft, revise_draft
+from inside_case_factory.core.user_experience import apply_dossier_instruction, production_progress, revision_change_plan, supported_script_map, youtube_draft
 from inside_case_factory.core.reference_intake import create_reference_intake, select_reference_match
 from inside_case_factory.core.research import (
     add_claim,
@@ -79,6 +80,10 @@ class DashboardApp:
 
         if method == "GET" and path == "/":
             return self.html(self.index())
+        if method == "GET" and path == "/projects/new":
+            return self.html(self.new_project_wizard())
+        if method == "POST" and path == "/projects/new":
+            return self.create_project_wizard(environ)
         if method == "POST" and path == "/production/start":
             return self.start_production(environ)
         if method == "POST" and path == "/projects":
@@ -93,6 +98,16 @@ class DashboardApp:
                 return self.html(self.reference_intake_page(parts[1]))
             if len(parts) == 3 and parts[2] == "draft-review":
                 return self.html(self.draft_review_page(parts[1]))
+            if len(parts) == 3 and parts[2] == "production":
+                return self.html(self.production_overview_page(parts[1]))
+            if len(parts) == 3 and parts[2] == "dossier-review":
+                return self.html(self.dossier_review_page(parts[1]))
+            if len(parts) == 3 and parts[2] == "youtube-draft":
+                return self.html(self.youtube_draft_page(parts[1]))
+            if len(parts) == 4 and parts[2] == "preview" and parts[3] == "video":
+                return self.video_preview(parts[1])
+            if len(parts) == 5 and parts[2] == "preview" and parts[3] == "thumbnail":
+                return self.scene_thumbnail(parts[1], parts[4])
             if len(parts) == 4 and parts[2] == "download" and parts[3] == "final":
                 return self.download_final(parts[1])
             if len(parts) == 5 and parts[2] == "media" and parts[4] == "preview":
@@ -109,6 +124,8 @@ class DashboardApp:
                 return self.run_automated_research(parts[1], environ)
             if len(parts) == 6 and parts[2] == "research" and parts[3] in {"source", "claim"} and parts[5] in {"approve", "reject"}:
                 return self.review_research_item(parts[1], parts[3], parts[4], parts[5])
+            if len(parts) == 6 and parts[2] == "research" and parts[3] == "claim" and parts[5] == "edit":
+                return self.edit_claim(parts[1], parts[4], environ)
             if len(parts) == 4 and parts[2] == "research" and parts[3] == "approve":
                 return self.approve_research(parts[1])
             if len(parts) == 4 and parts[2] == "script" and parts[3] == "generate":
@@ -127,6 +144,14 @@ class DashboardApp:
                 return self.select_reference(parts[1], parts[3], environ)
             if len(parts) == 4 and parts[2] == "draft-review" and parts[3] == "revise":
                 return self.revise_draft(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "draft-review" and parts[3] == "execute-revision":
+                return self.execute_revision(parts[1])
+            if len(parts) == 4 and parts[2] == "dossier-review" and parts[3] == "instruction":
+                return self.dossier_instruction(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "youtube-draft" and parts[3] == "save":
+                return self.save_youtube_draft(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "youtube-draft" and parts[3] == "confirm-upload":
+                return self.confirm_youtube_upload(parts[1], environ)
             if len(parts) == 4 and parts[2] == "providers" and parts[3] == "configure":
                 return self.configure_project_providers(parts[1], environ)
             if len(parts) == 5 and parts[2] == "draft-review" and parts[4] == "approve":
@@ -190,6 +215,7 @@ class DashboardApp:
             <section class="hero-panel">
               <div class="eyebrow">Nieuwe video maken</div>
               <h2>Beschrijf je documentaire. De productie volgt daarna stap voor stap.</h2>
+              <p><a class="button" href="/projects/new">Open de volledige projectwizard</a></p>
               <form method="post" action="/production/start" class="production-form">
                 <label class="wide prompt-label">Beschrijf de video die je wilt maken
                   <textarea name="prompt" rows="8" required placeholder="Bijvoorbeeld: Maak een feitelijke documentaire over een onopgeloste zaak. Focus op de tijdlijn, betrokken personen, belangrijke vragen en betrouwbare bronnen."></textarea>
@@ -267,11 +293,16 @@ class DashboardApp:
         topic = str(manifest.get("topic", slug)) if isinstance(manifest, dict) else slug
         final_video = project_root / "exports" / "final_video.mp4"
         status = "Klaar" if final_video.exists() else self.current_dutch_stage(project_root)
+        progress = production_progress(project_root)
+        current = next((phase["name"] for phase in progress["phases"] if phase["status"] == "active"), "Afgerond")
         return f"""
         <article class="project-card">
           <div>
             <h3>{escape(topic)}</h3>
             <p class="muted">{escape(slug)}</p>
+            <p>Fase: <strong>{escape(current)}</strong> · Kosten: <strong>${progress['cost_usd']:.2f}</strong></p>
+            <p class="muted">Laatste activiteit: {escape(str(progress['last_activity']))}</p>
+            <p class="muted">Approvals: {escape(', '.join(progress['approvals']) or 'geen')} · Blokkades: {escape(', '.join(progress['blockers']) or 'geen')}</p>
           </div>
           <div class="project-card-actions">
             <span class="status-pill">{escape(status)}</span>
@@ -290,6 +321,94 @@ class DashboardApp:
         project = create_project(settings.projects_dir, topic, slug)
         ensure_media_manifest(project.root)
         return self.redirect(f"/projects/{project.slug}")
+
+    def new_project_wizard(self) -> str:
+        return self.page("Nieuw project", """
+        <nav class="crumb"><a href="/">Dashboard</a><span>/</span><strong>Nieuw project</strong></nav>
+        <section class="hero-panel"><p class="eyebrow">Projectwizard</p><h2>Van onderwerp naar reviewbare documentaire</h2>
+          <form method="post" action="/projects/new" enctype="multipart/form-data" class="production-form">
+            <label class="wide">Onderwerp of productieprompt<textarea name="prompt" rows="6" required></textarea></label>
+            <div class="start-grid">
+              <label>Duur<select name="duration"><option>5</option><option selected>12</option><option>20</option><option>30</option></select></label>
+              <label>Taal<select name="language"><option>Nederlands</option><option>English</option><option>Deutsch</option><option>Français</option></select></label>
+              <label>Documentairestijl<select name="style"><option value="factual_documentary">Feitelijk</option><option value="investigative_documentary">Onderzoekend</option><option value="cinematic">Cinematisch</option></select></label>
+              <label>Doelgroep<input name="audience" placeholder="Breed publiek, professionals..."></label>
+              <label>Providerprofiel<select name="provider_profile"><option value="offline">Volledig lokaal</option><option value="balanced">Gebalanceerd</option><option value="quality">Hoogste kwaliteit</option></select></label>
+              <label>Maximumbudget USD<input name="budget" type="number" min="0" step="0.01" value="0"></label>
+              <label>Modus<select name="mode"><option value="review">Reviewmodus</option><option value="automatic">Automatisch</option></select></label>
+            </div>
+            <label>Screenshots<input type="file" name="screenshot" accept="image/*" multiple></label>
+            <label>Lokale clips<input type="file" name="clip" accept="video/*,audio/*" multiple></label>
+            <label class="wide">YouTube-links<textarea name="youtube_urls" rows="3" placeholder="Eén URL per regel"></textarea></label>
+            <label>Bronnen of dossierbestanden<input type="file" name="dossier" accept=".json,.txt,.md,.pdf" multiple></label>
+            <button type="submit" class="primary-action">Project aanmaken</button>
+          </form>
+        </section>""")
+
+    def _uploads(self, form: FieldStorage, name: str) -> list[FieldStorage]:
+        if name not in form:
+            return []
+        value = form[name]
+        fields = value if isinstance(value, list) else [value]
+        return [field for field in fields if getattr(field, "filename", "")]
+
+    def create_project_wizard(self, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        prompt = self.form_value(form, "prompt").strip()
+        if not prompt:
+            return self.html(self.page("Prompt ontbreekt", '<section class="panel"><p>Voer een onderwerp of prompt in.</p></section>'), "400 Bad Request")
+        project = create_project(self.settings.projects_dir, prompt[:100])
+        try:
+            duration = max(1, min(60, int(self.form_value(form, "duration", "12"))))
+            budget = max(0.0, float(self.form_value(form, "budget", "0")))
+        except ValueError:
+            duration, budget = 12, 0.0
+        workflow = self.read_manifest(project.root / "manifests/workflow.json")
+        workflow.update({"target_duration_minutes": duration, "language": self.form_value(form, "language", "Nederlands"), "autonomy_mode": self.form_value(form, "mode", "review"), "content_mode": normalize_content_mode(self.form_value(form, "style", "factual_documentary")), "audience": self.form_value(form, "audience")})
+        write_json(project.root / "manifests/workflow.json", workflow)
+        write_json(project.root / "manifests/production_request.json", {"prompt": prompt, "target_duration_minutes": duration, "language": workflow["language"], "autonomy_mode": workflow["autonomy_mode"], "style": self.form_value(form, "style"), "audience": workflow["audience"]})
+        profile = self.form_value(form, "provider_profile", "offline")
+        write_json(project.root / "manifests/provider_config.json", {"version": 1, "profile": profile, "budget_usd": budget, "external_calls_enabled": profile != "offline" and budget > 0, "cache_enabled": True, "retries": 2, "tasks": {}})
+        for field in self._uploads(form, "screenshot") + self._uploads(form, "clip"):
+            suffix = Path(str(field.filename)).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+                temp = Path(handle.name); handle.write(field.file.read())
+            try:
+                create_reference_intake(project.root, local_path=temp, original_filename=Path(str(field.filename)).name)
+            finally:
+                temp.unlink(missing_ok=True)
+        for url in self.form_value(form, "youtube_urls").splitlines():
+            if url.strip():
+                create_reference_intake(project.root, source_url=url.strip())
+        dossier_files = []
+        for field in self._uploads(form, "dossier"):
+            name = Path(str(field.filename)).name
+            destination = project.root / "research" / name
+            destination.write_bytes(field.file.read()); dossier_files.append(str(destination.relative_to(project.root)))
+        write_json(project.root / "manifests/intake_files.json", {"dossier_files": dossier_files})
+        return self.redirect(f"/projects/{project.slug}/production")
+
+    def production_overview_page(self, slug: str) -> str:
+        root = self.project_root(slug); progress = production_progress(root)
+        rows = "".join(f"""<article class="phase-card"><div><strong>{escape(phase['name'])}</strong><span class="status-pill">{escape(phase['status'])}</span></div><progress max="100" value="{phase['progress']}"></progress><p>Provider: {escape(phase['provider'])} · ${phase['estimated_cost_usd']}</p><p>Artefacten: {escape(', '.join(phase['artifacts']) or '—')}</p>{f'<p class="error">{escape("; ".join(phase["errors"]))}</p>' if phase['errors'] else ''}<form method="post" action="/projects/{escape(slug)}/generate"><button type="submit" class="secondary">Herstart / hervat</button></form></article>""" for phase in progress["phases"])
+        return self.page("Productieoverzicht", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Productie</strong></nav><section class="summary-grid"><div><span>Kosten</span><strong>${progress['cost_usd']:.2f}</strong></div><div><span>Laatste activiteit</span><strong>{escape(str(progress['last_activity']))}</strong></div><div><span>Approvals nodig</span><strong>{escape(', '.join(progress['approvals']) or 'Geen')}</strong></div><div><span>Blokkades</span><strong>{escape(', '.join(progress['blockers']) or 'Geen')}</strong></div></section><section class="phase-grid">{rows}</section><script>setTimeout(() => location.reload(), 5000);</script>""")
+
+    def dossier_review_page(self, slug: str) -> str:
+        root = self.project_root(slug); sources = self.read_manifest(root / "manifests/sources.json").get("sources", []); claims = self.read_manifest(root / "manifests/claims.json").get("claims", [])
+        source_rows = "".join(f'<tr><td><a href="{escape(str(s.get("url", "")))}">{escape(str(s.get("title", s.get("id"))))}</a></td><td>{escape(str(s.get("review_status", "")))}</td></tr>' for s in sources)
+        claim_rows = "".join(f'<tr><td><code>{escape(str(c.get("id")))}</code></td><td><form method="post" action="/projects/{escape(slug)}/research/claim/{escape(str(c.get("id")))}/edit"><textarea name="text" rows="3">{escape(str(c.get("text", "")))}</textarea><button>Wijzig claim</button></form></td><td>{escape(str(c.get("review_status", "")))}</td><td>{self.review_buttons(slug, "claim", str(c.get("id")))}</td></tr>' for c in claims)
+        mappings = "".join(f'<article class="subpanel"><strong>{escape(str(item["scene_id"]))}</strong><p>{escape(str(item["script"]))}</p><p>Ondersteund door: {escape(", ".join(str(c.get("id")) for c in item["claims"]) or "geen claim")}</p></article>' for item in supported_script_map(root))
+        return self.page("Dossier & bronnen", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Dossier</strong></nav><section class="panel"><h2>Bronnen openen</h2><table>{source_rows}</table><h2>Claims beoordelen en aanpassen</h2><table>{claim_rows}</table><form method="post" action="/projects/{escape(slug)}/dossier-review/instruction" class="grid-form"><label>Claim of bron-ID<input name="item_id"></label><label class="wide">Natuurlijke instructie<textarea name="instruction" required placeholder="onderzoek dit verder"></textarea></label><button>Toepassen</button></form></section><section class="panel"><h2>Claim → scriptdekking</h2>{mappings}</section>""")
+
+    def dossier_instruction(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ); apply_dossier_instruction(self.project_root(slug), self.form_value(form, "instruction"), item_id=self.form_value(form, "item_id")); return self.redirect(f"/projects/{slug}/dossier-review")
+
+    def edit_claim(self, slug: str, claim_id: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ); path = self.project_root(slug) / "manifests/claims.json"; data = read_json(path)
+        for claim in data.get("claims", []):
+            if str(claim.get("id")) == claim_id:
+                claim["text"] = self.form_value(form, "text").strip(); claim["review_status"] = "needs_review"
+        write_json(path, data); return self.redirect(f"/projects/{slug}/dossier-review")
 
     def project_detail(self, slug: str) -> str:
         project_root = self.project_root(slug)
@@ -316,7 +435,10 @@ class DashboardApp:
                 <p class="muted">Huidige stap: {escape(self.current_dutch_stage(project_root))}</p>
               </div>
               <div class="actions">
+                <a class="button ghost" href="/projects/{escape(slug)}/production">Productieoverzicht</a>
+                <a class="button ghost" href="/projects/{escape(slug)}/dossier-review">Dossier & bronnen</a>
                 <a class="button" href="/projects/{escape(slug)}/draft-review">Draft beoordelen</a>
+                <a class="button ghost" href="/projects/{escape(slug)}/youtube-draft">YouTube draft</a>
                 <a class="button ghost" href="/projects/{escape(slug)}/advanced">Geavanceerde instellingen</a>
                 {final_link}
               </div>
@@ -333,6 +455,9 @@ class DashboardApp:
         if not project_root.is_dir():
             return self.page("Project niet gevonden", "<section class=\"panel\"><p>Project niet gevonden.</p></section>")
         draft = create_review_draft(project_root)
+        critic = self.read_manifest(project_root / "manifests/critic_report.json")
+        director = self.read_manifest(project_root / "manifests/director_report.json")
+        pending = self.read_manifest(project_root / "manifests/pending_revision_plan.json")
         scene_options = "".join(
             f'<option value="{escape(str(scene["id"]))}">Scène {escape(str(scene.get("index") or scene["id"]))}</option>'
             for scene in draft.get("scenes", [])
@@ -353,9 +478,11 @@ class DashboardApp:
                 f'<li>{escape(str(clip.get("video_title") or clip.get("source_url") or clip.get("intake_id")))}</li>' for clip in scene.get("clips", [])
             ) or "<li>Geen videofragment gekoppeld.</li>"
             locked = scene.get("review_status") == "approved"
+            thumb = f'/projects/{escape(slug)}/preview/thumbnail/{escape(str(scene["id"]))}'
             cards.append(f"""
             <article class="panel scene-review" id="scene-{escape(str(scene['id']))}">
               <div class="scene-review-head"><div><p class="eyebrow">Scène {escape(str(scene.get('index') or scene['id']))}</p><h2>{escape(str(scene.get('heading', '')))}</h2></div><span class="status-pill">{escape(str(scene.get('review_status', 'pending_review')))}</span></div>
+              <img class="scene-thumb" src="{thumb}" alt="Thumbnail scène {escape(str(scene.get('index')))}">
               <details open><summary>Script en voice-over</summary><p>{escape(str(scene.get('script', '')))}</p><p><strong>Voice-over:</strong> {escape(str(scene.get('voice_over_text', '')))}</p><p><strong>Vertolking:</strong> {escape(str(scene.get('voice_over_delivery', '')))}</p></details>
               <details><summary>Claims en bronnen</summary><h3>Claims</h3><ul>{claim_rows}</ul><h3>Bronnen</h3><ul>{source_rows}</ul></details>
               <details><summary>Screenshots en videofragmenten</summary><h3>Beelden</h3><ul>{media_rows}</ul><h3>Clips</h3><ul>{clip_rows}</ul></details>
@@ -365,16 +492,23 @@ class DashboardApp:
             </article>
             """)
         history = "".join(
-            f'<li><strong>{escape(str(item.get("command", "")))}</strong> — scènes {escape(", ".join(item.get("changed_scene_ids", [])))}</li>'
+            f'<li><strong>{escape(str(item.get("command", "")))}</strong> — scènes {escape(", ".join(item.get("changed_scene_ids", [])))}'
+            + "".join(f'<div class="revision-compare"><div><span>Oud fragment</span><p>{escape(str(review.get("old_fragment", {}).get("narration", "")))}</p></div><div><span>Voorgestelde wijziging</span><p>{escape(str(review.get("proposed_change", "")))}</p></div><div><span>Nieuwe versie</span><p>{escape(str(review.get("new_version", {}).get("narration", "")))}</p></div><p>Reden: {escape(str(review.get("reason", "")))} · Kosten: ${escape(str(review.get("cost_usd", 0)))}</p></div>' for review in item.get("visual_review", [])) + '</li>'
             for item in reversed(draft.get("revision_history", []))
         ) or "<li>Nog geen revisies.</li>"
+        plan_panel = ""
+        if pending and pending.get("status") == "awaiting_confirmation":
+            plan_panel = f"""<section class="review-card"><div><p class="eyebrow">Wijzigingsplan</p><h2>Controleer vóór uitvoering</h2><p>Scènes: {escape(', '.join(pending.get('scene_ids', [])))} · Componenten: {escape(', '.join(pending.get('components', [])))} · Geschatte kosten: ${escape(str(pending.get('estimated_cost_usd', 0)))}</p></div><form method="post" action="/projects/{escape(slug)}/draft-review/execute-revision"><button>Plan bevestigen en uitvoeren</button></form></section>"""
+        timeline = "".join(f'<a href="#scene-{escape(str(scene["id"]))}"><img src="/projects/{escape(slug)}/preview/thumbnail/{escape(str(scene["id"]))}" alt=""><span>{escape(str(scene.get("heading", scene["id"])))}</span></a>' for scene in draft.get("scenes", []))
         return self.page("Draft Review", f"""
         <nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Draft Review</strong></nav>
+        <section class="review-player"><div><video controls preload="metadata" src="/projects/{escape(slug)}/preview/video"></video><div class="review-timeline">{timeline}</div></div><aside><h2>Reviewscore</h2><p>Director: <strong>{escape(str(director.get('critic_score', '—')))}</strong></p><p>Critic: <strong>{escape(str(critic.get('overall_score', '—')))}</strong></p><p>Ondertitels: <code>manifests/subtitles.srt</code></p></aside></section>
+        {plan_panel}
         <section class="panel"><h2>Revisiechat</h2><p class="muted">Beschrijf natuurlijk wat je wilt wijzigen. Alleen de geselecteerde of genoemde scène wordt opnieuw beoordeeld.</p>
           <form method="post" action="/projects/{escape(slug)}/draft-review/revise" class="grid-form">
             <label>Scène <select name="scene_id"><option value="">Automatisch uit verzoek</option>{scene_options}</select></label>
             <label class="wide">Revisieverzoek <textarea name="command" rows="4" required placeholder="Maak de intro spannender."></textarea></label>
-            <button type="submit">Revisie toepassen</button>
+            <button type="submit">Wijzigingsplan maken</button>
           </form><h3>Revisiehistorie</h3><ul>{history}</ul>
         </section>{''.join(cards)}
         """)
@@ -382,12 +516,20 @@ class DashboardApp:
     def revise_draft(self, slug: str, environ: dict[str, Any]) -> Response:
         form = self.read_form(environ)
         try:
-            revise_draft(
-                self.project_root(slug), self.form_value(form, "command"),
-                selected_scene_id=self.form_value(form, "scene_id") or None,
-            )
+            revision_change_plan(self.project_root(slug), self.form_value(form, "command"), self.form_value(form, "scene_id") or None)
         except (ValueError, KeyError, RuntimeError) as error:
             return self.html(self.page("Revisie geblokkeerd", f'<section class="panel"><p>{escape(str(error))}</p></section>'), "409 Conflict")
+        return self.redirect(f"/projects/{slug}/draft-review")
+
+    def execute_revision(self, slug: str) -> Response:
+        root = self.project_root(slug); plan = self.read_manifest(root / "manifests/pending_revision_plan.json")
+        if not plan or plan.get("status") != "awaiting_confirmation":
+            return self.html(self.page("Geen wijzigingsplan", '<section class="panel"><p>Er staat geen plan klaar.</p></section>'), "409 Conflict")
+        try:
+            revise_draft(root, str(plan["command"]), selected_scene_id=str(plan["scene_ids"][0]))
+        except (ValueError, KeyError, RuntimeError) as error:
+            return self.html(self.page("Revisie geblokkeerd", f'<section class="panel"><p>{escape(str(error))}</p></section>'), "409 Conflict")
+        plan["status"] = "executed"; write_json(root / "manifests/pending_revision_plan.json", plan)
         return self.redirect(f"/projects/{slug}/draft-review")
 
     def approve_draft_scene(self, slug: str, scene_id: str) -> Response:
@@ -916,6 +1058,40 @@ class DashboardApp:
             final_video.read_bytes(),
         )
 
+    def video_preview(self, slug: str) -> Response:
+        return self.download_final(slug)
+
+    def scene_thumbnail(self, slug: str, scene_id: str) -> Response:
+        root = self.project_root(slug); scenes = self.read_manifest(root / "manifests/scenes.json").get("scenes", [])
+        scene = next((item for item in scenes if str(item.get("id")) == scene_id), None)
+        if scene is None:
+            return self.html(self.page("Niet gevonden", '<section class="panel"><p>Thumbnail niet gevonden.</p></section>'), "404 Not Found")
+        index = int(scene.get("index") or scenes.index(scene) + 1)
+        candidates = [root / f"assets/thumbnails/scene-{index:02}.png"]
+        media = load_media_manifest(root).get("assets", [])
+        candidates.extend(root / str(asset.get("path")) for asset in media if scene_id in {str(item) for item in asset.get("mapped_scenes", [])})
+        path = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if path is None:
+            return "200 OK", [("Content-Type", "image/svg+xml")], f'<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="100%" height="100%" fill="#263e35"/><text x="30" y="320" fill="white" font-size="28">{escape(str(scene.get("heading", scene_id)))}</text></svg>'.encode()
+        mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+        return "200 OK", [("Content-Type", mime), ("Content-Length", str(path.stat().st_size))], path.read_bytes()
+
+    def youtube_draft_page(self, slug: str) -> str:
+        draft = youtube_draft(self.project_root(slug)); chapters = "\n".join(f"{item['start_seconds']} — {item['title']}" for item in draft.get("chapters", []))
+        return self.page("YouTube draft", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>YouTube draft</strong></nav><section class="panel"><h2>Veilige export</h2><form method="post" action="/projects/{escape(slug)}/youtube-draft/save" class="grid-form"><label class="wide">Titel<input name="title" value="{escape(str(draft.get('title', '')))}"></label><label class="wide">Beschrijving<textarea name="description" rows="8">{escape(str(draft.get('description', '')))}</textarea></label><label class="wide">Hoofdstukken<textarea rows="8" readonly>{escape(chapters)}</textarea></label><label>Tags<input name="tags" value="{escape(', '.join(draft.get('tags', [])))}"></label><label>Privacy<select name="privacy_status"><option value="private">Private</option><option value="draft">Draft</option></select></label><p>Thumbnail: <code>{escape(str(draft.get('thumbnail')))}</code><br>Ondertitels: <code>{escape(str(draft.get('subtitles')))}</code><br>Video: <code>{escape(str(draft.get('video')))}</code></p><button>Draft opslaan</button></form></section><section class="review-card"><div><h2>Upload naar YouTube</h2><p>Publicatie gebeurt nooit automatisch. Alleen private/draft upload kan na expliciete bevestiging worden klaargezet.</p></div><form method="post" action="/projects/{escape(slug)}/youtube-draft/confirm-upload"><label><input type="checkbox" name="confirm" value="yes" required> Ik bevestig private/draft upload</label><button>Upload expliciet bevestigen</button></form></section>""")
+
+    def save_youtube_draft(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ); root = self.project_root(slug); draft = youtube_draft(root)
+        draft.update({"title": self.form_value(form, "title"), "description": self.form_value(form, "description"), "tags": [item.strip() for item in self.form_value(form, "tags").split(",") if item.strip()], "privacy_status": self.form_value(form, "privacy_status", "private"), "status": "draft", "upload_confirmed": False})
+        write_json(root / "manifests/youtube_draft.json", draft); return self.redirect(f"/projects/{slug}/youtube-draft")
+
+    def confirm_youtube_upload(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        if self.form_value(form, "confirm") != "yes":
+            return self.html(self.page("Bevestiging vereist", '<section class="panel"><p>Expliciete bevestiging ontbreekt.</p></section>'), "409 Conflict")
+        root = self.project_root(slug); draft = youtube_draft(root); draft["upload_confirmed"] = True; draft["status"] = "ready_for_private_upload"; draft["privacy_status"] = "private" if draft.get("privacy_status") not in {"private", "draft"} else draft["privacy_status"]; write_json(root / "manifests/youtube_draft.json", draft)
+        return self.redirect(f"/projects/{slug}/youtube-draft")
+
     def media_preview(self, slug: str, media_id: str) -> Response:
         project_root = self.project_root(slug)
         manifest = load_media_manifest(project_root)
@@ -1398,8 +1574,21 @@ class DashboardApp:
     .chart-row i {{ display:block; height:12px; border-radius:999px; background:#b44b42; min-width:2px; }}
     .producer-chart.emotion .chart-row i {{ background:#8761a8; }}
     .producer-chart.retention .chart-row i {{ background:#2f806c; }}
+    .phase-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:12px; margin-top:18px; }}
+    .phase-card {{ background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; }}
+    .phase-card > div {{ display:flex; justify-content:space-between; gap:8px; align-items:center; }}
+    .phase-card progress {{ width:100%; margin-top:12px; accent-color:var(--accent); }}
+    .review-player {{ display:grid; grid-template-columns:minmax(0,3fr) minmax(220px,1fr); gap:16px; margin-bottom:18px; }}
+    .review-player > div, .review-player aside {{ background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px; }}
+    .review-player video {{ width:100%; background:#111; border-radius:6px; }}
+    .review-timeline {{ display:flex; gap:8px; overflow-x:auto; padding-top:10px; }}
+    .review-timeline a {{ flex:0 0 130px; text-decoration:none; font-size:12px; }}
+    .review-timeline img, .scene-thumb {{ width:100%; aspect-ratio:16/9; object-fit:cover; border-radius:6px; }}
+    .scene-thumb {{ max-width:360px; }}
+    .revision-compare {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; border:1px solid var(--line); border-radius:8px; padding:10px; margin:10px 0; }}
+    .revision-compare > p {{ grid-column:1/-1; color:var(--muted); }}
     @media (max-width: 900px) {{ .workflow {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .start-grid, .summary-grid {{ grid-template-columns:1fr 1fr; }} .review-card, .project-card {{ align-items:flex-start; flex-direction:column; }} .actions {{ justify-content:flex-start; }} }}
-    @media (max-width: 620px) {{ header, .project-head {{ display:block; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .workflow, .start-grid, .summary-grid {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} }}
+    @media (max-width: 620px) {{ header, .project-head {{ display:block; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .workflow, .start-grid, .summary-grid, .review-player, .revision-compare {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} table {{ display:block; overflow-x:auto; }} button,.button {{ min-height:44px; }} }}
   </style>
 </head>
 <body>

@@ -391,3 +391,16 @@ The production pipeline has one provider interface and registry for text, voice,
 Global provider definitions live in `config/providers.toml`. A project can override budget, retries, task preference order, caching, and external-call authorization in `manifests/provider_config.json` or through **Geavanceerde instellingen → Production providers**. External provider calls are disabled by default even when API keys exist. Enabling them is an explicit per-project action; keys stay in environment variables.
 
 For every task the router filters unavailable providers, applies the project's preferred order, then considers priority, quality, and estimated cost. Calls use bounded retries, content-addressed caching, a persisted `provider_usage.json` budget ledger, and ordered fallbacks. `provider_selection.json` records the selected text, voice, and image providers. Producer, Director, and Critic reports also record their task-specific selection. Provider cache files live under `workspace/provider_cache` and generated binary results are written atomically through the project workflow.
+
+## Complete Dashboard and Offline Review Demo
+
+The dashboard now exposes the whole workflow without terminal knowledge: a project wizard with media/source intake and provider budget; an eleven-phase live production view; dossier, source, and claim review with natural-language instructions and claim-to-script mapping; a video draft player with timeline, thumbnails, scene evidence and scores; confirmation-gated selective revisions; and a private-by-default YouTube export draft.
+
+Create the reproducible zero-cost visual demo and start the dashboard:
+
+```bash
+python3 -m inside_case_factory review-demo
+python3 -m inside_case_factory dashboard --host 127.0.0.1 --port 8765
+```
+
+Open `http://127.0.0.1:8765/projects/offline-review-demo/draft-review`. The generator creates a real local MP4, four scene thumbnails, dossier and evidence manifests, script, Producer/Director/Critic artifacts, an executed scoped revision, YouTube draft metadata, and `projects/offline-review-demo/review/demo_review_report.html`. Generated project media remains untracked by Git.
