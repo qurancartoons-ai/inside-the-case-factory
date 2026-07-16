@@ -20,6 +20,7 @@ from inside_case_factory.core.narrative_quality import validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
 from inside_case_factory.core.project import create_project
+from inside_case_factory.core.draft_review import approve_scene, create_review_draft, revise_draft
 from inside_case_factory.core.reference_intake import create_reference_intake, select_reference_match
 from inside_case_factory.core.research import (
     add_claim,
@@ -90,6 +91,8 @@ class DashboardApp:
                 return self.html(self.project_advanced(parts[1]))
             if len(parts) == 3 and parts[2] == "reference-intake":
                 return self.html(self.reference_intake_page(parts[1]))
+            if len(parts) == 3 and parts[2] == "draft-review":
+                return self.html(self.draft_review_page(parts[1]))
             if len(parts) == 4 and parts[2] == "download" and parts[3] == "final":
                 return self.download_final(parts[1])
             if len(parts) == 5 and parts[2] == "media" and parts[4] == "preview":
@@ -122,6 +125,10 @@ class DashboardApp:
                 return self.add_reference_intake(parts[1], environ)
             if len(parts) == 5 and parts[2] == "reference-intake" and parts[4] == "select":
                 return self.select_reference(parts[1], parts[3], environ)
+            if len(parts) == 4 and parts[2] == "draft-review" and parts[3] == "revise":
+                return self.revise_draft(parts[1], environ)
+            if len(parts) == 5 and parts[2] == "draft-review" and parts[4] == "approve":
+                return self.approve_draft_scene(parts[1], parts[3])
             if len(parts) == 3 and parts[2] == "discover":
                 return self.discover_media(parts[1], environ)
             if len(parts) == 5 and parts[2] == "media" and parts[4] in {"approve", "reject"}:
@@ -307,6 +314,7 @@ class DashboardApp:
                 <p class="muted">Huidige stap: {escape(self.current_dutch_stage(project_root))}</p>
               </div>
               <div class="actions">
+                <a class="button" href="/projects/{escape(slug)}/draft-review">Draft beoordelen</a>
                 <a class="button ghost" href="/projects/{escape(slug)}/advanced">Geavanceerde instellingen</a>
                 {final_link}
               </div>
@@ -317,6 +325,75 @@ class DashboardApp:
             {self.review_action_card(project_root, slug)}
             """,
         )
+
+    def draft_review_page(self, slug: str) -> str:
+        project_root = self.project_root(slug)
+        if not project_root.is_dir():
+            return self.page("Project niet gevonden", "<section class=\"panel\"><p>Project niet gevonden.</p></section>")
+        draft = create_review_draft(project_root)
+        scene_options = "".join(
+            f'<option value="{escape(str(scene["id"]))}">Scène {escape(str(scene.get("index") or scene["id"]))}</option>'
+            for scene in draft.get("scenes", [])
+        )
+        cards = []
+        for scene in draft.get("scenes", []):
+            claim_rows = "".join(
+                f'<li><code>{escape(str(claim.get("id", "")))}</code> {escape(str(claim.get("text", "")))}</li>'
+                for claim in scene.get("claims", [])
+            ) or "<li>Geen claim gekoppeld.</li>"
+            source_rows = "".join(
+                f'<li>{escape(str(source.get("title", source.get("id", ""))))}</li>' for source in scene.get("sources", [])
+            ) or "<li>Geen bron gekoppeld.</li>"
+            media_rows = "".join(
+                f'<li>{escape(str(media.get("title") or media.get("id") or media.get("path")))}</li>' for media in scene.get("media", [])
+            ) or "<li>Geen screenshot of beeld gekoppeld.</li>"
+            clip_rows = "".join(
+                f'<li>{escape(str(clip.get("video_title") or clip.get("source_url") or clip.get("intake_id")))}</li>' for clip in scene.get("clips", [])
+            ) or "<li>Geen videofragment gekoppeld.</li>"
+            locked = scene.get("review_status") == "approved"
+            cards.append(f"""
+            <article class="panel scene-review" id="scene-{escape(str(scene['id']))}">
+              <div class="scene-review-head"><div><p class="eyebrow">Scène {escape(str(scene.get('index') or scene['id']))}</p><h2>{escape(str(scene.get('heading', '')))}</h2></div><span class="status-pill">{escape(str(scene.get('review_status', 'pending_review')))}</span></div>
+              <details open><summary>Script en voice-over</summary><p>{escape(str(scene.get('script', '')))}</p><p><strong>Voice-over:</strong> {escape(str(scene.get('voice_over_text', '')))}</p><p><strong>Vertolking:</strong> {escape(str(scene.get('voice_over_delivery', '')))}</p></details>
+              <details><summary>Claims en bronnen</summary><h3>Claims</h3><ul>{claim_rows}</ul><h3>Bronnen</h3><ul>{source_rows}</ul></details>
+              <details><summary>Screenshots en videofragmenten</summary><h3>Beelden</h3><ul>{media_rows}</ul><h3>Clips</h3><ul>{clip_rows}</ul></details>
+              <details><summary>Camerarichting en montageplan</summary><pre>{escape(json.dumps(scene.get('edit_plan', {}), indent=2))}</pre></details>
+              <p><strong>Geschatte duur:</strong> {escape(str(scene.get('estimated_duration_seconds', 0)))} seconden</p>
+              {'<p class="success">Deze scène is goedgekeurd en vergrendeld.</p>' if locked else f'<form method="post" action="/projects/{escape(slug)}/draft-review/{escape(str(scene["id"]))}/approve"><button type="submit">Scène goedkeuren</button></form>'}
+            </article>
+            """)
+        history = "".join(
+            f'<li><strong>{escape(str(item.get("command", "")))}</strong> — scènes {escape(", ".join(item.get("changed_scene_ids", [])))}</li>'
+            for item in reversed(draft.get("revision_history", []))
+        ) or "<li>Nog geen revisies.</li>"
+        return self.page("Draft Review", f"""
+        <nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Draft Review</strong></nav>
+        <section class="panel"><h2>Revisiechat</h2><p class="muted">Beschrijf natuurlijk wat je wilt wijzigen. Alleen de geselecteerde of genoemde scène wordt opnieuw beoordeeld.</p>
+          <form method="post" action="/projects/{escape(slug)}/draft-review/revise" class="grid-form">
+            <label>Scène <select name="scene_id"><option value="">Automatisch uit verzoek</option>{scene_options}</select></label>
+            <label class="wide">Revisieverzoek <textarea name="command" rows="4" required placeholder="Maak de intro spannender."></textarea></label>
+            <button type="submit">Revisie toepassen</button>
+          </form><h3>Revisiehistorie</h3><ul>{history}</ul>
+        </section>{''.join(cards)}
+        """)
+
+    def revise_draft(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        try:
+            revise_draft(
+                self.project_root(slug), self.form_value(form, "command"),
+                selected_scene_id=self.form_value(form, "scene_id") or None,
+            )
+        except (ValueError, KeyError, RuntimeError) as error:
+            return self.html(self.page("Revisie geblokkeerd", f'<section class="panel"><p>{escape(str(error))}</p></section>'), "409 Conflict")
+        return self.redirect(f"/projects/{slug}/draft-review")
+
+    def approve_draft_scene(self, slug: str, scene_id: str) -> Response:
+        try:
+            approve_scene(self.project_root(slug), scene_id)
+        except KeyError as error:
+            return self.html(self.page("Scène niet gevonden", f'<section class="panel"><p>{escape(str(error))}</p></section>'), "404 Not Found")
+        return self.redirect(f"/projects/{slug}/draft-review")
 
     def reference_intake_summary(self, project_root: Path, slug: str) -> str:
         intent = self.read_manifest(project_root / "manifests" / "reference_intent.json")
@@ -870,6 +947,11 @@ class DashboardApp:
             "dossier.json",
             "narrative_outline.json",
             "reasoning_usage.json",
+            "review_draft.json",
+            "selective_regeneration.json",
+            "producer_revision_review.json",
+            "director_revision_review.json",
+            "critic_revision_review.json",
         ]
         tabs = []
         for name in manifest_names:

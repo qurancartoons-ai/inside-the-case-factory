@@ -360,6 +360,12 @@ After rendering, the Film Critic writes a scored `critic_report.json`, and the P
 
 Criticism is queued in `critic_feedback.json` with `pending_review` status. The Director only learns from entries explicitly approved in the project dashboard; unapproved and rejected feedback is never applied.
 
+## Draft Review and Selective Revision
+
+Every completed dossier/video is materialized as `manifests/review_draft.json`. Open **Draft beoordelen** on the project page to inspect each scene's script and voice-over, claims and sources, screenshots and clips, camera direction, Producer ratios, and Director edit plan. Scenes can be approved individually; approval stores a content fingerprint and locks that scene against accidental revision.
+
+The revision chat accepts scene-specific natural requests such as making the intro tenser, reducing courtroom imagery, adding an available interview or user screenshot, shortening a scene, changing voice delivery, using more close-ups, or strengthening the outro. Requests become deterministic component directives in `selective_regeneration.json`. Only named scene IDs are passed to the Producer, Director, and Critic revision reviewers. Unchanged and approved scenes remain untouched, duplicate requests are idempotent, and the complete revision history remains reviewable.
+
 ## Adding Providers Later
 
 Provider SDKs should be wrapped behind the interfaces in `inside_case_factory/providers/base.py`. A provider should return structured payloads and cost estimates rather than writing directly to final outputs. This keeps human review and source tracking possible before costly generation or publishing.

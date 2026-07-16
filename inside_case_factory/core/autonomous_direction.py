@@ -108,6 +108,21 @@ class DirectorEngine:
         write_json(project_root / "manifests" / "visual_quality_report.json", report)
         return plan
 
+    def review_revisions(self, project_root: Path, scenes: list[dict[str, Any]], scene_ids: list[str]) -> dict[str, Any]:
+        scene_ids_set = set(scene_ids)
+        results = []
+        for scene in scenes:
+            if str(scene.get("id")) not in scene_ids_set:
+                continue
+            results.append({
+                "scene_id": str(scene.get("id")), "status": "ready",
+                "camera_preference": scene.get("camera_preference"),
+                "changed_components": sorted({component for directive in scene.get("revision_directives", []) for component in directive.get("components", []) if component in {"director", "edit", "media"}}),
+            })
+        report = {"version": 1, "engine": "director", "scene_ids": scene_ids, "results": results}
+        write_json(project_root / "manifests" / "director_revision_review.json", report)
+        return report
+
 
 class CriticEngine:
     """Scores the finished edit from render evidence, without modifying approved content."""
@@ -148,6 +163,20 @@ class CriticEngine:
         }
         write_json(project_root / "manifests" / f"critic_report_render_{render_number}.json", report)
         write_json(project_root / "manifests" / "critic_report.json", report)
+        return report
+
+    def review_revisions(self, project_root: Path, scenes: list[dict[str, Any]], scene_ids: list[str]) -> dict[str, Any]:
+        selected = [scene for scene in scenes if str(scene.get("id")) in set(scene_ids)]
+        results = []
+        for scene in selected:
+            directives = scene.get("revision_directives", [])
+            results.append({
+                "scene_id": str(scene.get("id")), "status": "pass" if directives else "needs_revision",
+                "clarity_score": 88.0 if str(scene.get("narration", "")).strip() else 0.0,
+                "scope": "changed_scene_only",
+            })
+        report = {"version": 1, "engine": "critic", "scene_ids": scene_ids, "results": results}
+        write_json(project_root / "manifests" / "critic_revision_review.json", report)
         return report
 
 

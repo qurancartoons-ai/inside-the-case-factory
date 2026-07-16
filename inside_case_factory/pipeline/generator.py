@@ -742,5 +742,7 @@ def generate_video_project(
         workflow["video_rendered"] = True
         workflow["stage"] = "render_complete"
         write_json(manifests_dir / "workflow.json", workflow)
+    from inside_case_factory.core.draft_review import create_review_draft
+    create_review_draft(project.root)
     _progress(f"complete: {final_video_path} ({duration:.1f}s)")
     return GeneratedVideo(project.slug, project.root, final_video_path, duration)

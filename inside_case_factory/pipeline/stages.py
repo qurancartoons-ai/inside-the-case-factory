@@ -18,6 +18,7 @@ class StageKind(StrEnum):
     EDIT_PLAN = "edit_plan"
     SUBTITLES = "subtitles"
     RENDER = "render"
+    DRAFT_REVIEW = "draft_review"
     PACKAGE = "package"
     PUBLISH = "publish"
 
@@ -45,6 +46,7 @@ PIPELINE_STAGES: tuple[PipelineStage, ...] = (
     PipelineStage(StageKind.EDIT_PLAN, "Timing and visual edit plan", "manifests/edit_plan.json", True),
     PipelineStage(StageKind.SUBTITLES, "Subtitle file", "manifests/subtitles.srt", True),
     PipelineStage(StageKind.RENDER, "Rendered video", "exports/final_video.mp4", True),
+    PipelineStage(StageKind.DRAFT_REVIEW, "Scene-level draft review and selective revision", "manifests/review_draft.json", True),
     PipelineStage(StageKind.PACKAGE, "Thumbnail, title, and SEO metadata", "manifests/youtube_package.json", True),
     PipelineStage(StageKind.PUBLISH, "Upload and scheduling", "review/publish_approval.json", True, True),
 )

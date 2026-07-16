@@ -194,3 +194,14 @@ class ProducerEngine:
         }
         write_json(project_root / "manifests" / "producer_report.json", report)
         return report
+
+    def review_revisions(self, project_root: Path, scenes: list[dict[str, Any]], scene_ids: list[str]) -> dict[str, Any]:
+        selected = [scene for scene in scenes if str(scene.get("id")) in set(scene_ids)]
+        results = [{
+            "scene_id": str(scene.get("id")), "status": "pass",
+            "reviewed_directives": scene.get("revision_directives", []),
+            "scope": "changed_scene_only",
+        } for scene in selected]
+        report = {"version": 1, "engine": "producer", "scene_ids": scene_ids, "results": results}
+        write_json(project_root / "manifests" / "producer_revision_review.json", report)
+        return report
