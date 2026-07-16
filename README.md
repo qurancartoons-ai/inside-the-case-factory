@@ -344,6 +344,14 @@ Map one image to multiple scenes with `--scene s01,s03`, or use `--scene "*"` as
 
 The render plan records the selected media for each scene in `manifests/render_plan.json`, and each scene records its selected `media_source` in `manifests/scenes.json`.
 
+## Autonomous Director and Film Critic
+
+Before every render, the Director Engine writes `director_plan.json` and `director_report.json`. The plan controls the hook, development, climax and outro; chapter pacing; shot length and selection; camera movement; transitions; emotional intensity; asset strategy; and deliberately effect-free shots.
+
+After rendering, the Film Critic writes a scored `critic_report.json`. When its overall score is below `pipeline.director_quality_threshold`, the factory changes only the direction/edit plan, reuses existing voice and media assets, and renders again. `director_max_renders` and `director_rerender_budget_usd` are hard stops. `quality_cycle.json` makes attempts resumable and idempotent.
+
+Criticism is queued in `critic_feedback.json` with `pending_review` status. The Director only learns from entries explicitly approved in the project dashboard; unapproved and rejected feedback is never applied.
+
 ## Adding Providers Later
 
 Provider SDKs should be wrapped behind the interfaces in `inside_case_factory/providers/base.py`. A provider should return structured payloads and cost estimates rather than writing directly to final outputs. This keeps human review and source tracking possible before costly generation or publishing.

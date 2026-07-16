@@ -38,6 +38,7 @@ from inside_case_factory.providers.reasoning import (
     reasoning_provider_from_settings,
 )
 from inside_case_factory.utils.files import read_json
+from inside_case_factory.utils.files import write_json
 
 
 Response = tuple[str, list[tuple[str, str]], bytes]
@@ -118,6 +119,8 @@ class DashboardApp:
                 return self.discover_media(parts[1], environ)
             if len(parts) == 5 and parts[2] == "media" and parts[4] in {"approve", "reject"}:
                 return self.review_media(parts[1], parts[3], parts[4])
+            if len(parts) == 5 and parts[2] == "critic-feedback" and parts[4] in {"approve", "reject"}:
+                return self.review_critic_feedback(parts[1], parts[3], parts[4])
 
         return self.html(
             self.page(
@@ -302,9 +305,52 @@ class DashboardApp:
               </div>
             </section>
             {self.production_panel(project_root)}
+            {self.direction_reports(project_root, slug)}
             {self.review_action_card(project_root, slug)}
             """,
         )
+
+    def review_critic_feedback(self, slug: str, feedback_id: str, action: str) -> Response:
+        project_root = self.project_root(slug)
+        path = project_root / "manifests" / "critic_feedback.json"
+        if not path.exists():
+            return self.redirect(f"/projects/{slug}")
+        data = read_json(path)
+        for item in data.get("entries", []):
+            if item.get("id") == feedback_id:
+                item["approval_status"] = "approved" if action == "approve" else "rejected"
+        write_json(path, data)
+        return self.redirect(f"/projects/{slug}")
+
+    def direction_reports(self, project_root: Path, slug: str) -> str:
+        director = self.read_manifest(project_root / "manifests" / "director_report.json")
+        critic = self.read_manifest(project_root / "manifests" / "critic_report.json")
+        if not director and not critic:
+            return ""
+        scores = critic.get("scores", {}) if isinstance(critic, dict) else {}
+        score_rows = "".join(
+            f"<tr><td>{escape(str(name).replace('_', ' ').title())}</td><td>{escape(str(score))}/100</td></tr>"
+            for name, score in scores.items()
+        )
+        criticism = "".join(f"<li>{escape(str(item))}</li>" for item in critic.get("main_criticisms", []))
+        improvements = "".join(f"<li>{escape(str(item))}</li>" for item in director.get("improvements", [])) or "<li>Geen tweede montage nodig.</li>"
+        feedback = self.read_manifest(project_root / "manifests" / "critic_feedback.json").get("entries", [])
+        feedback_rows = "".join(
+            f"<li>{escape(str(item.get('text', '')))} — {escape(str(item.get('approval_status', 'pending_review')))} "
+            f"<form class=\"inline\" method=\"post\" action=\"/projects/{escape(slug)}/critic-feedback/{escape(str(item.get('id', '')))}/approve\"><button type=\"submit\">Goedkeuren</button></form> "
+            f"<form class=\"inline\" method=\"post\" action=\"/projects/{escape(slug)}/critic-feedback/{escape(str(item.get('id', '')))}/reject\"><button type=\"submit\" class=\"secondary\">Afwijzen</button></form></li>"
+            for item in feedback if item.get("approval_status") == "pending_review"
+        )
+        return f"""
+        <section class="panel"><h2>Director Report</h2>
+          <p>Render {escape(str(director.get('render_number', '—')))} · {escape(str(director.get('shot_count', '—')))} shots</p>
+          <ul>{improvements}</ul><p><strong>Besluit:</strong> {escape(str(director.get('rerender_reason', 'Nog niet gerenderd.')))}</p>
+        </section>
+        <section class="panel"><h2>Critic Report</h2>
+          <p><strong>Totaalscore: {escape(str(critic.get('overall_score', '—')))}/100</strong></p>
+          <table><tbody>{score_rows}</tbody></table><h3>Belangrijkste kritiekpunten</h3><ul>{criticism or '<li>Geen kritieke zwaktes.</li>'}</ul>
+          {f'<h3>Feedback ter goedkeuring</h3><ul>{feedback_rows}</ul>' if feedback_rows else ''}
+        </section>"""
 
     def project_advanced(self, slug: str) -> str:
         project_root = self.project_root(slug)

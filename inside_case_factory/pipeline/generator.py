@@ -5,8 +5,15 @@ from pathlib import Path
 import subprocess
 
 from inside_case_factory.config.settings import Settings
+from inside_case_factory.core.autonomous_direction import (
+    CriticEngine,
+    DirectorEngine,
+    QualityPolicy,
+    improvement_decision,
+    record_feedback,
+    save_improvement_state,
+)
 from inside_case_factory.core.media import ensure_media_manifest
-from inside_case_factory.core.visual_direction import write_cinematic_plan
 from inside_case_factory.core.models import ProductionProject, ReviewStatus
 from inside_case_factory.core.project import create_project
 from inside_case_factory.pipeline.sample_content import build_sample_script, build_visual_prompt
@@ -473,6 +480,8 @@ def generate_video_project(
     slug: str | None = None,
     *,
     existing_project_root: Path | None = None,
+    _quality_render_number: int | None = None,
+    _previous_criticism: dict[str, object] | None = None,
 ) -> GeneratedVideo:
     width = int(settings.video.get("width", 1920))
     height = int(settings.video.get("height", 1080))
@@ -488,6 +497,11 @@ def generate_video_project(
         _progress("loading approved factual project")
         project, script, source_scenes = _approved_project(existing_project_root)
     manifests_dir = project.root / "manifests"
+    if _quality_render_number is None:
+        cycle_path = manifests_dir / "quality_cycle.json"
+        cycle = read_json(cycle_path) if cycle_path.exists() else {}
+        attempts = cycle.get("attempts", []) if isinstance(cycle, dict) else []
+        _quality_render_number = len(attempts) + 1 if cycle.get("status") == "rerender_pending" else 1
     assets_dir = project.root / "assets"
     generated_dir = assets_dir / "generated"
     audio_dir = assets_dir / "audio"
@@ -575,8 +589,11 @@ def generate_video_project(
         },
     )
 
-    _progress("building and validating cinematic visual direction")
-    cinematic_plan = write_cinematic_plan(project.root, scenes, width=width, height=height)
+    _progress(f"Director AI is building render plan {_quality_render_number}")
+    cinematic_plan = DirectorEngine().plan(
+        project.root, scenes, width=width, height=height, render_number=_quality_render_number,
+        criticism=_previous_criticism,
+    )
     style_profile = cinematic_plan["style_profile"]
     direction_by_scene = {str(item["scene_id"]): item for item in cinematic_plan["scenes"]}
 
@@ -686,6 +703,25 @@ def generate_video_project(
     _mux_subtitles_and_audio(silent_video_path, mastered_audio_path, subtitles_path, final_video_path)
 
     duration = media_duration_seconds(final_video_path)
+    _progress(f"Film Critic AI is evaluating render {_quality_render_number}")
+    critic_report = CriticEngine().analyze(
+        project.root, render_number=_quality_render_number, duration_seconds=duration
+    )
+    policy = QualityPolicy.from_pipeline(settings.pipeline)
+    decision = improvement_decision(critic_report, policy, _quality_render_number)
+    save_improvement_state(project.root, decision, critic_report)
+    record_feedback(project.root, critic_report.get("main_criticisms", []))
+    director_report = read_json(manifests_dir / "director_report.json")
+    director_report["critic_score"] = critic_report["overall_score"]
+    director_report["rerender_required"] = decision["rerender_required"]
+    director_report["rerender_reason"] = decision["reason"]
+    write_json(manifests_dir / "director_report.json", director_report)
+    if decision["rerender_required"]:
+        _progress(decision["reason"])
+        return generate_video_project(
+            settings, topic, slug, existing_project_root=existing_project_root or project.root,
+            _quality_render_number=_quality_render_number + 1, _previous_criticism=critic_report,
+        )
     if existing_project_root is not None:
         workflow = read_json(manifests_dir / "workflow.json")
         workflow["voiceover_generated"] = True

@@ -21,6 +21,10 @@ allow_publish = false
 stop_before_expensive_steps = true
 default_project_budget_usd = 0.25
 dry_run = false
+director_quality_threshold = 80.0
+director_max_renders = 2
+director_rerender_budget_usd = 0.0
+director_estimated_rerender_cost_usd = 0.0
 
 [review_gates]
 after_research = true
