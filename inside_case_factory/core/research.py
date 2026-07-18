@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from inside_case_factory.core.project import slugify
+from inside_case_factory.core.progress import write_progress_event
 from inside_case_factory.providers.reasoning import ReasoningProvider, ReasoningProviderError
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.utils.text import compact_whitespace
@@ -205,6 +206,8 @@ class TavilyResearchProvider(ResearchProvider):
     ) -> dict[str, Any]:
         workflow = load_manifest(project_root, "workflow.json")
         content_mode = str(workflow.get("content_mode", "factual_documentary"))
+        write_progress_event(project_root, "started", "research", "Zoekt actuele bronnen", provider=self.name)
+        write_progress_event(project_root, "waiting_for_provider", "research", "Onderzoeksdienst wordt geraadpleegd", provider=self.name)
         result = self.search(topic, content_mode=content_mode)
         ensure_research_manifests(project_root)
         research = load_manifest(project_root, "research.json")
@@ -219,6 +222,7 @@ class TavilyResearchProvider(ResearchProvider):
         )
         save_manifest(project_root, "research.json", research)
         if not result.get("ok"):
+            write_progress_event(project_root, "blocked", "research", str(result.get("message", "Onderzoek kon niet starten")), provider=self.name)
             return result
 
         added_sources: list[dict[str, Any]] = []
@@ -228,6 +232,7 @@ class TavilyResearchProvider(ResearchProvider):
                 continue
             source = source_from_tavily_result(project_root, item)
             added_sources.append(source)
+            write_progress_event(project_root, "source_found", "research", f"Bron {len(added_sources)} gevonden", source_id=source.get("id"), total=len(tavily_results))
 
         selected = added_sources[:8]
         extraction = self.extract([str(source.get("url", "")) for source in selected], extract_depth="basic")
@@ -249,6 +254,8 @@ class TavilyResearchProvider(ResearchProvider):
             },
         )
         mark_source_extraction_status(project_root, snapshots)
+        for index, snapshot in enumerate(snapshots, start=1):
+            write_progress_event(project_root, "source_processed", "research", f"Bron {index} van {len(selected)} wordt verwerkt", source_id=snapshot.get("source_id"))
         if not snapshots:
             research["status"] = "blocked"
             research["message"] = extraction.get("message", "No selected URL produced usable extracted content.")
@@ -264,7 +271,10 @@ class TavilyResearchProvider(ResearchProvider):
                 save_manifest(project_root, "research.json", research)
                 return {"ok": False, "provider": self.name, "message": str(error), "sources_added": len(added_sources), "claims_added": 0}
             added_claims, rejections = validate_and_store_claims(project_root, analysis.get("claims", []), snapshots)
+            for claim in added_claims:
+                write_progress_event(project_root, "claim_created", "research", "Claim klaar voor jouw controle", claim_id=claim.get("id"))
             build_validated_research_artifacts(project_root, added_claims)
+            write_progress_event(project_root, "completed", "research", f"Onderzoek afgerond met {len(added_sources)} bronnen en {len(added_claims)} claims")
             return {
                 "ok": True,
                 "provider": self.name,

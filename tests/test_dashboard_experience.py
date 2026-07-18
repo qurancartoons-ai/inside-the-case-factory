@@ -45,7 +45,7 @@ class DashboardExperienceTests(unittest.TestCase):
         write_json(self.root / "manifests/orchestration.json", {"status": "interrupted", "last_error": "render crashed"})
         result = production_progress(self.root)
         self.assertIn("render crashed", result["blockers"])
-        self.assertEqual(len(result["phases"]), 11)
+        self.assertEqual(len(result["phases"]), 10)
 
     def test_dossier_natural_actions_are_idempotent(self):
         apply_dossier_instruction(self.root, "onderzoek dit verder")

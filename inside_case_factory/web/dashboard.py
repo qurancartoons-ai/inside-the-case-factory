@@ -21,6 +21,7 @@ from inside_case_factory.core.narrative_quality import validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
 from inside_case_factory.core.project import create_project
+from inside_case_factory.core.progress import TaskQueue
 from inside_case_factory.core.draft_review import approve_scene, create_review_draft, revise_draft
 from inside_case_factory.core.user_experience import apply_dossier_instruction, production_progress, revision_change_plan, supported_script_map, youtube_draft
 from inside_case_factory.core.reference_intake import create_reference_intake, select_reference_match
@@ -103,6 +104,8 @@ class DashboardApp:
                 return self.html(self.draft_review_page(parts[1]))
             if len(parts) == 3 and parts[2] == "production":
                 return self.html(self.production_overview_page(parts[1]))
+            if len(parts) == 3 and parts[2] == "progress-data":
+                return self.progress_data(parts[1])
             if len(parts) == 3 and parts[2] == "dossier-review":
                 return self.html(self.dossier_review_page(parts[1]))
             if len(parts) == 3 and parts[2] == "research-panel":
@@ -163,6 +166,8 @@ class DashboardApp:
                 return self.confirm_youtube_upload(parts[1], environ)
             if len(parts) == 4 and parts[2] == "research-analysis" and parts[3] == "queue":
                 return self.queue_research_analysis(parts[1], environ)
+            if len(parts) == 5 and parts[2] == "tasks" and parts[4] in {"resume", "retry", "stop"}:
+                return self.task_action(parts[1], parts[3], parts[4])
             if len(parts) == 4 and parts[2] == "providers" and parts[3] == "configure":
                 return self.configure_project_providers(parts[1], environ)
             if len(parts) == 5 and parts[2] == "draft-review" and parts[4] == "approve":
@@ -314,10 +319,8 @@ class DashboardApp:
         <article class="project-card">
           <div>
             <h3>{escape(topic)}</h3>
-            <p class="muted">{escape(slug)}</p>
-            <p>Fase: <strong>{escape(current)}</strong> · Kosten: <strong>${progress['cost_usd']:.2f}</strong></p>
-            <p class="muted">Laatste activiteit: {escape(str(progress['last_activity']))}</p>
-            <p class="muted">Approvals: {escape(', '.join(progress['approvals']) or 'geen')} · Blokkades: {escape(', '.join(progress['blockers']) or 'geen')}</p>
+            <p>Huidige stap: <strong>{escape(current)}</strong></p>
+            <p class="muted">{progress['percentage']}% afgerond · laatste update {escape(str(progress['last_update']))}</p>
           </div>
           <div class="project-card-actions">
             <span class="status-pill">{escape(status)}</span>
@@ -404,9 +407,25 @@ class DashboardApp:
         return self.redirect(f"/projects/{project.slug}/production")
 
     def production_overview_page(self, slug: str) -> str:
-        root = self.project_root(slug); progress = production_progress(root)
-        rows = "".join(f"""<article class="phase-card"><div><strong>{escape(phase['name'])}</strong><span class="status-pill">{escape(phase['status'])}</span></div><progress max="100" value="{phase['progress']}"></progress><p>Provider: {escape(phase['provider'])} · ${phase['estimated_cost_usd']}</p><p>Artefacten: {escape(', '.join(phase['artifacts']) or '—')}</p>{f'<p class="error">{escape("; ".join(phase["errors"]))}</p>' if phase['errors'] else ''}<form method="post" action="/projects/{escape(slug)}/generate"><button type="submit" class="secondary">Herstart / hervat</button></form></article>""" for phase in progress["phases"])
-        return self.page("Productieoverzicht", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Productie</strong></nav><section class="summary-grid"><div><span>Kosten</span><strong>${progress['cost_usd']:.2f}</strong></div><div><span>Laatste activiteit</span><strong>{escape(str(progress['last_activity']))}</strong></div><div><span>Approvals nodig</span><strong>{escape(', '.join(progress['approvals']) or 'Geen')}</strong></div><div><span>Blokkades</span><strong>{escape(', '.join(progress['blockers']) or 'Geen')}</strong></div></section><section class="phase-grid">{rows}</section><script>setTimeout(() => location.reload(), 5000);</script>""")
+        # Deliberately return a light shell; stalled workers can never block this route.
+        return self.page("Voortgang", f"""<section class="progress-shell" data-project="{escape(slug)}"><div class="loading-state"><span class="pulse"></span><div><h2>Voortgang wordt geladen</h2><p>Je dashboard is direct beschikbaar.</p></div></div><div id="progress-content"></div></section><script>{self.progress_script(slug)}</script>""")
+
+    def progress_data(self, slug: str) -> Response:
+        return self.json_response(production_progress(self.project_root(slug)))
+
+    def task_action(self, slug: str, task_id: str, action: str) -> Response:
+        try:
+            TaskQueue(self.project_root(slug)).action(task_id, action)
+        except (KeyError, ValueError):
+            return self.json_response({"error": "Taak niet gevonden"}, "404 Not Found")
+        return self.redirect(f"/projects/{slug}/production")
+
+    def progress_script(self, slug: str) -> str:
+        return f"""(() => {{ const slug={json.dumps(slug)}, esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}}[c]));
+        const labels={{active:'Actief',waiting:'Wachtend',completed:'Afgerond',blocked:'Geblokkeerd',failed:'Fout',possibly_stalled:'Mogelijk vastgelopen',stopped:'Gestopt'}};
+        const task=t=>`<article class="queue-item ${{esc(t.status)}}"><div><strong>${{esc(t.label)}}</strong><small>Start: ${{esc(t.started_at||'Nog niet gestart')}} · duur: ${{t.duration_seconds||0}} sec · pogingen: ${{t.retries||0}}</small>${{t.reason?`<p>${{esc(t.reason)}}</p>`:''}}</div><span class="status-pill">${{labels[t.status]||esc(t.status)}}</span>${{['possibly_stalled','blocked','failed'].includes(t.status)?`<div class="task-actions"><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/resume"><button>Hervatten</button></form><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/retry"><button class="secondary">Opnieuw proberen</button></form><a class="button ghost" href="#events">Log bekijken</a><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/stop"><button class="danger">Taak stoppen</button></form></div>`:''}}</article>`;
+        async function refresh() {{ const d=await fetch(`/projects/${{slug}}/progress-data`).then(r=>r.json()), phases=d.phases.map((p,i)=>`<li class="${{esc(p.status)}}"><span>${{i+1}}</span><div><strong>${{esc(p.name)}}</strong><small>${{esc(p.status)}}</small></div></li>`).join(''), q=d.queue.tasks.map(task).join('')||'<p class="muted">Er staan geen taken in de wachtrij.</p>', r=d.research;
+        document.querySelector('#progress-content').innerHTML=`<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase)}}</h1><p>${{esc(d.last_activity)}}</p></div><div class="progress-number"><strong>${{d.percentage}}%</strong><span>${{d.remaining_steps}} stappen resterend · ${{esc(d.estimated_remaining)}}</span></div></section><ol class="pipeline">${{phases}}</ol><section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task)}}</h2><div class="research-metrics"><span><strong>${{r.sources_found}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed}}</strong> verwerkt</span><span><strong>${{r.draft_claims}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining)}}</strong> resterend</span></div><p>Laatst afgerond: ${{esc(r.last_completed)}} · Laatste voortgang: ${{esc(r.waiting_since||'Nog geen')}} · Actieve dienst: ${{esc(r.provider)}}</p>${{r.last_error?`<p class="error">${{esc(r.last_error)}}</p>`:''}}</section><section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Geavanceerd: logs en technische details</summary><div class="event-list">${{d.events.map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`; document.querySelector('.loading-state').hidden=true; }} refresh(); setInterval(refresh,3000); }})();"""
 
     def dossier_review_page(self, slug: str) -> str:
         root = self.project_root(slug); sources = self.read_manifest(root / "manifests/sources.json").get("sources", []); claims = self.read_manifest(root / "manifests/claims.json").get("claims", [])
@@ -430,10 +449,9 @@ class DashboardApp:
         if not project_root.is_dir():
             return self.page("Project Not Found", f"<section class=\"panel\"><p>No project named <code>{escape(slug)}</code>.</p></section>")
 
-        ensure_research_manifests(project_root)
         project_manifest = self.read_manifest(project_root / "manifests" / "project.json")
         topic = str(project_manifest.get("topic", slug)) if isinstance(project_manifest, dict) else slug
-        scenes = self.read_manifest(project_root / "manifests" / "scenes.json")
+        progress = production_progress(project_root)
         final_video = project_root / "exports" / "final_video.mp4"
         final_link = (
             f"<a class=\"button\" href=\"/projects/{escape(slug)}/download/final\">Video openen</a>"
@@ -443,26 +461,19 @@ class DashboardApp:
         return self.page(
             topic,
             f"""
-            <nav class="crumb"><a href="/">Dashboard</a><span>/</span><strong>{escape(topic)}</strong></nav>
-            <section class="panel project-head">
+            <section class="project-summary">
               <div>
+                <p class="eyebrow">{escape(progress['current_phase'])}</p>
                 <h2>{escape(topic)}</h2>
-                <p class="muted">Huidige stap: {escape(self.current_dutch_stage(project_root))}</p>
+                <p class="muted">Laatste update: {escape(str(progress['last_update']))}</p>
               </div>
-              <div class="actions">
-                <a class="button ghost" href="/projects/{escape(slug)}/production">Productieoverzicht</a>
-                <a class="button ghost" href="/projects/{escape(slug)}/dossier-review">Dossier & bronnen</a>
-                <a class="button ghost" href="/projects/{escape(slug)}/research-panel">Research Panel</a>
-                <a class="button" href="/projects/{escape(slug)}/draft-review">Draft beoordelen</a>
-                <a class="button ghost" href="/projects/{escape(slug)}/youtube-draft">YouTube draft</a>
-                <a class="button ghost" href="/projects/{escape(slug)}/advanced">Geavanceerde instellingen</a>
-                {final_link}
+              <div class="progress-number"><strong>{progress['percentage']}%</strong><span>{escape(progress['estimated_remaining'])}</span>
+                <a class="button" href="/projects/{escape(slug)}/production">Bekijk voortgang</a>
               </div>
             </section>
-            {self.production_panel(project_root)}
-            {self.reference_intake_summary(project_root, slug)}
-            {self.direction_reports(project_root, slug)}
             {self.review_action_card(project_root, slug)}
+            <details class="panel"><summary>Meer projectonderdelen</summary><div class="link-grid"><a href="/projects/{escape(slug)}/research-panel">Onderzoek</a><a href="/projects/{escape(slug)}/dossier-review">Bronnen en claims</a><a href="/projects/{escape(slug)}/draft-review">Script, Scènes en Beelden beoordelen</a><a href="/projects/{escape(slug)}/youtube-draft">Publicatieconcept</a>{final_link}</div></details>
+            <details class="panel"><summary>Geavanceerd</summary><a href="/projects/{escape(slug)}/advanced">Geavanceerde instellingen, kosten en bestanden</a></details>
             """,
         )
 
@@ -1553,11 +1564,14 @@ class DashboardApp:
     :root {{ color-scheme: light; --ink:#172026; --muted:#697782; --line:#dde4e8; --panel:#ffffff; --page:#f6f8f9; --soft:#eef4f1; --accent:#176b5b; --accent-dark:#0f5044; --warn:#b65f15; --ok:#237447; }}
     * {{ box-sizing: border-box; }}
     body {{ margin:0; font-family: Arial, sans-serif; background:var(--page); color:var(--ink); }}
-    header {{ background:#172026; color:#f8fafb; padding:22px 32px; display:flex; align-items:flex-end; justify-content:space-between; gap:16px; }}
+    header {{ background:rgba(255,255,255,.96); color:var(--ink); padding:16px 32px; display:flex; align-items:center; justify-content:space-between; gap:24px; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:10; backdrop-filter:blur(12px); }}
     header h1 {{ margin:0; font-size:22px; letter-spacing:0; }}
-    header p {{ margin:4px 0 0; color:#bec9d0; }}
+    header p {{ margin:4px 0 0; color:var(--muted); }}
+    .main-nav {{ display:flex; gap:5px; align-items:center; flex-wrap:wrap; }}
+    .main-nav a {{ color:#43515b; text-decoration:none; padding:9px 11px; border-radius:8px; font-weight:650; font-size:14px; }}
+    .main-nav a:hover {{ color:var(--accent); background:var(--soft); }}
     main {{ max-width:1120px; margin:0 auto; padding:32px 24px 48px; }}
-    .hero-panel, .panel, .review-card, .project-card {{ background:var(--panel); border:1px solid var(--line); border-radius:8px; }}
+    .hero-panel, .panel, .review-card, .project-card, .focus-card {{ background:var(--panel); border:1px solid var(--line); border-radius:14px; }}
     .hero-panel {{ padding:30px; margin-bottom:28px; box-shadow:0 16px 40px rgba(23,32,38,.07); }}
     .hero-panel h2 {{ max-width:760px; font-size:30px; line-height:1.18; margin:6px 0 22px; }}
     .panel {{ padding:22px; margin-bottom:18px; }}
@@ -1635,6 +1649,15 @@ class DashboardApp:
     .phase-card {{ background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; }}
     .phase-card > div {{ display:flex; justify-content:space-between; gap:8px; align-items:center; }}
     .phase-card progress {{ width:100%; margin-top:12px; accent-color:var(--accent); }}
+    .project-summary {{ display:flex; justify-content:space-between; gap:28px; align-items:center; background:#fff; border:1px solid var(--line); border-radius:16px; padding:28px; margin-bottom:18px; box-shadow:0 12px 34px rgba(23,32,38,.05); }}
+    .project-summary h1,.project-summary h2 {{ margin:5px 0 8px; font-size:30px; }}
+    .progress-number {{ display:grid; justify-items:end; gap:6px; min-width:190px; }} .progress-number strong {{ font-size:36px; color:var(--accent); }} .progress-number span {{ color:var(--muted); font-size:13px; }}
+    .pipeline {{ list-style:none; padding:8px 0; margin:0 0 18px; display:grid; grid-template-columns:repeat(10,1fr); gap:6px; }}
+    .pipeline li {{ display:flex; gap:8px; align-items:center; min-width:0; padding:10px 7px; border-radius:10px; color:var(--muted); }} .pipeline li span {{ display:grid; place-items:center; width:25px; height:25px; flex:0 0 25px; border-radius:50%; background:#e7ecef; font-size:12px; }} .pipeline li strong,.pipeline li small {{ display:block; font-size:12px; }}
+    .pipeline li.afgerond span {{ background:#dcefe4;color:var(--ok); }} .pipeline li.actief {{ background:#eaf5f2;color:var(--accent-dark); }} .pipeline li.actief span {{ background:var(--accent);color:#fff; }}
+    .focus-card {{ padding:24px; margin-bottom:18px; border-color:#cfe3dc; }} .research-metrics {{ display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }} .research-metrics span {{ background:var(--page);border-radius:10px;padding:10px 12px;font-size:13px; }}
+    .loading-state {{ display:flex;align-items:center;gap:14px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px; }} .loading-state h2,.loading-state p {{ margin:3px 0; }} .pulse {{ width:14px;height:14px;border-radius:50%;background:var(--accent);animation:pulse 1.2s infinite; }} @keyframes pulse {{ 50% {{ opacity:.35;transform:scale(.8); }} }}
+    .task-queue {{ display:grid;gap:8px; }} .queue-item {{ display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:11px;padding:13px; }} .queue-item small {{ display:block;color:var(--muted);margin-top:4px; }} .queue-item.possibly_stalled,.queue-item.blocked,.queue-item.failed {{ border-color:#e8c8ab;background:#fffaf5; }} .task-actions {{ grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px; }} button.danger {{ background:#a8473d; }} .link-grid {{ display:flex;flex-wrap:wrap;gap:16px;padding:16px 0; }}
     .review-player {{ display:grid; grid-template-columns:minmax(0,3fr) minmax(220px,1fr); gap:16px; margin-bottom:18px; }}
     .review-player > div, .review-player aside {{ background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px; }}
     .review-player video {{ width:100%; background:#111; border-radius:6px; }}
@@ -1644,14 +1667,14 @@ class DashboardApp:
     .scene-thumb {{ max-width:360px; }}
     .revision-compare {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; border:1px solid var(--line); border-radius:8px; padding:10px; margin:10px 0; }}
     .revision-compare > p {{ grid-column:1/-1; color:var(--muted); }}
-    @media (max-width: 900px) {{ .workflow {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .start-grid, .summary-grid {{ grid-template-columns:1fr 1fr; }} .review-card, .project-card {{ align-items:flex-start; flex-direction:column; }} .actions {{ justify-content:flex-start; }} }}
-    @media (max-width: 620px) {{ header, .project-head {{ display:block; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .workflow, .start-grid, .summary-grid, .review-player, .revision-compare {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} table {{ display:block; overflow-x:auto; }} button,.button {{ min-height:44px; }} }}
+    @media (max-width: 900px) {{ .pipeline {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .workflow {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .start-grid, .summary-grid {{ grid-template-columns:1fr 1fr; }} .review-card, .project-card {{ align-items:flex-start; flex-direction:column; }} .actions {{ justify-content:flex-start; }} }}
+    @media (max-width: 620px) {{ header {{ display:block; padding:14px; }} .main-nav {{ margin-top:12px;display:grid;grid-template-columns:1fr 1fr; }} .project-head,.project-summary {{ align-items:flex-start;flex-direction:column; }} .progress-number {{ justify-items:start; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .workflow, .pipeline, .start-grid, .summary-grid, .review-player, .revision-compare {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} table {{ display:block; overflow-x:auto; }} button,.button {{ min-height:44px; }} }}
   </style>
 </head>
 <body>
   <header>
-    <div><h1>Inside the Case Factory</h1><p>Productiedashboard</p></div>
-    <p>v{escape(__version__)}</p>
+    <div><h1>Documentaire Studio</h1><p>Van idee tot gecontroleerde film</p></div>
+    <nav class="main-nav" aria-label="Hoofdnavigatie"><a href="/">Projecten</a><a href="/projects/new">Nieuwe documentaire</a><a href="/">Voortgang</a><a href="/">Review</a><a href="/#settings">Instellingen</a></nav>
   </header>
   <main>{body}</main>
 </body>

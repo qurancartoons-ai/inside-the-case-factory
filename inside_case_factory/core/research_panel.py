@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from inside_case_factory.utils.files import read_json, write_json
+from inside_case_factory.core.progress import TaskQueue
 
 
 @dataclass(frozen=True)
@@ -98,4 +99,5 @@ class ResearchPanelService:
             return existing
         job = {"id": f"research-job-{len(queue['jobs']) + 1}", "instruction": instruction, "status": "queued", "provider_calls": 0}
         queue["jobs"].append(job); write_json(path, queue)
+        TaskQueue(self.project_root).enqueue("research", instruction, heavy=True)
         return job

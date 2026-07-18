@@ -11,6 +11,7 @@ from typing import Any
 from inside_case_factory.config.settings import Settings
 from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media
 from inside_case_factory.core.project import create_project, slugify
+from inside_case_factory.core.progress import write_progress_event
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.research import (
     approved_claims,
@@ -164,6 +165,9 @@ def append_activity(project_root: Path, message: str, *, stage: str = "") -> Non
     data["current_activity"] = message
     data["current_stage"] = stage
     write_json(path, data)
+    lowered = message.lower()
+    event = "failed" if any(word in lowered for word in ("failed", "error", "rejected")) else "blocked" if any(word in lowered for word in ("blocked", "paused", "waiting")) else "completed" if any(word in lowered for word in ("complete", "created", "approved")) else "started"
+    write_progress_event(project_root, event, stage or "project", message)
 
 
 def write_plan(project_root: Path, request: ProductionRequest, topic: str) -> None:
