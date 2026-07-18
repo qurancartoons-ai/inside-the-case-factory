@@ -96,6 +96,19 @@ class ResearchPanelPerformanceTests(unittest.TestCase):
         self.assertIn("Transcript laden", html)
         self.assertIn("requestAnimationFrame", html)
 
+    def test_heavy_sections_fetch_only_after_the_user_opens_them(self):
+        html = self.app.research_panel(self.root, "research-performance")
+        self.assertIn('data-research-section="sources"', html)
+        self.assertIn('data-research-section="claims"', html)
+        self.assertIn("section.addEventListener('toggle'", html)
+        self.assertNotIn("requestAnimationFrame(()=>{load('sources');load('claims');})", html)
+
+    def test_pagination_keeps_every_page_reachable(self):
+        html = self.app.research_panel(self.root, "research-performance")
+        self.assertIn("data.page+1", html)
+        self.assertIn("data.page-1", html)
+        self.assertNotIn("Math.min(pages,20)", html)
+
     def test_existing_approval_and_provenance_remain_unchanged(self):
         review_item(self.root, "claims.json", "claims", "c0", "approved")
         claim = read_json(self.root / "manifests/claims.json")["claims"][0]

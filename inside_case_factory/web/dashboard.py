@@ -1339,7 +1339,7 @@ class DashboardApp:
             <label class="wide">Reliability Notes <textarea name="reliability_notes" rows="2"></textarea></label>
             <button type="submit">Add Source</button>
           </form>
-          <h3>Bronnen</h3><div id="research-sources"><p class="muted">Loading…</p></div><div id="source-pages" class="pagination"></div>
+          <details data-research-section="sources"><summary><strong>Bronnen</strong></summary><div id="research-sources"><p class="muted">Open de sectie om bronnen te laden.</p></div><div id="source-pages" class="pagination"></div></details>
           <form method="post" action="/projects/{escape(slug)}/research/claim" class="grid-form">
             <label class="wide">Claim <textarea name="text" rows="3" required></textarea></label>
             <label>Source IDs <input name="source_ids" placeholder="source-id, another-source"></label>
@@ -1350,7 +1350,7 @@ class DashboardApp:
             <label>Events <input name="events"></label>
             <button type="submit">Add Claim</button>
           </form>
-          <h3>Claims</h3><div id="research-claims"><p class="muted">Loading…</p></div><div id="claim-pages" class="pagination"></div>
+          <details data-research-section="claims"><summary><strong>Claims</strong></summary><div id="research-claims"><p class="muted">Open de sectie om claims te laden.</p></div><div id="claim-pages" class="pagination"></div></details>
           <details><summary>Zware researchanalyse</summary><p>Analyse start nooit bij het openen van dit panel.</p><form method="post" action="/projects/{escape(slug)}/research-analysis/queue"><label>Analyseopdracht<textarea name="instruction" required></textarea></label><button>Run Automated Research (background task)</button></form></details>
           <form method="post" action="/projects/{escape(slug)}/research/approve"><button type="submit">Approve Research</button></form>
         </section>
@@ -1363,12 +1363,12 @@ class DashboardApp:
               ? `<tr><td><code>${{esc(item.id)}}</code></td><td><a href="${{esc(item.url)}}">${{esc(item.title)}}</a><p>${{esc(item.transcript_preview)}}</p><div>${{(item.attachments||[]).map(a=>`<img loading="lazy" src="${{esc(a.url)}}" alt="${{esc(a.title)}}" width="120">`).join('')}}</div>${{item.has_transcript?`<button data-transcript="${{esc(item.id)}}" type="button">Transcript laden</button><pre id="transcript-${{esc(item.id)}}"></pre>`:''}}</td><td>${{esc(item.publisher)}}</td><td>${{esc(item.review_status)}}</td><td>${{review(kind,item.id)}}</td></tr>`
               : `<tr><td><code>${{esc(item.id)}}</code></td><td>${{esc(item.text)}}</td><td>${{esc((item.source_ids||[]).join(', '))}}</td><td>${{esc(item.review_status)}}</td><td>${{review(kind,item.id)}}</td></tr>`).join('');
             document.querySelector(`#research-${{kind}}`).innerHTML=`<table><tbody>${{rows||'<tr><td>Geen resultaten.</td></tr>'}}</tbody></table>`;
-            const pages=Math.ceil(data.total/data.page_size); document.querySelector(`#${{kind==='sources'?'source':'claim'}}-pages`).innerHTML=Array.from({{length:Math.min(pages,20)}},(_,i)=>`<button type="button" data-page="${{i+1}}" data-kind="${{kind}}">${{i+1}}</button>`).join(' ');
+            const pages=Math.ceil(data.total/data.page_size); const previous=data.page>1?`<button type="button" data-page="${{data.page-1}}" data-kind="${{kind}}">Vorige</button>`:''; const next=data.page<pages?`<button type="button" data-page="${{data.page+1}}" data-kind="${{kind}}">Volgende</button>`:''; document.querySelector(`#${{kind==='sources'?'source':'claim'}}-pages`).innerHTML=`${{previous}} <span>Pagina ${{data.page}} van ${{pages||1}}</span> ${{next}}`;
             document.querySelector('#research-loading').textContent=`${{data.total}} ${{kind}} · pagina ${{data.page}}`;
           }}
           function review(kind,id) {{ return `<div class="actions"><form method="post" action="/projects/${{slug}}/research/${{kind.slice(0,-1)}}/${{esc(id)}}/approve"><button>Approve</button></form><form method="post" action="/projects/${{slug}}/research/${{kind.slice(0,-1)}}/${{esc(id)}}/reject"><button class="secondary">Reject</button></form></div>`; }}
           document.querySelector('#research-panel').addEventListener('click',async e=>{{ const b=e.target.closest('button'); if(!b)return; if(b.dataset.page)load(b.dataset.kind,+b.dataset.page); if(b.dataset.transcript){{const d=await fetch(`/projects/${{slug}}/research-transcript/${{b.dataset.transcript}}?limit=2000`).then(r=>r.json());document.querySelector(`#transcript-${{b.dataset.transcript}}`).textContent=d.text;b.remove();}} }});
-          requestAnimationFrame(()=>{{load('sources');load('claims');}});
+          document.querySelectorAll('[data-research-section]').forEach(section=>section.addEventListener('toggle',()=>{{if(section.open&&!section.dataset.loaded){{section.dataset.loaded='true';requestAnimationFrame(()=>load(section.dataset.researchSection));}}}}));
         }})();
         </script>
         """
