@@ -460,7 +460,7 @@ def run_research(
         return {"ok": False, "message": research["message"]}
     if "allow_paid_providers" in settings.pipeline and not settings.pipeline.get("allow_paid_providers"):
         return {"ok": False, "message": "Paid research providers are disabled. Use manual sources or dry-run mode."}
-    if settings.pipeline.get("require_paid_api_confirmation", False) and not paid_api_confirmed(project_root):
+    if settings.pipeline.get("require_paid_api_confirmation", False) and not paid_api_confirmed(project_root, "tavily_research"):
         return {"ok": False, "message": "Paid Tavily research requires explicit project confirmation."}
     research_settings = settings.providers.get("research", {})
     tavily_settings = research_settings.get("tavily", {}) if isinstance(research_settings, dict) else {}

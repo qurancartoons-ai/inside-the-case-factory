@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from cgi import FieldStorage
+from datetime import UTC, datetime
 from html import escape
 from io import BytesIO
 import json
@@ -21,7 +22,7 @@ from inside_case_factory.core.narrative_quality import validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
 from inside_case_factory.core.project import create_project
-from inside_case_factory.core.progress import TaskQueue
+from inside_case_factory.core.progress import TaskQueue, write_progress_event
 from inside_case_factory.core.draft_review import approve_scene, create_review_draft, revise_draft
 from inside_case_factory.core.user_experience import apply_dossier_instruction, production_progress, revision_change_plan, supported_script_map, youtube_draft
 from inside_case_factory.core.reference_intake import create_reference_intake, select_reference_match
@@ -41,6 +42,7 @@ from inside_case_factory.core.research import (
     tavily_config_from_settings,
 )
 from inside_case_factory.providers.reasoning import (
+    fallback_research_plan,
     reasoning_provider_from_settings,
 )
 from inside_case_factory.utils.files import read_json
@@ -168,6 +170,8 @@ class DashboardApp:
                 return self.queue_research_analysis(parts[1], environ)
             if len(parts) == 5 and parts[2] == "tasks" and parts[4] in {"resume", "retry", "stop"}:
                 return self.task_action(parts[1], parts[3], parts[4])
+            if len(parts) == 4 and parts[2] == "paid-research" and parts[3] in {"approve", "fallback", "cancel"}:
+                return self.paid_research_action(parts[1], parts[3])
             if len(parts) == 4 and parts[2] == "providers" and parts[3] == "configure":
                 return self.configure_project_providers(parts[1], environ)
             if len(parts) == 5 and parts[2] == "draft-review" and parts[4] == "approve":
@@ -420,12 +424,41 @@ class DashboardApp:
             return self.json_response({"error": "Taak niet gevonden"}, "404 Not Found")
         return self.redirect(f"/projects/{slug}/production")
 
+    def paid_research_action(self, slug: str, action: str) -> Response:
+        root = self.project_root(slug); progress = production_progress(root); gate = progress["paid_gate"]
+        if not gate.get("required"):
+            return self.redirect(f"/projects/{slug}/production")
+        now = datetime.now(UTC).isoformat()
+        if action == "approve":
+            if not gate.get("within_budget"):
+                return self.html(self.page("Budgetlimiet bereikt", '<section class="panel"><h2>Deze toestemming past niet binnen het projectbudget</h2><p>Verhoog eerst bewust de projectlimiet onder Geavanceerd.</p></section>'), "409 Conflict")
+            confirmation = {"version": 1, "confirmed": True, "project": root.name, "approved_limit_usd": gate["maximum_cost_usd"], "provider": gate["provider"], "purpose": gate["purpose"], "operations": gate["operations"], "confirmed_at": now}
+            write_json(root / "manifests" / "paid_api_confirmation.json", confirmation)
+            write_progress_event(root, "completed", "approval", "Kosten goedgekeurd voor onderzoek", approved_limit_usd=gate["maximum_cost_usd"], provider=gate["provider"], purpose=gate["purpose"])
+            self.resume_managed_production(root)
+        elif action == "fallback":
+            if not gate.get("local_fallback_available"):
+                return self.html(self.page("Lokale route niet beschikbaar", '<section class="panel"><h2>Lokale route niet beschikbaar</h2><p>Voeg eerst handmatige bronnen en claims toe.</p></section>'), "409 Conflict")
+            request_path = root / "manifests" / "production_request.json"
+            request = read_json(request_path) if request_path.exists() else {"topic": root.name}
+            write_json(root / "manifests" / "research_plan.json", fallback_research_plan(request))
+            write_json(root / "manifests" / "paid_api_confirmation.json", {"version": 1, "confirmed": False, "project": root.name, "mode": "local_fallback", "chosen_at": now})
+            write_progress_event(root, "started", "research", "Gaat verder met lokale bronnen zonder betaalde AI", provider="local_fallback")
+            self.resume_managed_production(root)
+        else:
+            write_json(root / "manifests" / "paid_api_confirmation.json", {"version": 1, "confirmed": False, "project": root.name, "cancelled": True, "cancelled_at": now})
+            orchestration_path = root / "manifests" / "orchestration.json"; state = read_json(orchestration_path) if orchestration_path.exists() else {"version": 1}
+            state.update({"status": "blocked", "current_stage": "research", "last_error": "Onderzoek geannuleerd door gebruiker", "updated_at": now}); write_json(orchestration_path, state)
+            write_progress_event(root, "blocked", "research", "Onderzoek geannuleerd door gebruiker")
+        return self.redirect(f"/projects/{slug}/production")
+
     def progress_script(self, slug: str) -> str:
         return f"""(() => {{ const slug={json.dumps(slug)}, esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}}[c]));
         const labels={{active:'Actief',waiting:'Wachtend',completed:'Afgerond',blocked:'Geblokkeerd',failed:'Fout',possibly_stalled:'Mogelijk vastgelopen',stopped:'Gestopt'}};
         const task=t=>`<article class="queue-item ${{esc(t.status)}}"><div><strong>${{esc(t.label)}}</strong><small>Start: ${{esc(t.started_at||'Nog niet gestart')}} · duur: ${{t.duration_seconds||0}} sec · pogingen: ${{t.retries||0}}</small>${{t.reason?`<p>${{esc(t.reason)}}</p>`:''}}</div><span class="status-pill">${{labels[t.status]||esc(t.status)}}</span>${{['possibly_stalled','blocked','failed'].includes(t.status)?`<div class="task-actions"><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/resume"><button>Hervatten</button></form><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/retry"><button class="secondary">Opnieuw proberen</button></form><a class="button ghost" href="#events">Log bekijken</a><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/stop"><button class="danger">Taak stoppen</button></form></div>`:''}}</article>`;
         async function refresh() {{ const d=await fetch(`/projects/${{slug}}/progress-data`).then(r=>r.json()), phases=d.phases.map((p,i)=>`<li class="${{esc(p.status)}}"><span>${{i+1}}</span><div><strong>${{esc(p.name)}}</strong><small>${{esc(p.status)}}</small></div></li>`).join(''), q=d.queue.tasks.map(task).join('')||'<p class="muted">Er staan geen taken in de wachtrij.</p>', r=d.research;
-        document.querySelector('#progress-content').innerHTML=`<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase)}}</h1><p>${{esc(d.last_activity)}}</p></div><div class="progress-number"><strong>${{d.percentage}}%</strong><span>${{d.remaining_steps}} stappen resterend · ${{esc(d.estimated_remaining)}}</span></div></section><ol class="pipeline">${{phases}}</ol><section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task)}}</h2><div class="research-metrics"><span><strong>${{r.sources_found}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed}}</strong> verwerkt</span><span><strong>${{r.draft_claims}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining)}}</strong> resterend</span></div><p>Laatst afgerond: ${{esc(r.last_completed)}} · Laatste voortgang: ${{esc(r.waiting_since||'Nog geen')}} · Actieve dienst: ${{esc(r.provider)}}</p>${{r.last_error?`<p class="error">${{esc(r.last_error)}}</p>`:''}}</section><section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Geavanceerd: logs en technische details</summary><div class="event-list">${{d.events.map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`; document.querySelector('.loading-state').hidden=true; }} refresh(); setInterval(refresh,3000); }})();"""
+        const g=d.paid_gate, gateTitle=g.title||'Onderzoek wacht op jouw toestemming', gate=g.required?`<section class="approval-card"><div><p class="eyebrow">Toestemming nodig</p><h1>${{esc(gateTitle)}}</h1><p>${{esc(g.purpose)}}</p><div class="approval-facts"><span><small>Maximale kosten</small><strong>$${{Number(g.maximum_cost_usd).toFixed(4)}}</strong></span><span><small>AI-dienst</small><strong>${{esc(g.provider)}}</strong></span></div>${{g.within_budget?'':'<p class="error">Deze call overschrijdt de ingestelde projectlimiet.</p>'}}</div><div class="approval-actions">${{g.within_budget?`<form method="post" action="/projects/${{slug}}/paid-research/approve"><button>Kosten goedkeuren en doorgaan</button></form>`:''}}${{g.local_fallback_available?`<form method="post" action="/projects/${{slug}}/paid-research/fallback"><button class="secondary">Doorgaan zonder betaalde AI</button></form>`:''}}<form method="post" action="/projects/${{slug}}/paid-research/cancel"><button class="ghost-button">Annuleren</button></form></div></section>`:'';
+        document.querySelector('#progress-content').innerHTML=`${{gate}}<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase)}}</h1><p>${{esc(d.last_activity)}}</p></div><div class="progress-number"><strong>${{d.percentage}}%</strong><span>${{d.remaining_steps}} stappen resterend${{d.estimated_remaining?' · '+esc(d.estimated_remaining):''}}</span></div></section><ol class="pipeline">${{phases}}</ol>${{g.required?'':`<section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task)}}</h2><div class="research-metrics"><span><strong>${{r.sources_found}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed}}</strong> verwerkt</span><span><strong>${{r.draft_claims}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining)}}</strong> resterend</span></div><p>Laatst afgerond: ${{esc(r.last_completed)}} · Laatste voortgang: ${{esc(r.waiting_since||'Nog geen')}} · Actieve dienst: ${{esc(r.provider)}}</p>${{r.last_error?`<p class="error">${{esc(r.last_error)}}</p>`:''}}</section>`}}<section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Geavanceerd: logs en technische details</summary><div class="event-list">${{d.events.map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`; document.querySelector('.loading-state').hidden=true; }} refresh(); setInterval(refresh,3000); }})();"""
 
     def dossier_review_page(self, slug: str) -> str:
         root = self.project_root(slug); sources = self.read_manifest(root / "manifests/sources.json").get("sources", []); claims = self.read_manifest(root / "manifests/claims.json").get("claims", [])
@@ -1655,6 +1688,8 @@ class DashboardApp:
     .pipeline {{ list-style:none; padding:8px 0; margin:0 0 18px; display:grid; grid-template-columns:repeat(10,1fr); gap:6px; }}
     .pipeline li {{ display:flex; gap:8px; align-items:center; min-width:0; padding:10px 7px; border-radius:10px; color:var(--muted); }} .pipeline li span {{ display:grid; place-items:center; width:25px; height:25px; flex:0 0 25px; border-radius:50%; background:#e7ecef; font-size:12px; }} .pipeline li strong,.pipeline li small {{ display:block; font-size:12px; }}
     .pipeline li.afgerond span {{ background:#dcefe4;color:var(--ok); }} .pipeline li.actief {{ background:#eaf5f2;color:var(--accent-dark); }} .pipeline li.actief span {{ background:var(--accent);color:#fff; }}
+    .pipeline li.approval_required,.pipeline li.blocked {{ background:#fff5e9;color:#8a5200; }} .pipeline li.approval_required span,.pipeline li.blocked span {{ background:var(--warn);color:#fff; }}
+    .approval-card {{ display:grid;grid-template-columns:1fr auto;gap:28px;align-items:center;background:#fff;border:1px solid #e8c89f;border-radius:16px;padding:28px;margin-bottom:18px;box-shadow:0 12px 34px rgba(89,55,20,.08); }} .approval-card h1 {{ margin:5px 0 8px;font-size:28px; }} .approval-facts {{ display:flex;gap:10px;flex-wrap:wrap;margin-top:16px; }} .approval-facts span {{ display:grid;gap:3px;background:#fff8ef;border-radius:10px;padding:10px 14px; }} .approval-facts small {{ color:var(--muted); }} .approval-actions {{ display:grid;gap:8px;min-width:260px; }} .approval-actions form,.approval-actions button {{ width:100%; }} .ghost-button {{ background:#eef1f3;color:var(--ink); }}
     .focus-card {{ padding:24px; margin-bottom:18px; border-color:#cfe3dc; }} .research-metrics {{ display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }} .research-metrics span {{ background:var(--page);border-radius:10px;padding:10px 12px;font-size:13px; }}
     .loading-state {{ display:flex;align-items:center;gap:14px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px; }} .loading-state h2,.loading-state p {{ margin:3px 0; }} .pulse {{ width:14px;height:14px;border-radius:50%;background:var(--accent);animation:pulse 1.2s infinite; }} @keyframes pulse {{ 50% {{ opacity:.35;transform:scale(.8); }} }}
     .task-queue {{ display:grid;gap:8px; }} .queue-item {{ display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:11px;padding:13px; }} .queue-item small {{ display:block;color:var(--muted);margin-top:4px; }} .queue-item.possibly_stalled,.queue-item.blocked,.queue-item.failed {{ border-color:#e8c8ab;background:#fffaf5; }} .task-actions {{ grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px; }} button.danger {{ background:#a8473d; }} .link-grid {{ display:flex;flex-wrap:wrap;gap:16px;padding:16px 0; }}
@@ -1668,7 +1703,7 @@ class DashboardApp:
     .revision-compare {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; border:1px solid var(--line); border-radius:8px; padding:10px; margin:10px 0; }}
     .revision-compare > p {{ grid-column:1/-1; color:var(--muted); }}
     @media (max-width: 900px) {{ .pipeline {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .workflow {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .start-grid, .summary-grid {{ grid-template-columns:1fr 1fr; }} .review-card, .project-card {{ align-items:flex-start; flex-direction:column; }} .actions {{ justify-content:flex-start; }} }}
-    @media (max-width: 620px) {{ header {{ display:block; padding:14px; }} .main-nav {{ margin-top:12px;display:grid;grid-template-columns:1fr 1fr; }} .project-head,.project-summary {{ align-items:flex-start;flex-direction:column; }} .progress-number {{ justify-items:start; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .workflow, .pipeline, .start-grid, .summary-grid, .review-player, .revision-compare {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} table {{ display:block; overflow-x:auto; }} button,.button {{ min-height:44px; }} }}
+    @media (max-width: 620px) {{ header {{ display:block; padding:14px; }} .main-nav {{ margin-top:12px;display:grid;grid-template-columns:1fr 1fr; }} .project-head,.project-summary {{ align-items:flex-start;flex-direction:column; }} .approval-card {{ grid-template-columns:1fr;padding:20px; }} .approval-actions {{ min-width:0;width:100%; }} .progress-number {{ justify-items:start; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .workflow, .pipeline, .start-grid, .summary-grid, .review-player, .revision-compare {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} table {{ display:block; overflow-x:auto; }} button,.button {{ min-height:44px; }} }}
   </style>
 </head>
 <body>

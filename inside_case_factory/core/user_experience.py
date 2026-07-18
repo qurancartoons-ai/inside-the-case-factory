@@ -42,6 +42,29 @@ def production_progress(project_root: Path) -> dict[str, Any]:
             "estimated_cost_usd": round(sum(float(call.get("cost_usd", 0)) for call in usage.get("calls", []) if call.get("task") == task), 4),
             "artifacts": artifacts, "errors": errors if status == "actief" else [],
         })
+    confirmation = read_json(manifests / "paid_api_confirmation.json") if (manifests / "paid_api_confirmation.json").exists() else {}
+    estimate = read_json(manifests / "cost_estimate.json") if (manifests / "cost_estimate.json").exists() else {}
+    research_cost = round(sum(float(item.get("estimated_maximum_cost_usd", 0)) for item in estimate.get("stages", []) if item.get("stage") in {"research_plan", "source_analysis"}), 6)
+    confirmed = bool(confirmation.get("confirmed") is True and ("project" not in confirmation or confirmation.get("project") == project_root.name) and ("approved_limit_usd" not in confirmation or float(confirmation.get("approved_limit_usd", 0)) + 1e-9 >= research_cost))
+    confirmation_error = "paid api call not confirmed" in str(orchestration.get("last_error", "")).lower()
+    cancelled = confirmation.get("cancelled") is True
+    paid_gate = bool(estimate and not confirmed and not cancelled and (confirmation_error or orchestration.get("current_stage") in {"", "research_plan", "research"}))
+    if paid_gate:
+        gate_index = PHASES.index("Onderzoek")
+        for index, phase in enumerate(phases):
+            if index < gate_index:
+                phase.update({"status": "afgerond", "progress": 100})
+            elif index == gate_index:
+                phase.update({"status": "approval_required", "progress": 0, "errors": []})
+            else:
+                phase.update({"status": "wachtend", "progress": 0, "errors": []})
+    pipeline_blocked = orchestration.get("status") == "blocked" and not paid_gate
+    if pipeline_blocked:
+        gate_index = PHASES.index("Onderzoek")
+        for index, phase in enumerate(phases):
+            if index < gate_index: phase.update({"status": "afgerond", "progress": 100})
+            elif index == gate_index: phase.update({"status": "blocked", "progress": 0, "errors": errors})
+            else: phase.update({"status": "wachtend", "progress": 0, "errors": []})
     workflow = read_json(manifests / "workflow.json") if (manifests / "workflow.json").exists() else {}
     approvals = [name for name, required in (
         ("research", not workflow.get("research_approved")), ("script", not workflow.get("script_approved")),
@@ -50,7 +73,7 @@ def production_progress(project_root: Path) -> dict[str, Any]:
     queue = TaskQueue(project_root).snapshot()
     events_data = read_json(manifests / "progress_events.json") if (manifests / "progress_events.json").exists() else {"events": []}
     events = events_data.get("events", [])[-20:]
-    active_phase = next((phase for phase in phases if phase["status"] == "actief"), phases[-1])
+    active_phase = next((phase for phase in phases if phase["status"] in {"actief", "approval_required", "blocked", "fout"}), phases[-1])
     completed = sum(phase["status"] == "afgerond" for phase in phases)
     source_data = read_json(manifests / "sources.json") if (manifests / "sources.json").exists() else {"sources": []}
     claim_data = read_json(manifests / "claims.json") if (manifests / "claims.json").exists() else {"claims": []}
@@ -65,10 +88,14 @@ def production_progress(project_root: Path) -> dict[str, Any]:
         "draft_claims": sum(item.get("review_status") != "approved" for item in claims),
         "waiting_since": last_research.get("at", activity.get("log", [{}])[-1].get("at", "") if activity.get("log") else ""),
         "provider": str(source_data.get("provider") or orchestration.get("provider") or "Lokaal"),
-        "estimated_remaining": "Minder dan 5 minuten" if sources else "Nog te bepalen",
+        "estimated_remaining": "" if paid_gate or pipeline_blocked else ("Minder dan 5 minuten" if sources else "Nog te bepalen"),
         "last_error": str(orchestration.get("last_error") or ""),
     }
-    return {"phases": phases, "percentage": round(completed / len(phases) * 100), "remaining_steps": len(phases) - completed, "current_phase": active_phase["name"], "estimated_remaining": f"ongeveer {max(1, len(phases)-completed) * 3} minuten", "cost_usd": float(usage.get("spent_usd", 0)), "last_activity": activity.get("current_activity", "Nog geen activiteit"), "last_update": orchestration.get("updated_at") or (events[-1].get("at") if events else "Nog geen update"), "approvals": approvals, "blockers": errors, "queue": queue, "events": events, "research": research}
+    provider = "OpenAI en Tavily"
+    local_fallback = bool(sources and claims)
+    within_budget = research_cost <= float(estimate.get("project_budget_usd", 0) or 0)
+    gate = {"required": paid_gate, "title": "Onderzoek wacht op jouw toestemming", "maximum_cost_usd": research_cost, "provider": provider, "purpose": "Een onderzoeksplan maken en bronnen omzetten in controleerbare claims.", "operations": ["research_plan", "source_analysis", "tavily_research"], "local_fallback_available": local_fallback, "within_budget": within_budget}
+    return {"phases": phases, "percentage": round(completed / len(phases) * 100), "remaining_steps": len(phases) - completed, "current_phase": active_phase["name"], "estimated_remaining": "" if paid_gate or pipeline_blocked else f"ongeveer {max(1, len(phases)-completed) * 3} minuten", "cost_usd": float(usage.get("spent_usd", 0)), "last_activity": "Wacht op jouw toestemming" if paid_gate else activity.get("current_activity", "Nog geen activiteit"), "last_update": orchestration.get("updated_at") or (events[-1].get("at") if events else "Nog geen update"), "approvals": approvals, "blockers": errors, "queue": queue, "events": events, "research": research, "paid_gate": gate}
 
 
 def supported_script_map(project_root: Path) -> list[dict[str, Any]]:

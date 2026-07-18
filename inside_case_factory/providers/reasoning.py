@@ -523,14 +523,14 @@ class OpenAIReasoningProvider(ReasoningProvider):
             raise ReasoningProviderError("OpenAI reasoning dry-run mode is enabled.")
         if not self.api_key:
             raise ReasoningProviderError("OPENAI_API_KEY is not set.")
-        if self.config.require_explicit_confirmation and not paid_api_confirmed(project_root):
+        estimated = self._preflight_estimated_cost(operation)
+        if self.config.require_explicit_confirmation and not paid_api_confirmed(project_root, operation, estimated):
             estimate = estimate_reasoning_cost(self.config)
             raise ReasoningProviderError(
                 "Paid API call not confirmed. Review manifests/cost_estimate.json, then create "
                 "manifests/paid_api_confirmation.json with confirmed=true explicitly for this project. "
                 f"Estimated maximum reasoning cost: ${estimate['estimated_maximum_cost_usd']:.4f}."
             )
-        estimated = self._preflight_estimated_cost(operation)
         current = current_estimated_spend(project_root)
         if current + estimated > self.config.per_project_spending_limit_usd:
             raise ReasoningProviderError(
@@ -596,12 +596,23 @@ def current_estimated_spend(project_root: Path) -> float:
     return float(data.get("token_based_estimated_total_cost_usd", data.get("estimated_total_cost_usd", 0)) or 0)
 
 
-def paid_api_confirmed(project_root: Path) -> bool:
+def paid_api_confirmed(project_root: Path, operation: str = "", required_cost_usd: float = 0.0) -> bool:
     path = project_root / "manifests" / "paid_api_confirmation.json"
     if not path.exists():
         return False
     data = read_json(path)
-    return bool(isinstance(data, dict) and data.get("confirmed") is True)
+    if not isinstance(data, dict) or data.get("confirmed") is not True:
+        return False
+    # Legacy confirmations remain readable for existing projects. New dashboard
+    # confirmations are deliberately limited by project, operation and amount.
+    if "project" not in data:
+        return True
+    if data.get("project") != project_root.name:
+        return False
+    operations = data.get("operations", [])
+    if operation and operation not in operations:
+        return False
+    return float(data.get("approved_limit_usd", 0)) + 1e-9 >= max(0.0, required_cost_usd)
 
 
 def estimate_reasoning_cost(config: ReasoningConfig) -> dict[str, Any]:
@@ -703,7 +714,7 @@ class StructuredTextReasoningProvider(OpenAIReasoningProvider):
     def _ensure_callable(self, project_root: Path, operation: str) -> None:
         if not self.available:
             raise ReasoningProviderError(f"{self.name} reasoning is not available.")
-        if self.name != "local" and self.config.require_explicit_confirmation and not paid_api_confirmed(project_root):
+        if self.name != "local" and self.config.require_explicit_confirmation and not paid_api_confirmed(project_root, operation, self.config.estimated_cost_per_call_usd):
             raise ReasoningProviderError("Paid API call not confirmed for this project.")
         if current_estimated_spend(project_root) + self.config.estimated_cost_per_call_usd > self.config.per_project_spending_limit_usd:
             raise ReasoningProviderError(f"Project reasoning budget would be exceeded before {operation}.")
