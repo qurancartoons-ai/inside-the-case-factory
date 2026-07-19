@@ -70,6 +70,16 @@ class PaidResearchApprovalUXTests(unittest.TestCase):
         for action in ("/paid-research/approve", "/paid-research/cancel", "/paid-research/fallback"):
             self.assertIn(action, html)
 
+    def test_legacy_followup_event_is_migrated_to_visible_approval_gate(self):
+        write_json(self.root / "manifests/orchestration.json", {"status": "waiting_for_approval", "current_stage": "research_approval"})
+        write_json(self.root / "manifests/progress_events.json", {"events": [{
+            "id": 1, "event": "blocked", "stage": "research_review",
+            "message": "Aanvullend onderzoek gevraagd; betaalde zoekactie vereist opnieuw toestemming",
+        }]})
+        result = production_progress(self.root)
+        self.assertTrue(result["paid_gate"]["required"])
+        self.assertTrue(all(key in result["paid_gate"] for key in ("maximum_cost_usd", "extra_sources", "countries", "languages", "claims")))
+
     def test_processed_approval_disappears_and_approval_resumes_workflow(self):
         self.app.repair_research_review("approval-case", "research-further")
         with patch.object(self.app, "resume_managed_production") as resume:

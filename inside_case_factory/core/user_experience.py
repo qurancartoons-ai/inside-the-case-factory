@@ -25,6 +25,8 @@ def production_progress(project_root: Path) -> dict[str, Any]:
     }
     errors = []
     orchestration = read_json(manifests / "orchestration.json") if (manifests / "orchestration.json").exists() else {}
+    events_data = read_json(manifests / "progress_events.json") if (manifests / "progress_events.json").exists() else {"events": []}
+    events = events_data.get("events", [])[-20:]
     if orchestration.get("last_error"):
         errors.append(str(orchestration["last_error"]))
     phases = []
@@ -51,7 +53,13 @@ def production_progress(project_root: Path) -> dict[str, Any]:
     cancelled = confirmation.get("cancelled") is True
     explicit_approval = approval_request.get("approval_required") is True and not approval_request.get("resolved_at")
     approval_processed = bool(approval_request.get("resolved_at"))
-    paid_gate = bool(explicit_approval or (not approval_processed and estimate and not confirmed and not cancelled and (confirmation_error or orchestration.get("current_stage") in {"", "research_plan", "research"})))
+    latest_legacy_decision = next((item for item in reversed(events) if item.get("stage") in {"research_review", "approval"}), {})
+    legacy_followup = bool(
+        not approval_request
+        and latest_legacy_decision.get("event") == "blocked"
+        and "opnieuw toestemming" in str(latest_legacy_decision.get("message", "")).lower()
+    )
+    paid_gate = bool(explicit_approval or legacy_followup or (not approval_processed and estimate and not confirmed and not cancelled and (confirmation_error or orchestration.get("current_stage") in {"", "research_plan", "research"})))
     if paid_gate:
         gate_index = PHASES.index("Onderzoek")
         for index, phase in enumerate(phases):
@@ -74,8 +82,6 @@ def production_progress(project_root: Path) -> dict[str, Any]:
         ("draft scenes", any(scene.get("review_status") != "approved" for scene in (read_json(manifests / "review_draft.json").get("scenes", []) if (manifests / "review_draft.json").exists() else []))),
     ) if required]
     queue = TaskQueue(project_root).snapshot()
-    events_data = read_json(manifests / "progress_events.json") if (manifests / "progress_events.json").exists() else {"events": []}
-    events = events_data.get("events", [])[-20:]
     active_phase = next((phase for phase in phases if phase["status"] in {"actief", "approval_required", "blocked", "fout"}), phases[-1])
     completed = sum(phase["status"] == "afgerond" for phase in phases)
     source_data = read_json(manifests / "sources.json") if (manifests / "sources.json").exists() else {"sources": []}
