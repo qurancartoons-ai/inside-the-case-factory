@@ -25,6 +25,17 @@ def slugify(value: str) -> str:
     return normalized.strip("-") or "untitled-case"
 
 
+def available_project_slug(projects_dir: Path, topic: str) -> str:
+    """Return a stable, unused slug without ever mixing two project dossiers."""
+    base = slugify(topic)
+    candidate = base
+    suffix = 2
+    while (projects_dir / candidate / "manifests" / "project.json").exists():
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
 def create_project(projects_dir: Path, topic: str, slug: str | None = None) -> ProductionProject:
     project_slug = slug or slugify(topic)
     root = projects_dir / project_slug

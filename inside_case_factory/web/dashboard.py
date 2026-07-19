@@ -23,7 +23,7 @@ from inside_case_factory.providers.reasoning import paid_api_confirmed
 from inside_case_factory.core.narrative_quality import validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
-from inside_case_factory.core.project import create_project
+from inside_case_factory.core.project import available_project_slug, create_project
 from inside_case_factory.core.progress import TaskQueue, write_progress_event
 from inside_case_factory.core.draft_review import approve_scene, create_review_draft, revise_draft
 from inside_case_factory.core.user_experience import apply_dossier_instruction, production_progress, revision_change_plan, supported_script_map, youtube_draft
@@ -65,15 +65,17 @@ class DashboardApp:
         try:
             status, headers, body = self.dispatch(environ)
         except Exception as error:  # pragma: no cover - exercised by manual UI use
+            reference = f"dashboard-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
             status = "500 Internal Server Error"
-            headers = [("Content-Type", "text/html; charset=utf-8")]
+            headers = [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store")]
             body = self.page(
-                "Dashboard Error",
+                "Dashboardfout",
                 f"""
                 <section class="panel">
-                  <h2>Something failed</h2>
-                  <p>{escape(str(error))}</p>
-                  <pre>{escape(traceback.format_exc())}</pre>
+                  <h2>Deze actie kon niet worden afgerond</h2>
+                  <p>Probeer de pagina opnieuw. Blijft het probleem bestaan, gebruik dan logreferentie <code>{reference}</code>.</p>
+                  <a class="button" href="{escape(str(environ.get('PATH_INFO', '/')))}">Opnieuw proberen</a>
+                  <details><summary>Technische details</summary><pre>{escape(str(error))}\n{escape(traceback.format_exc())}</pre></details>
                 </section>
                 """,
             ).encode("utf-8")
@@ -87,6 +89,8 @@ class DashboardApp:
     def dispatch(self, environ: dict[str, Any]) -> Response:
         method = str(environ.get("REQUEST_METHOD", "GET")).upper()
         path = unquote(str(environ.get("PATH_INFO", "/")))
+        if method == "POST":
+            self._manifest_cache.clear()
 
         if method == "GET" and path == "/":
             return self.html(self.index())
@@ -198,14 +202,14 @@ class DashboardApp:
         )
 
     def html(self, content: str, status: str = "200 OK") -> Response:
-        return status, [("Content-Type", "text/html; charset=utf-8")], content.encode("utf-8")
+        return status, [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store")], content.encode("utf-8")
 
     def json_response(self, payload: object, status: str = "200 OK") -> Response:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        return status, [("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(body)))], body
+        return status, [("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(body))), ("Cache-Control", "no-store, max-age=0"), ("Pragma", "no-cache")], body
 
     def redirect(self, location: str) -> Response:
-        return "303 See Other", [("Location", location), ("Content-Type", "text/plain")], b""
+        return "303 See Other", [("Location", location), ("Content-Type", "text/plain"), ("Cache-Control", "no-store")], b""
 
     def resume_managed_production(self, project_root: Path) -> None:
         manifests = project_root / "manifests"
@@ -396,7 +400,7 @@ class DashboardApp:
         prompt = self.form_value(form, "prompt").strip()
         if not prompt:
             return self.html(self.page("Prompt ontbreekt", '<section class="panel"><p>Voer een onderwerp of prompt in.</p></section>'), "400 Bad Request")
-        project = create_project(self.settings.projects_dir, prompt[:100])
+        project = create_project(self.settings.projects_dir, prompt[:100], available_project_slug(self.settings.projects_dir, prompt[:100]))
         try:
             duration = max(1, min(60, int(self.form_value(form, "duration", "12"))))
             budget = max(0.0, float(self.form_value(form, "budget", "0")))
@@ -481,9 +485,9 @@ class DashboardApp:
         return f"""(() => {{ const slug={json.dumps(slug)}, esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}}[c]));
         const labels={{active:'Actief',waiting:'Wachtend',completed:'Afgerond',blocked:'Geblokkeerd',failed:'Fout',possibly_stalled:'Mogelijk vastgelopen',stopped:'Gestopt'}};
         const task=t=>`<article class="queue-item ${{esc(t.status)}}"><div><strong>${{esc(t.label)}}</strong><small>Start: ${{esc(t.started_at||'Nog niet gestart')}} · duur: ${{t.duration_seconds||0}} sec · pogingen: ${{t.retries||0}}</small>${{t.reason?`<p>${{esc(t.reason)}}</p>`:''}}</div><span class="status-pill">${{labels[t.status]||esc(t.status)}}</span>${{['possibly_stalled','blocked','failed'].includes(t.status)?`<div class="task-actions"><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/resume"><button>Hervatten</button></form><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/retry"><button class="secondary">Opnieuw proberen</button></form><a class="button ghost" href="#events">Log bekijken</a><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/stop"><button class="danger">Taak stoppen</button></form></div>`:''}}</article>`;
-        async function refresh() {{ const d=await fetch(`/projects/${{slug}}/progress-data`).then(r=>r.json()), phases=d.phases.map((p,i)=>`<li class="${{esc(p.status)}}"><span>${{i+1}}</span><div><strong>${{esc(p.name)}}</strong><small>${{esc(p.status)}}</small></div></li>`).join(''), q=d.queue.tasks.map(task).join('')||'<p class="muted">Er staan geen taken in de wachtrij.</p>', r=d.research;
+        async function refresh() {{ try {{ const response=await fetch(`/projects/${{slug}}/progress-data`,{{cache:'no-store'}}); if(!response.ok)throw new Error(`HTTP ${{response.status}}`); const d=await response.json(), phases=d.phases.map((p,i)=>`<li class="${{esc(p.status)}}"><span>${{i+1}}</span><div><strong>${{esc(p.name)}}</strong><small>${{esc(p.status)}}</small></div></li>`).join(''), q=d.queue.tasks.map(task).join('')||'<p class="muted">Er staan geen taken in de wachtrij.</p>', r=d.research;
         const list=items=>`<ul>${{(items||[]).map(x=>`<li>${{esc(x)}}</li>`).join('')}}</ul>`, g=d.paid_gate, gateTitle=g.title||'Onderzoek wacht op jouw toestemming', gate=g.required?`<section class="approval-card" role="alert" aria-labelledby="approval-title"><div><p class="eyebrow">Toestemming nodig</p><h1 id="approval-title">${{esc(gateTitle)}}</h1><p><strong>Waarom:</strong> ${{esc(g.purpose)}}</p><div class="approval-facts"><span><small>Geschatte kosten</small><strong>$${{Number(g.maximum_cost_usd).toFixed(4)}}</strong></span><span><small>Extra bronnen</small><strong>${{Number(g.extra_sources||0)}}</strong></span><span><small>Landen</small><strong>${{esc((g.countries||[]).join(', '))}}</strong></span><span><small>Talen</small><strong>${{esc((g.languages||[]).join(', '))}}</strong></span></div><div class="approval-claims"><strong>Claims die hierdoor verbeterd worden</strong>${{list(g.claims)}}</div>${{g.within_budget?'':'<p class="error">Deze zoekactie overschrijdt de ingestelde projectlimiet; pas eerst het budget aan.</p>'}}</div><div class="approval-actions"><form method="post" action="/projects/${{slug}}/paid-research/approve"><button ${{g.within_budget?'':'disabled'}}>Goedkeuren en doorgaan</button></form><form method="post" action="/projects/${{slug}}/paid-research/cancel"><button class="ghost-button">Annuleren</button></form><form method="post" action="/projects/${{slug}}/paid-research/fallback"><button class="secondary" ${{g.local_fallback_available?'':'disabled'}}>Alleen lokaal doorgaan</button></form></div></section>`:'';
-        document.querySelector('#progress-content').innerHTML=`${{gate}}<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase)}}</h1><p>${{esc(d.last_activity)}}</p></div><div class="progress-number"><strong>${{d.percentage}}%</strong><span>${{d.remaining_steps}} stappen resterend${{d.estimated_remaining?' · '+esc(d.estimated_remaining):''}}</span></div></section><ol class="pipeline">${{phases}}</ol>${{g.required?'':`<section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task)}}</h2><div class="research-metrics"><span><strong>${{r.sources_found}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed}}</strong> verwerkt</span><span><strong>${{r.draft_claims}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining)}}</strong> resterend</span></div><p>Laatst afgerond: ${{esc(r.last_completed)}} · Laatste voortgang: ${{esc(r.waiting_since||'Nog geen')}} · Actieve dienst: ${{esc(r.provider)}}</p>${{r.last_error?`<p class="error">${{esc(r.last_error)}}</p>`:''}}</section>`}}<section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Geavanceerd: logs en technische details</summary><div class="event-list">${{d.events.map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`; document.querySelector('.loading-state').hidden=true; }} refresh(); setInterval(refresh,3000); }})();"""
+        document.querySelector('#progress-content').innerHTML=`${{gate}}<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase)}}</h1><p>${{esc(d.last_activity)}}</p></div><div class="progress-number"><strong>${{d.percentage}}%</strong><span>${{d.remaining_steps}} stappen resterend${{d.estimated_remaining?' · '+esc(d.estimated_remaining):''}}</span></div></section><ol class="pipeline">${{phases}}</ol>${{g.required?'':`<section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task)}}</h2><div class="research-metrics"><span><strong>${{r.sources_found}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed}}</strong> verwerkt</span><span><strong>${{r.draft_claims}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining)}}</strong> resterend</span></div><p>Laatst afgerond: ${{esc(r.last_completed)}} · Laatste voortgang: ${{esc(r.waiting_since||'Nog geen')}} · Actieve dienst: ${{esc(r.provider)}}</p>${{r.last_error?`<p class="error">${{esc(r.last_error)}}</p>`:''}}</section>`}}<section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Geavanceerd: logs en technische details</summary><div class="event-list">${{d.events.map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`; document.querySelector('.loading-state').hidden=true; }} catch(error) {{ document.querySelector('.loading-state').hidden=true; document.querySelector('#progress-content').innerHTML='<section class="panel error"><h2>Status tijdelijk niet beschikbaar</h2><p>Controleer de verbinding en probeer opnieuw.</p><button type="button" id="retry-progress">Opnieuw proberen</button></section>'; document.querySelector('#retry-progress').onclick=refresh; }} }} refresh(); setInterval(refresh,3000); }})();"""
 
     def dossier_review_page(self, slug: str) -> str:
         root = self.project_root(slug); rebuild_relevance_cache(root); sources = self.read_manifest(root / "manifests/sources.json").get("sources", []); claims = self.read_manifest(root / "manifests/claims.json").get("claims", [])

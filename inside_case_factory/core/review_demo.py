@@ -18,8 +18,8 @@ def _run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
-def create_offline_review_demo(projects_dir: Path) -> Path:
-    project = create_project(projects_dir, "De Verdwenen Nachtbus — Offline Reviewdemo", DEMO_SLUG)
+def create_offline_review_demo(projects_dir: Path, *, slug: str = DEMO_SLUG, topic: str = "De Verdwenen Nachtbus — Offline Reviewdemo") -> Path:
+    project = create_project(projects_dir, topic, slug)
     root = project.root
     sources = [
         {"id": "src01", "title": "Gemeentelijk vervoersrapport 2019", "url": "https://example.invalid/transport-report", "publisher": "Demo Archief", "review_status": "approved"},

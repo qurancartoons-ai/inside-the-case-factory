@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from inside_case_factory.core.project import create_project
+from inside_case_factory.core.project import available_project_slug, create_project
 from inside_case_factory.core.production import ProductionRequest, start_production
 from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media
 from inside_case_factory.core.media import add_image_asset, image_for_scene, load_media_manifest
@@ -71,6 +71,15 @@ class ProjectScaffoldTests(unittest.TestCase):
             self.assertTrue((project.root / "manifests" / "claims.json").exists())
             self.assertTrue((project.root / "research").is_dir())
             self.assertTrue((project.root / "assets" / "images").is_dir())
+
+    def test_new_project_slug_never_reuses_an_existing_dossier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            first = create_project(projects, "Zelfde onderwerp")
+            write_json(first.root / "manifests/claims.json", {"claims": [{"id": "user-data"}]})
+            second_slug = available_project_slug(projects, "Zelfde onderwerp")
+            self.assertEqual(second_slug, "zelfde-onderwerp-2")
+            self.assertEqual(read_json(first.root / "manifests/claims.json")["claims"][0]["id"], "user-data")
 
     def test_pipeline_has_review_gates(self) -> None:
         stages = describe_pipeline()

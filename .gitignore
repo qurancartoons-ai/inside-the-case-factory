@@ -17,6 +17,10 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+node_modules/
+test-results/
+playwright-report/
+.release-candidate-runtime/
 
 # Temporary and local files
 *.tmp
