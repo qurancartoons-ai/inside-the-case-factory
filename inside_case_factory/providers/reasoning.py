@@ -470,6 +470,9 @@ class OpenAIReasoningProvider(ReasoningProvider):
         payload: dict[str, Any],
         schema: dict[str, Any],
     ) -> dict[str, Any]:
+        schema_errors = validate_strict_response_schema(schema)
+        if schema_errors:
+            raise ReasoningProviderError("Invalid local response schema: " + "; ".join(schema_errors))
         self._ensure_callable(project_root, operation)
         stage = self.config.stage(operation)
         request_payload = {
@@ -728,6 +731,9 @@ class StructuredTextReasoningProvider(OpenAIReasoningProvider):
         payload: dict[str, Any], schema: dict[str, Any],
     ) -> dict[str, Any]:
         from inside_case_factory.providers.production import ProductionRequest as RoutedRequest
+        schema_errors = validate_strict_response_schema(schema)
+        if schema_errors:
+            raise ReasoningProviderError("Invalid local response schema: " + "; ".join(schema_errors))
         self._ensure_callable(project_root, operation)
         prompt = json.dumps({
             "system": "Return only valid JSON matching the supplied JSON Schema. Preserve provenance and never invent facts.",
@@ -768,6 +774,9 @@ def fallback_research_plan(request: dict[str, Any], message: str = "") -> dict[s
         "exclusions": [],
         "factual_questions": [],
         "involved_countries": [],
+        "relevant_languages": [],
+        "source_priorities": [],
+        "coverage_targets": [],
         "created_at": datetime.now(UTC).isoformat(),
     }
 
@@ -792,6 +801,44 @@ def fallback_dossier() -> dict[str, Any]:
 
 STRING_ARRAY = {"type": "array", "items": {"type": "string"}}
 
+
+def validate_strict_response_schema(format_schema: dict[str, Any]) -> list[str]:
+    """Return local violations of the strict JSON-schema subset used by Responses."""
+    errors: list[str] = []
+
+    def visit(node: Any, path: str) -> None:
+        if not isinstance(node, dict):
+            return
+        node_type = node.get("type")
+        if node_type == "object" or isinstance(node_type, list) and "object" in node_type:
+            properties = node.get("properties")
+            if not isinstance(properties, dict):
+                errors.append(f"{path}: object must define properties")
+                properties = {}
+            if node.get("additionalProperties") is not False:
+                errors.append(f"{path}: additionalProperties must be false")
+            required = node.get("required")
+            if not isinstance(required, list):
+                errors.append(f"{path}: required must be an array")
+                required = []
+            if set(required) != set(properties):
+                errors.append(f"{path}: required must exactly match properties")
+            for key, child in properties.items():
+                visit(child, f"{path}.properties.{key}")
+        if node_type == "array" or isinstance(node_type, list) and "array" in node_type:
+            if "items" not in node:
+                errors.append(f"{path}: array must define items")
+            else:
+                visit(node["items"], f"{path}.items")
+        for keyword in ("anyOf", "oneOf", "allOf"):
+            for index, child in enumerate(node.get(keyword, [])):
+                visit(child, f"{path}.{keyword}[{index}]")
+
+    if not isinstance(format_schema, dict) or "name" not in format_schema or "schema" not in format_schema:
+        return ["response format must contain name and schema"]
+    visit(format_schema["schema"], str(format_schema["name"]))
+    return errors
+
 RESEARCH_PLAN_SCHEMA = {
     "name": "research_plan",
     "schema": {
@@ -811,12 +858,16 @@ RESEARCH_PLAN_SCHEMA = {
             "events",
             "exclusions",
             "factual_questions",
+            "involved_countries",
+            "relevant_languages",
+            "source_priorities",
+            "coverage_targets",
         ],
         "properties": {
             "version": {"type": "integer"},
             "status": {"type": "string"},
             "exact_topic": {"type": "string"},
-            "documentary_angle": {"type": "string"},
+            "documentary_angle": {"type": ["string", "null"]},
             "requested_focus": {"type": "string"},
             "target_duration_minutes": {"type": "integer"},
             "video_language": {"type": "string"},
@@ -826,7 +877,10 @@ RESEARCH_PLAN_SCHEMA = {
             "events": STRING_ARRAY,
             "exclusions": STRING_ARRAY,
             "factual_questions": STRING_ARRAY,
-            "involved_countries": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["country", "language"], "properties": {"country": {"type": "string"}, "language": {"type": "string"}}}},
+            "involved_countries": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["country", "language", "reason"], "properties": {"country": {"type": "string"}, "language": {"type": "string"}, "reason": {"type": ["string", "null"]}}}},
+            "relevant_languages": STRING_ARRAY,
+            "source_priorities": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["level", "categories"], "properties": {"level": {"type": "integer"}, "categories": STRING_ARRAY}}},
+            "coverage_targets": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["country", "minimum_percentage"], "properties": {"country": {"type": "string"}, "minimum_percentage": {"type": "integer"}}}},
         },
     },
 }
@@ -1019,7 +1073,7 @@ STORY_ARCHITECTURE_SCHEMA = {
             "research_utilization_audit": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["detail", "claim_ids", "use_or_omit_reason"], "properties": {"detail": {"type": "string"}, "claim_ids": STRING_ARRAY, "use_or_omit_reason": {"type": "string"}}}},
             "unused_high_value_details": STRING_ARRAY, "coverage_gaps": STRING_ARRAY,
             "final_reflection": {"type": "string"}, "closing_requirements": STRING_ARRAY,
-            "supplementary_metadata": {"type": "object"},
+            "supplementary_metadata": {"type": "object", "additionalProperties": False, "required": ["notes"], "properties": {"notes": {"type": ["string", "null"]}}},
         },
     },
 }
@@ -1193,3 +1247,10 @@ SCENES_SCHEMA = {
         },
     },
 }
+
+
+RESPONSE_FORMAT_SCHEMAS = (
+    RESEARCH_PLAN_SCHEMA, SOURCE_ANALYSIS_SCHEMA, CORROBORATION_SCHEMA,
+    STORY_ARCHITECTURE_SCHEMA, NARRATIVE_OUTLINE_SCHEMA, SCRIPT_SCHEMA,
+    SCRIPT_REPLACEMENTS_SCHEMA, SCENES_SCHEMA,
+)

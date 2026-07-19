@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import tempfile
 import traceback
+from threading import Thread
 from typing import Any, Callable
 from urllib.parse import unquote
 from urllib.parse import parse_qs
@@ -18,6 +19,7 @@ from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival
 from inside_case_factory.config.settings import Settings, load_settings
 from inside_case_factory.core.media import add_image_asset, ensure_media_manifest, load_media_manifest, update_image_review
 from inside_case_factory.core.production import ProductionRequest, _persist_candidate, _promote_candidate, run_production, start_production
+from inside_case_factory.providers.reasoning import paid_api_confirmed
 from inside_case_factory.core.narrative_quality import validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
@@ -208,6 +210,17 @@ class DashboardApp:
         manifests = project_root / "manifests"
         if (manifests / "production_plan.json").exists() and (manifests / "production_request.json").exists():
             run_production(self.settings, project_root)
+
+    def resume_recoverable_projects(self) -> None:
+        for project_root in self.projects():
+            state_path = project_root / "manifests" / "orchestration.json"
+            state = read_json(state_path) if state_path.exists() else {}
+            if state.get("resume_after_restart") is not True or not paid_api_confirmed(project_root, "research_plan"):
+                continue
+            state["resume_after_restart"] = False
+            state["status"] = "queued"
+            write_json(state_path, state)
+            Thread(target=self.resume_managed_production, args=(project_root,), daemon=True).start()
 
     def read_form(self, environ: dict[str, Any]) -> FieldStorage:
         body_size = int(environ.get("CONTENT_LENGTH") or 0)
@@ -1743,6 +1756,7 @@ class DashboardApp:
 
 def run_dashboard(root: Path | None = None, host: str = "127.0.0.1", port: int = 8000) -> None:
     app = DashboardApp(root)
+    app.resume_recoverable_projects()
     with make_server(host, port, app) as server:
         print(f"Inside the Case Factory dashboard: http://{host}:{port}", flush=True)
         server.serve_forever()

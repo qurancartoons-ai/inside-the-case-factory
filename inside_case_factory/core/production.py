@@ -267,6 +267,25 @@ def run_production(settings: Settings, project_root: Path) -> None:
         _run_production_locked(settings, project_root)
 
 
+def recover_invalid_schema_task(project_root: Path) -> bool:
+    """Queue a schema-rejected research plan for restart without touching approval."""
+    state_path = production_manifest_path(project_root, "orchestration.json")
+    if not state_path.exists():
+        return False
+    state = read_json(state_path)
+    error = str(state.get("last_error", ""))
+    if state.get("current_stage") != "research_plan" or "invalid_json_schema" not in error:
+        return False
+    state.update({"status": "queued", "last_error": "", "waiting_for": "", "resume_after_restart": True, "updated_at": datetime.now(UTC).isoformat()})
+    write_json(state_path, state)
+    update_plan_stage(project_root, "research_plan", "pending", "Schema hersteld; hervat automatisch na dashboardherstart.")
+    research = load_manifest(project_root, "research.json")
+    research.update({"status": "queued", "message": "Schema hersteld; taak staat veilig klaar om te hervatten."})
+    save_manifest(project_root, "research.json", research)
+    write_progress_event(project_root, "retrying", "research_plan", "Researchtaak hervat automatisch na dashboardherstart; bestaande kostengoedkeuring behouden")
+    return True
+
+
 def _run_production_locked(settings: Settings, project_root: Path) -> None:
     workflow = load_manifest(project_root, "workflow.json")
     plan = read_json(production_manifest_path(project_root, "production_plan.json"))
