@@ -9,7 +9,7 @@ from inside_case_factory.core.project import create_project
 from inside_case_factory.core.production import recover_invalid_schema_task
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.web.dashboard import DashboardApp
-from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, RESEARCH_PLAN_SCHEMA, RESPONSE_FORMAT_SCHEMAS, ReasoningConfig, ReasoningProviderError, validate_strict_response_schema
+from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, RESEARCH_PLAN_SCHEMA, RESPONSE_FORMAT_SCHEMAS, ReasoningConfig, ReasoningProviderError, build_response_format, validate_strict_response_schema
 
 
 class _Response:
@@ -69,6 +69,8 @@ class OpenAIResponseSchemaTests(unittest.TestCase):
         self.assertEqual(result, plan)
         sent = captured["text"]["format"]["schema"]
         self.assertEqual(set(sent["required"]), set(sent["properties"]))
+        self.assertEqual(captured["text"]["format"], build_response_format(RESEARCH_PLAN_SCHEMA))
+        self.assertIn("involved_countries", captured["text"]["format"]["schema"]["required"])
 
     def test_failed_project_is_queued_without_losing_approval_or_calling_provider(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -18,6 +19,14 @@ from inside_case_factory.core.content_modes import mode_prompt
 
 class ReasoningProviderError(RuntimeError):
     pass
+
+
+def build_response_format(schema: dict[str, Any]) -> dict[str, Any]:
+    """Build the single canonical response_format used by validation, tests and runtime."""
+    schema_errors = validate_strict_response_schema(schema)
+    if schema_errors:
+        raise ReasoningProviderError("Invalid local response schema: " + "; ".join(schema_errors))
+    return {"type": "json_schema", "name": schema["name"], "strict": True, "schema": schema["schema"]}
 
 
 def _project_content_mode(project_root: Path) -> str:
@@ -470,9 +479,7 @@ class OpenAIReasoningProvider(ReasoningProvider):
         payload: dict[str, Any],
         schema: dict[str, Any],
     ) -> dict[str, Any]:
-        schema_errors = validate_strict_response_schema(schema)
-        if schema_errors:
-            raise ReasoningProviderError("Invalid local response schema: " + "; ".join(schema_errors))
+        response_format = build_response_format(schema)
         self._ensure_callable(project_root, operation)
         stage = self.config.stage(operation)
         request_payload = {
@@ -489,14 +496,7 @@ class OpenAIReasoningProvider(ReasoningProvider):
                 },
                 {"role": "user", "content": json.dumps({"instruction": instruction, "input": payload}, ensure_ascii=False)},
             ],
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": schema["name"],
-                    "strict": True,
-                    "schema": schema["schema"],
-                }
-            },
+            "text": {"format": response_format},
         }
         if not str(stage["model"]).startswith("gpt-4.1"):
             request_payload["reasoning"] = {"effort": self.config.reasoning_effort}
@@ -510,6 +510,7 @@ class OpenAIReasoningProvider(ReasoningProvider):
                 "Content-Type": "application/json",
             },
         )
+        print("OpenAI Responses response_format=" + json.dumps(response_format, ensure_ascii=False, sort_keys=True), file=sys.stderr, flush=True)
         try:
             with urlopen(request, timeout=90) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
@@ -731,9 +732,7 @@ class StructuredTextReasoningProvider(OpenAIReasoningProvider):
         payload: dict[str, Any], schema: dict[str, Any],
     ) -> dict[str, Any]:
         from inside_case_factory.providers.production import ProductionRequest as RoutedRequest
-        schema_errors = validate_strict_response_schema(schema)
-        if schema_errors:
-            raise ReasoningProviderError("Invalid local response schema: " + "; ".join(schema_errors))
+        build_response_format(schema)
         self._ensure_callable(project_root, operation)
         prompt = json.dumps({
             "system": "Return only valid JSON matching the supplied JSON Schema. Preserve provenance and never invent facts.",
