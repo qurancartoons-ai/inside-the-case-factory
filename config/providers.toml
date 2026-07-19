@@ -97,8 +97,8 @@ automatic_ducking = true
 provider = "ffmpeg_local"
 
 [voice_over]
-provider = "auto"
-fallback_provider = "ffmpeg_flite"
+provider = "openai_tts"
+fallback_provider = ""
 
 [voice_over.elevenlabs]
 enabled = false
@@ -119,7 +119,7 @@ provider = "disabled"
 budget_usd = 1.00
 retries = 2
 cache_enabled = true
-external_calls_enabled = false
+external_calls_enabled = true
 
 [production.providers.openai_text]
 kind = "text"
@@ -132,7 +132,7 @@ estimated_cost_usd = 0.05
 
 [production.providers.gemini_text]
 kind = "text"
-enabled = true
+enabled = false
 model = "gemini-2.5-flash"
 api_key_env = "GEMINI_API_KEY"
 priority = 20
@@ -141,7 +141,7 @@ estimated_cost_usd = 0.04
 
 [production.providers.claude_text]
 kind = "text"
-enabled = true
+enabled = false
 model = "claude-sonnet-4-5"
 api_key_env = "ANTHROPIC_API_KEY"
 priority = 15
@@ -150,7 +150,7 @@ estimated_cost_usd = 0.06
 
 [production.providers.local_text]
 kind = "text"
-enabled = true
+enabled = false
 model = "qwen2.5:14b"
 endpoint = "http://127.0.0.1:11434/v1/chat/completions"
 priority = 90
@@ -159,7 +159,7 @@ estimated_cost_usd = 0.0
 
 [production.providers.elevenlabs]
 kind = "voice"
-enabled = true
+enabled = false
 model = "eleven_v3"
 api_key_env = "ELEVENLABS_API_KEY"
 priority = 10
@@ -186,7 +186,7 @@ estimated_cost_usd = 0.08
 
 [production.providers.gemini_images]
 kind = "image"
-enabled = true
+enabled = false
 model = "gemini-3-pro-image-preview"
 api_key_env = "GEMINI_API_KEY"
 priority = 20
@@ -195,7 +195,7 @@ estimated_cost_usd = 0.06
 
 [production.providers.flux]
 kind = "image"
-enabled = true
+enabled = false
 model = "flux-2-pro"
 api_key_env = "BFL_API_KEY"
 priority = 30
