@@ -10,7 +10,7 @@ import tempfile
 import traceback
 from threading import Thread
 from typing import Any, Callable
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
@@ -28,6 +28,7 @@ from inside_case_factory.core.progress import TaskQueue, write_progress_event
 from inside_case_factory.core.draft_review import approve_scene, create_review_draft, revise_draft
 from inside_case_factory.core.user_experience import apply_dossier_instruction, production_progress, revision_change_plan, supported_script_map, youtube_draft
 from inside_case_factory.core.reference_intake import create_reference_intake, select_reference_match
+from inside_case_factory.core.relevance import rebuild_relevance_cache
 from inside_case_factory.core.research_panel import ResearchPanelService
 from inside_case_factory.core.research import (
     add_claim,
@@ -485,15 +486,15 @@ class DashboardApp:
         document.querySelector('#progress-content').innerHTML=`${{gate}}<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase)}}</h1><p>${{esc(d.last_activity)}}</p></div><div class="progress-number"><strong>${{d.percentage}}%</strong><span>${{d.remaining_steps}} stappen resterend${{d.estimated_remaining?' · '+esc(d.estimated_remaining):''}}</span></div></section><ol class="pipeline">${{phases}}</ol>${{g.required?'':`<section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task)}}</h2><div class="research-metrics"><span><strong>${{r.sources_found}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed}}</strong> verwerkt</span><span><strong>${{r.draft_claims}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining)}}</strong> resterend</span></div><p>Laatst afgerond: ${{esc(r.last_completed)}} · Laatste voortgang: ${{esc(r.waiting_since||'Nog geen')}} · Actieve dienst: ${{esc(r.provider)}}</p>${{r.last_error?`<p class="error">${{esc(r.last_error)}}</p>`:''}}</section>`}}<section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Geavanceerd: logs en technische details</summary><div class="event-list">${{d.events.map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`; document.querySelector('.loading-state').hidden=true; }} refresh(); setInterval(refresh,3000); }})();"""
 
     def dossier_review_page(self, slug: str) -> str:
-        root = self.project_root(slug); sources = self.read_manifest(root / "manifests/sources.json").get("sources", []); claims = self.read_manifest(root / "manifests/claims.json").get("claims", [])
+        root = self.project_root(slug); rebuild_relevance_cache(root); sources = self.read_manifest(root / "manifests/sources.json").get("sources", []); claims = self.read_manifest(root / "manifests/claims.json").get("claims", [])
         coverage = self.read_manifest(root / "manifests/international_coverage.json") if (root / "manifests/international_coverage.json").exists() else {}
         coverage_rows = "".join(f'<p><strong>{escape(str(row.get("country")))}</strong> <span class="coverage-bar">{"█" * max(1, round(float(row.get("score", 0)) / 12.5))}</span> {int(row.get("score", 0))}%</p>' for row in coverage.get("countries", []))
         labels = {"pending_review": "Te beoordelen", "needs_review": "Te beoordelen", "approved": "Goedgekeurd", "rejected": "Afgewezen"}
         by_source = {str(s.get("id")): [] for s in sources}
         for claim in claims:
             for source_id in claim.get("source_ids", []): by_source.setdefault(str(source_id), []).append(claim)
-        source_rows = "".join(f'<article class="source-review"><h3><a href="{escape(str(s.get("url", "")))}">{escape(str(s.get("title", s.get("id"))))}</a></h3><p><strong>Uitgever:</strong> {escape(str(s.get("publisher", "Onbekend")))} · <strong>Relevantie:</strong> {float(s.get("relevance_score", 0)):.0%}</p><p>{escape(str(s.get("relevance_reason", "Nog niet beoordeeld")))}</p><p>{escape(str(s.get("summary", "Geen samenvatting beschikbaar.")))}</p><p><strong>Conceptclaims:</strong> {escape("; ".join(str(c.get("text")) for c in by_source.get(str(s.get("id")), [])) or "Geen")}</p>{self.review_buttons(slug, "source", str(s.get("id")))}<form method="post" action="/projects/{escape(slug)}/dossier-review/research-further"><button class="secondary">Onderzoek verder</button></form></article>' for s in sources)
-        claim_rows = "".join(f'<article class="claim-review"><form method="post" action="/projects/{escape(slug)}/research/claim/{escape(str(c.get("id")))}/edit"><label>Claimtekst<textarea name="text" rows="3">{escape(str(c.get("text", "")))}</textarea></label><p><strong>Bron:</strong> {escape(", ".join(str(x) for x in c.get("source_ids", [])))} · <strong>Status:</strong> {escape(labels.get(str(c.get("review_status", "")), str(c.get("review_status", ""))))}</p><button>Aanpassen</button></form>{self.review_buttons(slug, "claim", str(c.get("id")))}</article>' for c in claims)
+        source_rows = "".join(f'<article id="source-{escape(str(s.get("id")))}" class="source-review"><h3><a href="{escape(str(s.get("url", "")))}">{escape(str(s.get("title", s.get("id"))))}</a></h3><p><strong>Status:</strong> {escape(labels.get(str(s.get("review_status", "pending_review")), str(s.get("review_status", ""))))}</p><p><strong>Onderwerprelevantie:</strong> {"Niet berekend" if s.get("topic_relevance") is None else f"{float(s.get('topic_relevance')):.0%}"} — {escape(str(s.get("relevance_reason", "")))}</p><p><strong>Gematcht:</strong> {escape(", ".join(str(x) for x in s.get("relevance_matches", [])) or "Geen")}</p><p><strong>Ontbreekt:</strong> {escape(", ".join(str(x) for x in s.get("relevance_missing", [])) or "Niets")}</p><p><strong>Betrouwbaarheid:</strong> {float(s.get("source_reliability", {}).get("score", 0)):.0%} — {escape(str(s.get("source_reliability", {}).get("reason", "")))}</p><p><strong>Rechtenstatus:</strong> Niet van toepassing op inhoudelijke bronbeoordeling</p><p>{escape(str(s.get("summary", "Geen samenvatting beschikbaar.")))}</p><p><strong>Conceptclaims:</strong> {escape("; ".join(str(c.get("text")) for c in by_source.get(str(s.get("id")), [])) or "Geen")}</p>{self.review_buttons(slug, "source", str(s.get("id")))}<form method="post" action="/projects/{escape(slug)}/dossier-review/research-further"><button class="secondary">Onderzoek verder</button></form></article>' for s in sources)
+        claim_rows = "".join(f'<article id="claim-{escape(str(c.get("id")))}" class="claim-review"><form method="post" action="/projects/{escape(slug)}/research/claim/{escape(str(c.get("id")))}/edit"><label>Claimtekst<textarea name="text" rows="3">{escape(str(c.get("text", "")))}</textarea></label><p><strong>Bron:</strong> {escape(", ".join(str(x) for x in c.get("source_ids", [])))} · <strong>Status:</strong> {escape(labels.get(str(c.get("review_status", "pending_review")), str(c.get("review_status", ""))))}</p><button>Aanpassen</button></form>{self.review_buttons(slug, "claim", str(c.get("id")))}</article>' for c in claims)
         approved_relevant = {str(s.get("id")) for s in sources if s.get("review_status") == "approved" and s.get("relevance_status", "relevant") == "relevant"}
         linked_approved = any(c.get("review_status") == "approved" and approved_relevant.intersection(map(str, c.get("source_ids", []))) for c in claims)
         missing = []
@@ -502,7 +503,7 @@ class DashboardApp:
         recovery = '' if claims else f'<section class="panel recovery-card"><h2>Er zijn nog geen controleerbare feiten opgesteld</h2><form method="post" action="/projects/{escape(slug)}/dossier-review/extract-claims"><button>Claims uit relevante bronnen opstellen</button></form><form method="post" action="/projects/{escape(slug)}/dossier-review/research-further"><button class="secondary">Onderzoek verder</button></form></section>'
         approval = f'<section class="panel"><form method="post" action="/projects/{escape(slug)}/research/approve"><button {"disabled" if missing else ""}>Goedkeuren en doorgaan</button></form><p>{escape("Nog nodig: " + "; ".join(missing) if missing else "Klaar om goed te keuren.")}</p></section>'
         mappings = "".join(f'<article class="subpanel"><strong>{escape(str(item["scene_id"]))}</strong><p>{escape(str(item["script"]))}</p><p>Ondersteund door: {escape(", ".join(str(c.get("id")) for c in item["claims"]) or "geen claim")}</p></article>' for item in supported_script_map(root))
-        return self.page("Dossier & bronnen", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Dossier</strong></nav>{recovery}{f'<section class="panel coverage-analyzer"><h2>Internationale dekking</h2>{coverage_rows}</section>' if coverage_rows else ''}<section class="panel"><h2>Bronnen beoordelen</h2>{source_rows}<h2>Claims beoordelen en aanpassen</h2>{claim_rows or '<p>Geen conceptclaims.</p>'}</section>{approval}<section class="panel"><h2>Claim → scriptdekking</h2>{mappings}</section>""")
+        return self.page("Dossier & bronnen", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Dossier</strong></nav><div id="review-feedback" class="success" hidden></div><script>(()=>{{const n=new URLSearchParams(location.search).get('notice'),e=document.querySelector('#review-feedback');if(n){{e.textContent=n;e.hidden=false;}}}})();</script>{recovery}{f'<section class="panel coverage-analyzer"><h2>Internationale dekking</h2>{coverage_rows}</section>' if coverage_rows else ''}<section class="panel"><h2>Bronnen beoordelen</h2>{source_rows}<h2>Claims beoordelen en aanpassen</h2>{claim_rows or '<p>Geen conceptclaims.</p>'}</section>{approval}<section class="panel"><h2>Claim → scriptdekking</h2>{mappings}</section>""")
 
     def repair_research_review(self, slug: str, action: str) -> Response:
         root = self.project_root(slug)
@@ -862,6 +863,7 @@ class DashboardApp:
             "Geavanceerde instellingen",
             f"""
             <nav class="crumb"><a href="/">Dashboard</a><span>/</span><a href="/projects/{escape(slug)}">{escape(topic)}</a><span>/</span><strong>Geavanceerde instellingen</strong></nav>
+            <div id="review-feedback" class="success" hidden></div><script>(()=>{{const n=new URLSearchParams(location.search).get('notice'),e=document.querySelector('#review-feedback');if(n){{e.textContent=n;e.hidden=false;}}}})();</script>
             <section class="panel project-head">
               <div>
                 <h2>Geavanceerde instellingen</h2>
@@ -1047,11 +1049,20 @@ class DashboardApp:
 
     def review_research_item(self, slug: str, kind: str, item_id: str, action: str) -> Response:
         status = "approved" if action == "approve" else "rejected"
+        project_root = self.project_root(slug)
+        if not project_root.is_dir() or not item_id:
+            return self.html(self.page("Ongeldige beoordeling", '<section class="panel"><h2>Bron of claim niet gevonden</h2><p>Er is niets gewijzigd.</p></section>'), "404 Not Found")
         if kind == "source":
-            review_item(self.project_root(slug), "sources.json", "sources", item_id, status)
+            found, changed = review_item(project_root, "sources.json", "sources", item_id, status)
         else:
-            review_item(self.project_root(slug), "claims.json", "claims", item_id, status)
-        return self.redirect(f"/projects/{slug}")
+            found, changed = review_item(project_root, "claims.json", "claims", item_id, status)
+        if not found:
+            return self.html(self.page("Ongeldige beoordeling", '<section class="panel"><h2>Bron of claim niet gevonden</h2><p>De opgegeven ID bestaat niet; er is niets gewijzigd.</p></section>'), "404 Not Found")
+        label = "Bron" if kind == "source" else "Claim"
+        decision = "goedgekeurd" if status == "approved" else "afgewezen"
+        if changed:
+            write_progress_event(project_root, "completed", "item_review", f"{label} {decision}", item_id=item_id, review_status=status)
+        return self.redirect(f"/projects/{quote(slug)}/dossier-review?notice={quote(f'{label} {decision}') }#{quote(kind)}-{quote(item_id)}")
 
     def approve_research(self, slug: str) -> Response:
         project_root = self.project_root(slug)
@@ -1137,9 +1148,15 @@ class DashboardApp:
     def review_media(self, slug: str, media_id: str, action: str) -> Response:
         project_root = self.project_root(slug)
         status = "approved" if action == "approve" else "rejected"
+        before = next((item for item in load_media_manifest(project_root).get("assets", []) if isinstance(item, dict) and str(item.get("id")) == media_id), None)
+        if not before:
+            return self.html(self.page("Ongeldige beoordeling", '<section class="panel"><h2>Media-asset niet gevonden</h2><p>Er is niets gewijzigd.</p></section>'), "404 Not Found")
+        changed = before.get("review_status") != status
         update_image_review(project_root, media_id, status)
-        self.resume_managed_production(project_root)
-        return self.redirect(f"/projects/{slug}")
+        if changed:
+            write_progress_event(project_root, "completed", "media_review", f"Media {'goedgekeurd' if status == 'approved' else 'afgewezen'}", item_id=media_id, review_status=status)
+            self.resume_managed_production(project_root)
+        return self.redirect(f"/projects/{quote(slug)}/advanced?notice={quote('Media goedgekeurd' if status == 'approved' else 'Media afgewezen')}#media-{quote(media_id)}")
 
     def add_media(self, slug: str, environ: dict[str, Any]) -> Response:
         project_root = self.project_root(slug)
@@ -1471,13 +1488,14 @@ class DashboardApp:
           async function load(kind,page=1) {{
             const data=await fetch(`/projects/${{slug}}/research-data?kind=${{kind}}&page=${{page}}&page_size=25`).then(r=>r.json());
             const rows=data.items.map(item=>kind==='sources'
-              ? `<tr><td><code>${{esc(item.id)}}</code></td><td><a href="${{esc(item.url)}}">${{esc(item.title)}}</a><p>${{esc(item.transcript_preview)}}</p><div>${{(item.attachments||[]).map(a=>`<img loading="lazy" src="${{esc(a.url)}}" alt="${{esc(a.title)}}" width="120">`).join('')}}</div>${{item.has_transcript?`<button data-transcript="${{esc(item.id)}}" type="button">Transcript laden</button><pre id="transcript-${{esc(item.id)}}"></pre>`:''}}</td><td>${{esc(item.publisher)}}</td><td>${{esc(item.review_status)}}</td><td>${{review(kind,item.id)}}</td></tr>`
-              : `<tr><td><code>${{esc(item.id)}}</code></td><td>${{esc(item.text)}}</td><td>${{esc((item.source_ids||[]).join(', '))}}</td><td>${{esc(item.review_status)}}</td><td>${{review(kind,item.id)}}</td></tr>`).join('');
+              ? `<tr><td><code>${{esc(item.id)}}</code></td><td><a href="${{esc(item.url)}}">${{esc(item.title)}}</a><p>${{esc(item.transcript_preview)}}</p><div>${{(item.attachments||[]).map(a=>`<img loading="lazy" src="${{esc(a.url)}}" alt="${{esc(a.title)}}" width="120">`).join('')}}</div>${{item.has_transcript?`<button data-transcript="${{esc(item.id)}}" type="button">Transcript laden</button><pre id="transcript-${{esc(item.id)}}"></pre>`:''}}</td><td>${{esc(item.publisher)}}</td><td>${{statusLabel(item.review_status)}}</td><td>${{review(kind,item.id)}}</td></tr>`
+              : `<tr><td><code>${{esc(item.id)}}</code></td><td>${{esc(item.text)}}</td><td>${{esc((item.source_ids||[]).join(', '))}}</td><td>${{statusLabel(item.review_status)}}</td><td>${{review(kind,item.id)}}</td></tr>`).join('');
             document.querySelector(`#research-${{kind}}`).innerHTML=`<table><tbody>${{rows||'<tr><td>Geen resultaten.</td></tr>'}}</tbody></table>`;
             const pages=Math.ceil(data.total/data.page_size); const previous=data.page>1?`<button type="button" data-page="${{data.page-1}}" data-kind="${{kind}}">Vorige</button>`:''; const next=data.page<pages?`<button type="button" data-page="${{data.page+1}}" data-kind="${{kind}}">Volgende</button>`:''; document.querySelector(`#${{kind==='sources'?'source':'claim'}}-pages`).innerHTML=`${{previous}} <span>Pagina ${{data.page}} van ${{pages||1}}</span> ${{next}}`;
             document.querySelector('#research-loading').textContent=`${{data.total}} ${{kind}} · pagina ${{data.page}}`;
           }}
-          function review(kind,id) {{ return `<div class="actions"><form method="post" action="/projects/${{slug}}/research/${{kind.slice(0,-1)}}/${{esc(id)}}/approve"><button>Approve</button></form><form method="post" action="/projects/${{slug}}/research/${{kind.slice(0,-1)}}/${{esc(id)}}/reject"><button class="secondary">Reject</button></form></div>`; }}
+          function statusLabel(value) {{ return esc(({{pending_review:'Nog te beoordelen',approved:'Goedgekeurd',rejected:'Afgewezen',needs_review:'Nog te beoordelen'}})[value]||value); }}
+          function review(kind,id) {{ return `<div class="actions"><form method="post" action="/projects/${{slug}}/research/${{kind.slice(0,-1)}}/${{esc(id)}}/approve"><button>Goedkeuren</button></form><form method="post" action="/projects/${{slug}}/research/${{kind.slice(0,-1)}}/${{esc(id)}}/reject"><button class="secondary">Afwijzen</button></form></div>`; }}
           document.querySelector('#research-panel').addEventListener('click',async e=>{{ const b=e.target.closest('button'); if(!b)return; if(b.dataset.page)load(b.dataset.kind,+b.dataset.page); if(b.dataset.transcript){{const d=await fetch(`/projects/${{slug}}/research-transcript/${{b.dataset.transcript}}?limit=2000`).then(r=>r.json());document.querySelector(`#transcript-${{b.dataset.transcript}}`).textContent=d.text;b.remove();}} }});
           document.querySelectorAll('[data-research-section]').forEach(section=>section.addEventListener('toggle',()=>{{if(section.open&&!section.dataset.loaded){{section.dataset.loaded='true';requestAnimationFrame(()=>load(section.dataset.researchSection));}}}}));
         }})();
@@ -1574,42 +1592,48 @@ class DashboardApp:
         """
 
     def review_queue(self, project_root: Path, slug: str) -> str:
+        rebuild_relevance_cache(project_root)
         manifest = load_media_manifest(project_root)
         assets = manifest.get("assets", [])
         rows = []
         if isinstance(assets, list):
             for asset in assets:
-                if not isinstance(asset, dict) or asset.get("review_status") not in {"pending_review", "rejected"}:
+                if not isinstance(asset, dict) or asset.get("review_status") not in {"pending_review", "rejected"} or asset.get("review_eligible") is not True:
                     continue
                 media_id = str(asset.get("id", ""))
                 image = f"<img src=\"/projects/{escape(slug)}/media/{escape(media_id)}/preview\" alt=\"\" loading=\"lazy\">"
                 copyright_status = str(asset.get("copyright_status", "unknown"))
+                rights_label = {"likely_open": "Waarschijnlijk vrij te gebruiken", "restrictive_or_unknown": "Beperkt of onbekend", "unknown": "Onbekend"}.get(copyright_status, copyright_status)
                 flag = "flag warn" if copyright_status != "likely_open" else "flag"
                 duplicate = ""
                 if asset.get("duplicate_of"):
                     duplicate = f"<p class=\"muted\">Duplicate: {escape(str(asset.get('duplicate_kind', '')))} of {escape(str(asset.get('duplicate_of')))}</p>"
                 rows.append(
                     f"""
-                    <article class="media-card">
+                    <article id="media-{escape(media_id)}" class="media-card">
                       {image}
                       <div>
                         <h3>{escape(str(asset.get('title') or asset.get('id')))}</h3>
-                        <p><span class="{flag}">{escape(copyright_status)}</span> Score: {escape(str(asset.get('relevance_score', '')))}</p>
+                        <p><span class="{flag}">{escape(rights_label)}</span></p>
+                        <p><strong>Onderwerprelevantie:</strong> {"Niet berekend" if asset.get('topic_relevance') is None else f"{float(asset.get('topic_relevance')):.0%}"} — {escape(str(asset.get('relevance_reason', '')))}</p>
+                        <p><strong>Gematcht:</strong> {escape(', '.join(str(item) for item in asset.get('relevance_matches', [])) or 'Geen')} · <strong>Ontbreekt:</strong> {escape(', '.join(str(item) for item in asset.get('relevance_missing', [])) or 'Niets')}</p>
+                        <p><strong>Betrouwbaarheid herkomst:</strong> {float(asset.get('source_reliability', {}).get('score', 0)):.0%} — {escape(str(asset.get('source_reliability', {}).get('reason', '')))}</p>
+                        <p><strong>Duplicaatzekerheid:</strong> {float(asset.get('duplicate_confidence', 0)):.0%} · <strong>Rechtenstatus:</strong> {escape(rights_label)}</p>
                         <p>{escape(str(asset.get('creator', '')))}</p>
                         <p>{escape(str(asset.get('license', '')))}</p>
-                        <p>Suggested: {escape(', '.join(str(item) for item in asset.get('suggested_scenes', [])))}</p>
+                        <p>Voorgestelde scène: {escape(', '.join(str(item) for item in asset.get('suggested_scenes', [])))}</p>
                         {duplicate}
-                        <p><a href="{escape(str(asset.get('source_url', '')))}">Original source</a></p>
+                        <p><a href="{escape(str(asset.get('source_url', '')))}">Oorspronkelijke bron</a></p>
                         <div class="actions">
-                          <form method="post" action="/projects/{escape(slug)}/media/{escape(media_id)}/approve"><button type="submit">Approve</button></form>
-                          <form method="post" action="/projects/{escape(slug)}/media/{escape(media_id)}/reject"><button type="submit" class="secondary">Reject</button></form>
+                          <form method="post" action="/projects/{escape(slug)}/media/{escape(media_id)}/approve"><button type="submit">Goedkeuren</button></form>
+                          <form method="post" action="/projects/{escape(slug)}/media/{escape(media_id)}/reject"><button type="submit" class="secondary">Afwijzen</button></form>
                         </div>
                       </div>
                     </article>
                     """
                 )
-        body = "".join(rows) if rows else "<p class=\"muted\">No discovered media awaiting review.</p>"
-        return f"<section class=\"panel\"><h2>Discovered Media Review Queue</h2>{body}</section>"
+        body = "".join(rows) if rows else "<p class=\"muted\">Geen ontdekte media om te beoordelen.</p>"
+        return f"<section class=\"panel\"><h2>Wachtrij voor ontdekte media</h2>{body}</section>"
 
     def scene_options(self, scenes_manifest: Any) -> str:
         options = ['<option value="*">All scenes (*)</option>']

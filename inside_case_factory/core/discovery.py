@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from inside_case_factory.core.media import add_image_asset, load_media_manifest
 from inside_case_factory.core.project import slugify
+from inside_case_factory.core.relevance import media_threshold, project_context, rights_status, topic_relevance
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.utils.text import compact_whitespace
 
@@ -101,19 +102,17 @@ def rank_candidate(candidate: dict[str, Any], query: DiscoveryQuery, scenes: dic
         str(candidate.get("description", "")),
         str(candidate.get("source", "")),
     )
-    relevance = len(query_terms & candidate_terms) * 10.0
+    relevance = min(1.0, len(query_terms & candidate_terms) / max(1, min(5, len(query_terms))))
     suggested: list[tuple[float, str]] = []
     for scene_id, text in scenes.items():
         scene_terms = _terms(text)
-        score = len(scene_terms & candidate_terms) * 7.0 + len(scene_terms & query_terms & candidate_terms) * 3.0
+        score = len(scene_terms & candidate_terms) / max(1, min(5, len(scene_terms)))
         if score:
             suggested.append((score, scene_id))
     suggested.sort(reverse=True)
     if suggested:
-        relevance += suggested[0][0]
-    else:
-        suggested = [(1.0, next(iter(scenes)))]
-    return relevance, [scene_id for _, scene_id in suggested[:2]]
+        relevance = min(1.0, relevance * 0.7 + suggested[0][0] * 0.3)
+    return round(relevance, 3), [scene_id for _, scene_id in suggested[:2]]
 
 
 def file_sha256(path: Path) -> str:
@@ -267,6 +266,9 @@ def discover_archival_media(
     known_fingerprints = {str(asset.get("fingerprint", "")): str(asset.get("id", "")) for asset in existing if asset.get("fingerprint")}
     added: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    context = project_context(project_root)
+    threshold = media_threshold(project_root)
+    filtered_count = duplicate_count = 0
 
     for connector in connectors:
         try:
@@ -294,6 +296,16 @@ def discover_archival_media(
                         duplicate_kind = "near"
                         break
             score, suggested_scenes = rank_candidate(candidate, query, scenes)
+            relevance = topic_relevance(context, candidate)
+            score = relevance["score"]
+            if duplicate_of:
+                duplicate_count += 1
+                preview_path.unlink(missing_ok=True)
+                continue
+            if score is None or score < threshold or not suggested_scenes:
+                filtered_count += 1
+                preview_path.unlink(missing_ok=True)
+                continue
             extra = {
                 "discovery": {
                     "source": candidate.get("source", ""),
@@ -309,10 +321,18 @@ def discover_archival_media(
                 "preview_url": preview_url,
                 "sha256": sha,
                 "fingerprint": fingerprint,
-                "duplicate_of": duplicate_of,
-                "duplicate_kind": duplicate_kind,
-                "relevance_score": round(score, 3),
+                "duplicate_of": "",
+                "duplicate_kind": "",
+                "duplicate_confidence": 0.0,
+                "topic_relevance": score,
+                "relevance_score": score,
+                "relevance_reason": relevance["reason"],
+                "relevance_matches": relevance["matched"],
+                "relevance_missing": relevance["missing"],
                 "suggested_scenes": suggested_scenes,
+                "review_eligible": True,
+                "rights_status": rights_status(candidate),
+                "project_slug": project_root.name,
                 "provider_metadata": candidate.get("provider_metadata", {}),
             }
             asset = add_image_asset(
@@ -339,6 +359,8 @@ def discover_archival_media(
         "sources": [connector.name for connector in connectors],
         "created_at": datetime.now(UTC).isoformat(),
         "added_count": len(added),
+        "filtered_count": filtered_count,
+        "duplicate_count": duplicate_count,
         "errors": errors,
         "assets": [
             {

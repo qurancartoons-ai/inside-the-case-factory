@@ -311,10 +311,11 @@ class ProjectScaffoldTests(unittest.TestCase):
             manifest = load_media_manifest(project.root)
             assets = manifest["assets"]
 
-            self.assertEqual(result["added_count"], 2)
+            self.assertEqual(result["added_count"], 1)
+            self.assertEqual(result["duplicate_count"], 1)
             self.assertEqual(assets[0]["review_status"], "pending_review")
             self.assertEqual(assets[0]["suggested_scenes"], ["s01"])
-            self.assertEqual(assets[1]["duplicate_kind"], "exact")
+            self.assertEqual(len(assets), 1)
             self.assertIsNone(image_for_scene(project.root, "s01"))
 
             update_image_review(project.root, assets[0]["id"], "approved")
@@ -527,7 +528,7 @@ class ProjectScaffoldTests(unittest.TestCase):
             ).decode("utf-8")
 
             self.assertIn("Archiefbeelden zoeken", advanced_body)
-            self.assertIn("Discovered Media Review Queue", advanced_body)
+            self.assertIn("Wachtrij voor ontdekte media", advanced_body)
             self.assertIn("Research", advanced_body)
             self.assertIn("Run Automated Research", advanced_body)
             self.assertIn("Script", body)

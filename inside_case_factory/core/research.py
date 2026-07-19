@@ -168,6 +168,8 @@ def analyse_research_review(project_root: Path, *, create_claims: bool = True) -
                 existing.add(key); created += 1
         claims_data["claims"] = claims
         save_manifest(project_root, "claims.json", claims_data)
+    from inside_case_factory.core.relevance import rebuild_relevance_cache
+    rebuild_relevance_cache(project_root)
     return {"sources": len(sources), "relevant": len(relevant_ids), "duplicates": duplicates, "claims_created": created}
 
 
@@ -854,18 +856,28 @@ def split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def review_item(project_root: Path, manifest_name: str, collection: str, item_id: str, status: str) -> None:
+def review_item(project_root: Path, manifest_name: str, collection: str, item_id: str, status: str) -> tuple[bool, bool]:
     manifest = load_manifest(project_root, manifest_name)
     items = manifest.get(collection, [])
+    found = changed = False
     if isinstance(items, list):
         for item in items:
             if isinstance(item, dict) and str(item.get("id")) == item_id:
+                found = True
+                if item.get("review_status") == status:
+                    break
                 item["review_status"] = status
                 item["reviewed_at"] = datetime.now(UTC).isoformat()
+                changed = True
                 break
+    if not found:
+        return False, False
+    if not changed:
+        return True, False
     save_manifest(project_root, manifest_name, manifest)
     if manifest_name == "claims.json":
         rebuild_timeline(project_root)
+    return True, True
 
 
 def approved_sources(project_root: Path) -> list[dict[str, Any]]:
