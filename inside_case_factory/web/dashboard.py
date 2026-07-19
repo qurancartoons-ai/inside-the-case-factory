@@ -465,6 +465,8 @@ class DashboardApp:
 
     def dossier_review_page(self, slug: str) -> str:
         root = self.project_root(slug); sources = self.read_manifest(root / "manifests/sources.json").get("sources", []); claims = self.read_manifest(root / "manifests/claims.json").get("claims", [])
+        coverage = self.read_manifest(root / "manifests/international_coverage.json") if (root / "manifests/international_coverage.json").exists() else {}
+        coverage_rows = "".join(f'<p><strong>{escape(str(row.get("country")))}</strong> <span class="coverage-bar">{"█" * max(1, round(float(row.get("score", 0)) / 12.5))}</span> {int(row.get("score", 0))}%</p>' for row in coverage.get("countries", []))
         labels = {"pending_review": "Te beoordelen", "needs_review": "Te beoordelen", "approved": "Goedgekeurd", "rejected": "Afgewezen"}
         by_source = {str(s.get("id")): [] for s in sources}
         for claim in claims:
@@ -479,7 +481,7 @@ class DashboardApp:
         recovery = '' if claims else f'<section class="panel recovery-card"><h2>Er zijn nog geen controleerbare feiten opgesteld</h2><form method="post" action="/projects/{escape(slug)}/dossier-review/extract-claims"><button>Claims uit relevante bronnen opstellen</button></form><form method="post" action="/projects/{escape(slug)}/dossier-review/research-further"><button class="secondary">Onderzoek verder</button></form></section>'
         approval = f'<section class="panel"><form method="post" action="/projects/{escape(slug)}/research/approve"><button {"disabled" if missing else ""}>Goedkeuren en doorgaan</button></form><p>{escape("Nog nodig: " + "; ".join(missing) if missing else "Klaar om goed te keuren.")}</p></section>'
         mappings = "".join(f'<article class="subpanel"><strong>{escape(str(item["scene_id"]))}</strong><p>{escape(str(item["script"]))}</p><p>Ondersteund door: {escape(", ".join(str(c.get("id")) for c in item["claims"]) or "geen claim")}</p></article>' for item in supported_script_map(root))
-        return self.page("Dossier & bronnen", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Dossier</strong></nav>{recovery}<section class="panel"><h2>Bronnen beoordelen</h2>{source_rows}<h2>Claims beoordelen en aanpassen</h2>{claim_rows or '<p>Geen conceptclaims.</p>'}</section>{approval}<section class="panel"><h2>Claim → scriptdekking</h2>{mappings}</section>""")
+        return self.page("Dossier & bronnen", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Dossier</strong></nav>{recovery}{f'<section class="panel coverage-analyzer"><h2>Internationale dekking</h2>{coverage_rows}</section>' if coverage_rows else ''}<section class="panel"><h2>Bronnen beoordelen</h2>{source_rows}<h2>Claims beoordelen en aanpassen</h2>{claim_rows or '<p>Geen conceptclaims.</p>'}</section>{approval}<section class="panel"><h2>Claim → scriptdekking</h2>{mappings}</section>""")
 
     def repair_research_review(self, slug: str, action: str) -> Response:
         root = self.project_root(slug)

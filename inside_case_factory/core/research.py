@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from inside_case_factory.core.project import slugify
 from inside_case_factory.core.progress import write_progress_event
+from inside_case_factory.core.international_research import analyze_coverage, build_international_strategy, detect_claim_conflicts, enrich_claim_provenance, filter_and_rank_results
 from inside_case_factory.providers.reasoning import ReasoningProvider, ReasoningProviderError
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.utils.text import compact_whitespace
@@ -216,7 +217,7 @@ class TavilyResearchProvider(ResearchProvider):
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def search(self, topic: str, *, content_mode: str = "factual_documentary") -> dict[str, Any]:
+    def search(self, topic: str, *, content_mode: str = "factual_documentary", strategy: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.available:
             return {
                 "ok": False,
@@ -230,7 +231,7 @@ class TavilyResearchProvider(ResearchProvider):
             "theory_conspiracy": "theory origins proponents alleged motives anomalies counterarguments conventional explanation",
         }.get(content_mode, "official records verified facts reputable reporting")
         payload = {
-            "query": f"{topic} {query_suffix}",
+            "query": f"{(strategy or {}).get('combined_query') or topic} {query_suffix}",
             "topic": "general",
             "search_depth": self.search_depth,
             "max_results": self.max_results,
@@ -262,7 +263,7 @@ class TavilyResearchProvider(ResearchProvider):
             return {"ok": False, "provider": self.name, "message": f"Tavily network error: {error}", "results": []}
         results = data.get("results", [])
         if isinstance(results, list):
-            results = rank_research_results(results, content_mode=content_mode)
+            results = filter_and_rank_results(rank_research_results(results, content_mode=content_mode))
         else:
             results = []
         return {"ok": True, "provider": self.name, "message": "ok", "results": results, "raw": data}
@@ -304,9 +305,12 @@ class TavilyResearchProvider(ResearchProvider):
     ) -> dict[str, Any]:
         workflow = load_manifest(project_root, "workflow.json")
         content_mode = str(workflow.get("content_mode", "factual_documentary"))
+        project_language = str(workflow.get("language") or (research_plan or {}).get("video_language") or "Nederlands")
+        strategy = build_international_strategy(topic, project_language, research_plan)
+        save_manifest(project_root, "international_research_strategy.json", strategy)
         write_progress_event(project_root, "started", "research", "Zoekt actuele bronnen", provider=self.name)
         write_progress_event(project_root, "waiting_for_provider", "research", "Onderzoeksdienst wordt geraadpleegd", provider=self.name)
-        result = self.search(topic, content_mode=content_mode)
+        result = self.search(topic, content_mode=content_mode, strategy=strategy)
         ensure_research_manifests(project_root)
         research = load_manifest(project_root, "research.json")
         research.update(
@@ -329,10 +333,17 @@ class TavilyResearchProvider(ResearchProvider):
             if not isinstance(item, dict):
                 continue
             source = source_from_tavily_result(project_root, item)
+            source.update({key: item[key] for key in ("source_tier", "source_country", "primary_source") if item.get(key) is not None})
             added_sources.append(source)
             write_progress_event(project_root, "source_found", "research", f"Bron {len(added_sources)} gevonden", source_id=source.get("id"), total=len(tavily_results))
 
         selected = added_sources[:8]
+        sources_manifest = load_manifest(project_root, "sources.json")
+        metadata = {str(source.get("id")): source for source in added_sources}
+        for saved in sources_manifest.get("sources", []):
+            if str(saved.get("id")) in metadata:
+                saved.update({key: metadata[str(saved.get("id"))].get(key) for key in ("source_tier", "source_country", "primary_source")})
+        save_manifest(project_root, "sources.json", sources_manifest)
         extraction = self.extract([str(source.get("url", "")) for source in selected], extract_depth="basic")
         snapshots = build_source_snapshots(selected, extraction, tavily_results)
         save_manifest(
@@ -369,6 +380,10 @@ class TavilyResearchProvider(ResearchProvider):
                 save_manifest(project_root, "research.json", research)
                 return {"ok": False, "provider": self.name, "message": str(error), "sources_added": len(added_sources), "claims_added": 0}
             added_claims, rejections = validate_and_store_claims(project_root, analysis.get("claims", []), snapshots)
+            enrich_claim_provenance(added_claims, added_sources, project_language)
+            detect_claim_conflicts(added_claims)
+            claims_manifest = load_manifest(project_root, "claims.json"); claims_manifest["claims"] = added_claims; save_manifest(project_root, "claims.json", claims_manifest)
+            analyze_coverage(project_root, strategy, added_sources, added_claims)
             for claim in added_claims:
                 write_progress_event(project_root, "claim_created", "research", "Claim klaar voor jouw controle", claim_id=claim.get("id"))
             build_validated_research_artifacts(project_root, added_claims)

@@ -221,6 +221,8 @@ class OpenAIReasoningProvider(ReasoningProvider):
                 "content_mode_instructions": mode_prompt(request.get("content_mode")),
                 "requirements": [
                     "Keep dashboard language separate from generated video language.",
+                    "Detect every materially involved country and plan research in that country's most relevant language before considering the user's language.",
+                    "Prioritize official records, courts, police, government and parliamentary reports; then national quality media; then international media; local media; and Dutch sources only as supplementary context.",
                     "Return specific research questions that must be answered before scripting.",
                     "Do not invent facts.",
                 ],
@@ -324,6 +326,8 @@ class OpenAIReasoningProvider(ReasoningProvider):
                     "Preserve supported dates, times, people, locations, and events; never invent precision.",
                     "Prefer primary and high-quality secondary sources. Flag weak single-source claims.",
                     "Do not create claims from raw fragments that are not factual and relevant to the production prompt.",
+                    "Write claim text in the requested video language so the user never has to read a foreign source; preserve exact original-language excerpts as evidence.",
+                    "Explicitly record contradictions between sources in contradiction_notes instead of merging incompatible accounts.",
                 ],
             },
             SOURCE_ANALYSIS_SCHEMA,
@@ -763,6 +767,7 @@ def fallback_research_plan(request: dict[str, Any], message: str = "") -> dict[s
         "events": [],
         "exclusions": [],
         "factual_questions": [],
+        "involved_countries": [],
         "created_at": datetime.now(UTC).isoformat(),
     }
 
@@ -821,6 +826,7 @@ RESEARCH_PLAN_SCHEMA = {
             "events": STRING_ARRAY,
             "exclusions": STRING_ARRAY,
             "factual_questions": STRING_ARRAY,
+            "involved_countries": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["country", "language"], "properties": {"country": {"type": "string"}, "language": {"type": "string"}}}},
         },
     },
 }
