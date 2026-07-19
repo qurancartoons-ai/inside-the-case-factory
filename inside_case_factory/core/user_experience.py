@@ -43,12 +43,15 @@ def production_progress(project_root: Path) -> dict[str, Any]:
             "artifacts": artifacts, "errors": errors if status == "actief" else [],
         })
     confirmation = read_json(manifests / "paid_api_confirmation.json") if (manifests / "paid_api_confirmation.json").exists() else {}
+    approval_request = read_json(manifests / "paid_research_approval.json") if (manifests / "paid_research_approval.json").exists() else {}
     estimate = read_json(manifests / "cost_estimate.json") if (manifests / "cost_estimate.json").exists() else {}
     research_cost = round(sum(float(item.get("estimated_maximum_cost_usd", 0)) for item in estimate.get("stages", []) if item.get("stage") in {"research_plan", "source_analysis"}), 6)
     confirmed = bool(confirmation.get("confirmed") is True and ("project" not in confirmation or confirmation.get("project") == project_root.name) and ("approved_limit_usd" not in confirmation or float(confirmation.get("approved_limit_usd", 0)) + 1e-9 >= research_cost))
     confirmation_error = "paid api call not confirmed" in str(orchestration.get("last_error", "")).lower()
     cancelled = confirmation.get("cancelled") is True
-    paid_gate = bool(estimate and not confirmed and not cancelled and (confirmation_error or orchestration.get("current_stage") in {"", "research_plan", "research"}))
+    explicit_approval = approval_request.get("approval_required") is True and not approval_request.get("resolved_at")
+    approval_processed = bool(approval_request.get("resolved_at"))
+    paid_gate = bool(explicit_approval or (not approval_processed and estimate and not confirmed and not cancelled and (confirmation_error or orchestration.get("current_stage") in {"", "research_plan", "research"})))
     if paid_gate:
         gate_index = PHASES.index("Onderzoek")
         for index, phase in enumerate(phases):
@@ -93,8 +96,24 @@ def production_progress(project_root: Path) -> dict[str, Any]:
     }
     provider = "OpenAI en Tavily"
     local_fallback = bool(sources and claims)
-    within_budget = research_cost <= float(estimate.get("project_budget_usd", 0) or 0)
-    gate = {"required": paid_gate, "title": "Onderzoek wacht op jouw toestemming", "maximum_cost_usd": research_cost, "provider": provider, "purpose": "Een onderzoeksplan maken en bronnen omzetten in controleerbare claims.", "operations": ["research_plan", "source_analysis", "tavily_research"], "local_fallback_available": local_fallback, "within_budget": within_budget}
+    research_plan = read_json(manifests / "research_plan.json") if (manifests / "research_plan.json").exists() else {}
+    countries = approval_request.get("countries") or [item.get("country") for item in research_plan.get("involved_countries", []) if item.get("country")]
+    languages = approval_request.get("languages") or research_plan.get("relevant_languages", [])
+    improved_claims = approval_request.get("claims") or [str(item.get("text")) for item in claims if item.get("review_status") != "approved"]
+    gate = {
+        "required": paid_gate,
+        "title": "Onderzoek wacht op jouw toestemming",
+        "maximum_cost_usd": float(approval_request.get("estimated_cost_usd", research_cost)),
+        "provider": provider,
+        "purpose": str(approval_request.get("reason") or "Een onderzoeksplan maken en bronnen omzetten in controleerbare claims."),
+        "extra_sources": int(approval_request.get("extra_sources", 5)),
+        "countries": countries or ["Nog te bepalen"],
+        "languages": languages or [str(research_plan.get("video_language") or workflow.get("language") or "Nederlands")],
+        "claims": improved_claims or ["Claims met ontbrekende of onvoldoende bronondersteuning"],
+        "operations": ["research_plan", "source_analysis", "tavily_research"],
+        "local_fallback_available": local_fallback,
+        "within_budget": float(approval_request.get("estimated_cost_usd", research_cost)) <= float(estimate.get("project_budget_usd", 0) or 0),
+    }
     return {"phases": phases, "percentage": round(completed / len(phases) * 100), "remaining_steps": len(phases) - completed, "current_phase": active_phase["name"], "estimated_remaining": "" if paid_gate or pipeline_blocked else f"ongeveer {max(1, len(phases)-completed) * 3} minuten", "cost_usd": float(usage.get("spent_usd", 0)), "last_activity": "Wacht op jouw toestemming" if paid_gate else activity.get("current_activity", "Nog geen activiteit"), "last_update": orchestration.get("updated_at") or (events[-1].get("at") if events else "Nog geen update"), "approvals": approvals, "blockers": errors, "queue": queue, "events": events, "research": research, "paid_gate": gate}
 
 

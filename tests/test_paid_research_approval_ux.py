@@ -47,9 +47,52 @@ class PaidResearchApprovalUXTests(unittest.TestCase):
 
     def test_action_card_shows_provider_limit_purpose_and_safe_actions(self):
         html = self.app.production_overview_page("approval-case")
-        for text in ("Onderzoek wacht op jouw toestemming", "maximum_cost_usd", "provider", "purpose", "Kosten goedkeuren en doorgaan", "Annuleren"):
+        for text in ("Onderzoek wacht op jouw toestemming", "maximum_cost_usd", "provider", "purpose", "Geschatte kosten", "Extra bronnen", "Landen", "Talen", "Claims die hierdoor verbeterd worden", "Goedkeuren en doorgaan", "Annuleren", "Alleen lokaal doorgaan"):
             self.assertIn(text, html)
         self.assertIn("approval-card", html)
+
+    def test_followup_research_always_creates_actionable_approval_request(self):
+        write_json(self.root / "manifests/research_plan.json", {
+            "involved_countries": [{"country": "Nederland", "language": "Nederlands"}, {"country": "België", "language": "Frans"}],
+            "relevant_languages": ["Nederlands", "Frans"],
+        })
+        write_json(self.root / "manifests/claims.json", {"claims": [{"id": "c1", "text": "Betwiste claim", "review_status": "needs_review"}]})
+        response = self.app.repair_research_review("approval-case", "research-further")
+        self.assertEqual(response[0], "303 See Other")
+        self.assertEqual(dict(response[1])["Location"], "/projects/approval-case/production")
+        result = production_progress(self.root)
+        self.assertTrue(result["paid_gate"]["required"])
+        self.assertEqual(result["paid_gate"]["extra_sources"], 5)
+        self.assertEqual(result["paid_gate"]["countries"], ["Nederland", "België"])
+        self.assertEqual(result["paid_gate"]["languages"], ["Nederlands", "Frans"])
+        self.assertEqual(result["paid_gate"]["claims"], ["Betwiste claim"])
+        html = self.app.production_overview_page("approval-case")
+        for action in ("/paid-research/approve", "/paid-research/cancel", "/paid-research/fallback"):
+            self.assertIn(action, html)
+
+    def test_processed_approval_disappears_and_approval_resumes_workflow(self):
+        self.app.repair_research_review("approval-case", "research-further")
+        with patch.object(self.app, "resume_managed_production") as resume:
+            response = self.app.paid_research_action("approval-case", "approve")
+        self.assertEqual(response[0], "303 See Other")
+        self.assertFalse(production_progress(self.root)["paid_gate"]["required"])
+        approval = read_json(self.root / "manifests/paid_research_approval.json")
+        self.assertEqual(approval["resolution"], "approved")
+        self.assertIn("resolved_at", approval)
+        resume.assert_called_once_with(self.root)
+
+    def test_cancel_and_local_fallback_also_clear_approval_card(self):
+        self.app.repair_research_review("approval-case", "research-further")
+        self.app.paid_research_action("approval-case", "cancel")
+        self.assertFalse(production_progress(self.root)["paid_gate"]["required"])
+
+        (self.root / "manifests" / "paid_api_confirmation.json").unlink()
+        write_json(self.root / "manifests/sources.json", {"sources": [{"id": "s1"}]})
+        write_json(self.root / "manifests/claims.json", {"claims": [{"id": "c1", "source_ids": ["s1"]}]})
+        self.app.repair_research_review("approval-case", "research-further")
+        with patch.object(self.app, "resume_managed_production"):
+            self.app.paid_research_action("approval-case", "fallback")
+        self.assertFalse(production_progress(self.root)["paid_gate"]["required"])
 
     def test_approval_is_project_specific_audited_and_resumes_orchestrator(self):
         with patch.object(self.app, "resume_managed_production") as resume:

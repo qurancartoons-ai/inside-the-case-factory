@@ -445,11 +445,15 @@ class DashboardApp:
         if not gate.get("required"):
             return self.redirect(f"/projects/{slug}/production")
         now = datetime.now(UTC).isoformat()
+        approval_path = root / "manifests" / "paid_research_approval.json"
+        approval = read_json(approval_path) if approval_path.exists() else {"version": 1, "approval_required": True}
         if action == "approve":
             if not gate.get("within_budget"):
                 return self.html(self.page("Budgetlimiet bereikt", '<section class="panel"><h2>Deze toestemming past niet binnen het projectbudget</h2><p>Verhoog eerst bewust de projectlimiet onder Geavanceerd.</p></section>'), "409 Conflict")
             confirmation = {"version": 1, "confirmed": True, "project": root.name, "approved_limit_usd": gate["maximum_cost_usd"], "provider": gate["provider"], "purpose": gate["purpose"], "operations": gate["operations"], "confirmed_at": now}
             write_json(root / "manifests" / "paid_api_confirmation.json", confirmation)
+            approval.update({"approval_required": False, "resolution": "approved", "resolved_at": now})
+            write_json(approval_path, approval)
             write_progress_event(root, "completed", "approval", "Kosten goedgekeurd voor onderzoek", approved_limit_usd=gate["maximum_cost_usd"], provider=gate["provider"], purpose=gate["purpose"])
             self.resume_managed_production(root)
         elif action == "fallback":
@@ -459,10 +463,14 @@ class DashboardApp:
             request = read_json(request_path) if request_path.exists() else {"topic": root.name}
             write_json(root / "manifests" / "research_plan.json", fallback_research_plan(request))
             write_json(root / "manifests" / "paid_api_confirmation.json", {"version": 1, "confirmed": False, "project": root.name, "mode": "local_fallback", "chosen_at": now})
+            approval.update({"approval_required": False, "resolution": "local_fallback", "resolved_at": now})
+            write_json(approval_path, approval)
             write_progress_event(root, "started", "research", "Gaat verder met lokale bronnen zonder betaalde AI", provider="local_fallback")
             self.resume_managed_production(root)
         else:
             write_json(root / "manifests" / "paid_api_confirmation.json", {"version": 1, "confirmed": False, "project": root.name, "cancelled": True, "cancelled_at": now})
+            approval.update({"approval_required": False, "resolution": "cancelled", "resolved_at": now})
+            write_json(approval_path, approval)
             orchestration_path = root / "manifests" / "orchestration.json"; state = read_json(orchestration_path) if orchestration_path.exists() else {"version": 1}
             state.update({"status": "blocked", "current_stage": "research", "last_error": "Onderzoek geannuleerd door gebruiker", "updated_at": now}); write_json(orchestration_path, state)
             write_progress_event(root, "blocked", "research", "Onderzoek geannuleerd door gebruiker")
@@ -473,7 +481,7 @@ class DashboardApp:
         const labels={{active:'Actief',waiting:'Wachtend',completed:'Afgerond',blocked:'Geblokkeerd',failed:'Fout',possibly_stalled:'Mogelijk vastgelopen',stopped:'Gestopt'}};
         const task=t=>`<article class="queue-item ${{esc(t.status)}}"><div><strong>${{esc(t.label)}}</strong><small>Start: ${{esc(t.started_at||'Nog niet gestart')}} · duur: ${{t.duration_seconds||0}} sec · pogingen: ${{t.retries||0}}</small>${{t.reason?`<p>${{esc(t.reason)}}</p>`:''}}</div><span class="status-pill">${{labels[t.status]||esc(t.status)}}</span>${{['possibly_stalled','blocked','failed'].includes(t.status)?`<div class="task-actions"><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/resume"><button>Hervatten</button></form><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/retry"><button class="secondary">Opnieuw proberen</button></form><a class="button ghost" href="#events">Log bekijken</a><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/stop"><button class="danger">Taak stoppen</button></form></div>`:''}}</article>`;
         async function refresh() {{ const d=await fetch(`/projects/${{slug}}/progress-data`).then(r=>r.json()), phases=d.phases.map((p,i)=>`<li class="${{esc(p.status)}}"><span>${{i+1}}</span><div><strong>${{esc(p.name)}}</strong><small>${{esc(p.status)}}</small></div></li>`).join(''), q=d.queue.tasks.map(task).join('')||'<p class="muted">Er staan geen taken in de wachtrij.</p>', r=d.research;
-        const g=d.paid_gate, gateTitle=g.title||'Onderzoek wacht op jouw toestemming', gate=g.required?`<section class="approval-card"><div><p class="eyebrow">Toestemming nodig</p><h1>${{esc(gateTitle)}}</h1><p>${{esc(g.purpose)}}</p><div class="approval-facts"><span><small>Maximale kosten</small><strong>$${{Number(g.maximum_cost_usd).toFixed(4)}}</strong></span><span><small>AI-dienst</small><strong>${{esc(g.provider)}}</strong></span></div>${{g.within_budget?'':'<p class="error">Deze call overschrijdt de ingestelde projectlimiet.</p>'}}</div><div class="approval-actions">${{g.within_budget?`<form method="post" action="/projects/${{slug}}/paid-research/approve"><button>Kosten goedkeuren en doorgaan</button></form>`:''}}${{g.local_fallback_available?`<form method="post" action="/projects/${{slug}}/paid-research/fallback"><button class="secondary">Doorgaan zonder betaalde AI</button></form>`:''}}<form method="post" action="/projects/${{slug}}/paid-research/cancel"><button class="ghost-button">Annuleren</button></form></div></section>`:'';
+        const list=items=>`<ul>${{(items||[]).map(x=>`<li>${{esc(x)}}</li>`).join('')}}</ul>`, g=d.paid_gate, gateTitle=g.title||'Onderzoek wacht op jouw toestemming', gate=g.required?`<section class="approval-card" role="alert" aria-labelledby="approval-title"><div><p class="eyebrow">Toestemming nodig</p><h1 id="approval-title">${{esc(gateTitle)}}</h1><p><strong>Waarom:</strong> ${{esc(g.purpose)}}</p><div class="approval-facts"><span><small>Geschatte kosten</small><strong>$${{Number(g.maximum_cost_usd).toFixed(4)}}</strong></span><span><small>Extra bronnen</small><strong>${{Number(g.extra_sources||0)}}</strong></span><span><small>Landen</small><strong>${{esc((g.countries||[]).join(', '))}}</strong></span><span><small>Talen</small><strong>${{esc((g.languages||[]).join(', '))}}</strong></span></div><div class="approval-claims"><strong>Claims die hierdoor verbeterd worden</strong>${{list(g.claims)}}</div>${{g.within_budget?'':'<p class="error">Deze zoekactie overschrijdt de ingestelde projectlimiet; pas eerst het budget aan.</p>'}}</div><div class="approval-actions"><form method="post" action="/projects/${{slug}}/paid-research/approve"><button ${{g.within_budget?'':'disabled'}}>Goedkeuren en doorgaan</button></form><form method="post" action="/projects/${{slug}}/paid-research/cancel"><button class="ghost-button">Annuleren</button></form><form method="post" action="/projects/${{slug}}/paid-research/fallback"><button class="secondary" ${{g.local_fallback_available?'':'disabled'}}>Alleen lokaal doorgaan</button></form></div></section>`:'';
         document.querySelector('#progress-content').innerHTML=`${{gate}}<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase)}}</h1><p>${{esc(d.last_activity)}}</p></div><div class="progress-number"><strong>${{d.percentage}}%</strong><span>${{d.remaining_steps}} stappen resterend${{d.estimated_remaining?' · '+esc(d.estimated_remaining):''}}</span></div></section><ol class="pipeline">${{phases}}</ol>${{g.required?'':`<section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task)}}</h2><div class="research-metrics"><span><strong>${{r.sources_found}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed}}</strong> verwerkt</span><span><strong>${{r.draft_claims}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining)}}</strong> resterend</span></div><p>Laatst afgerond: ${{esc(r.last_completed)}} · Laatste voortgang: ${{esc(r.waiting_since||'Nog geen')}} · Actieve dienst: ${{esc(r.provider)}}</p>${{r.last_error?`<p class="error">${{esc(r.last_error)}}</p>`:''}}</section>`}}<section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Geavanceerd: logs en technische details</summary><div class="event-list">${{d.events.map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`; document.querySelector('.loading-state').hidden=true; }} refresh(); setInterval(refresh,3000); }})();"""
 
     def dossier_review_page(self, slug: str) -> str:
@@ -502,7 +510,28 @@ class DashboardApp:
             result = analyse_research_review(root)
             write_progress_event(root, "completed", "research_review", f"{result['claims_created']} conceptclaims lokaal opgesteld")
         else:
-            write_progress_event(root, "blocked", "research_review", "Aanvullend onderzoek gevraagd; betaalde zoekactie vereist opnieuw toestemming")
+            manifests = root / "manifests"
+            plan = read_json(manifests / "research_plan.json") if (manifests / "research_plan.json").exists() else {}
+            claims_data = read_json(manifests / "claims.json") if (manifests / "claims.json").exists() else {"claims": []}
+            claims = [str(item.get("text")) for item in claims_data.get("claims", []) if item.get("review_status") != "approved"]
+            if not claims:
+                claims = [str(item.get("text")) for item in claims_data.get("claims", [])[:5]]
+            estimate = read_json(manifests / "cost_estimate.json") if (manifests / "cost_estimate.json").exists() else {}
+            estimated_cost = round(sum(float(item.get("estimated_maximum_cost_usd", 0)) for item in estimate.get("stages", []) if item.get("stage") in {"research_plan", "source_analysis"}), 6)
+            now = datetime.now(UTC).isoformat()
+            write_json(manifests / "paid_research_approval.json", {
+                "version": 1, "approval_required": True, "requested_at": now,
+                "estimated_cost_usd": estimated_cost, "extra_sources": 5,
+                "reason": "Aanvullende bronnen zijn nodig om zwakke, betwiste of onvoldoende onderbouwde claims te verbeteren.",
+                "countries": [item.get("country") for item in plan.get("involved_countries", []) if item.get("country")],
+                "languages": plan.get("relevant_languages", []), "claims": claims,
+            })
+            orchestration_path = manifests / "orchestration.json"
+            state = read_json(orchestration_path) if orchestration_path.exists() else {"version": 1}
+            state.update({"status": "approval_required", "current_stage": "research", "last_error": "Aanvullend onderzoek gevraagd; betaalde zoekactie vereist opnieuw toestemming", "updated_at": now})
+            write_json(orchestration_path, state)
+            write_progress_event(root, "blocked", "research_review", "Aanvullend onderzoek gevraagd; betaalde zoekactie vereist opnieuw toestemming", approval_required=True)
+            return self.redirect(f"/projects/{slug}/production")
         return self.redirect(f"/projects/{slug}/dossier-review")
 
     def dossier_instruction(self, slug: str, environ: dict[str, Any]) -> Response:
