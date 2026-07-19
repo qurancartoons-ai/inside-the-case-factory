@@ -30,6 +30,7 @@ from inside_case_factory.core.research_panel import ResearchPanelService
 from inside_case_factory.core.research import (
     add_claim,
     add_source,
+    analyse_research_review,
     approve_research,
     approve_script,
     approved_claims,
@@ -162,6 +163,8 @@ class DashboardApp:
                 return self.execute_revision(parts[1])
             if len(parts) == 4 and parts[2] == "dossier-review" and parts[3] == "instruction":
                 return self.dossier_instruction(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "dossier-review" and parts[3] in {"extract-claims", "research-further"}:
+                return self.repair_research_review(parts[1], parts[3])
             if len(parts) == 4 and parts[2] == "youtube-draft" and parts[3] == "save":
                 return self.save_youtube_draft(parts[1], environ)
             if len(parts) == 4 and parts[2] == "youtube-draft" and parts[3] == "confirm-upload":
@@ -462,10 +465,30 @@ class DashboardApp:
 
     def dossier_review_page(self, slug: str) -> str:
         root = self.project_root(slug); sources = self.read_manifest(root / "manifests/sources.json").get("sources", []); claims = self.read_manifest(root / "manifests/claims.json").get("claims", [])
-        source_rows = "".join(f'<tr><td><a href="{escape(str(s.get("url", "")))}">{escape(str(s.get("title", s.get("id"))))}</a></td><td>{escape(str(s.get("review_status", "")))}</td></tr>' for s in sources)
-        claim_rows = "".join(f'<tr><td><code>{escape(str(c.get("id")))}</code></td><td><form method="post" action="/projects/{escape(slug)}/research/claim/{escape(str(c.get("id")))}/edit"><textarea name="text" rows="3">{escape(str(c.get("text", "")))}</textarea><button>Wijzig claim</button></form></td><td>{escape(str(c.get("review_status", "")))}</td><td>{self.review_buttons(slug, "claim", str(c.get("id")))}</td></tr>' for c in claims)
+        labels = {"pending_review": "Te beoordelen", "needs_review": "Te beoordelen", "approved": "Goedgekeurd", "rejected": "Afgewezen"}
+        by_source = {str(s.get("id")): [] for s in sources}
+        for claim in claims:
+            for source_id in claim.get("source_ids", []): by_source.setdefault(str(source_id), []).append(claim)
+        source_rows = "".join(f'<article class="source-review"><h3><a href="{escape(str(s.get("url", "")))}">{escape(str(s.get("title", s.get("id"))))}</a></h3><p><strong>Uitgever:</strong> {escape(str(s.get("publisher", "Onbekend")))} · <strong>Relevantie:</strong> {float(s.get("relevance_score", 0)):.0%}</p><p>{escape(str(s.get("relevance_reason", "Nog niet beoordeeld")))}</p><p>{escape(str(s.get("summary", "Geen samenvatting beschikbaar.")))}</p><p><strong>Conceptclaims:</strong> {escape("; ".join(str(c.get("text")) for c in by_source.get(str(s.get("id")), [])) or "Geen")}</p>{self.review_buttons(slug, "source", str(s.get("id")))}<form method="post" action="/projects/{escape(slug)}/dossier-review/research-further"><button class="secondary">Onderzoek verder</button></form></article>' for s in sources)
+        claim_rows = "".join(f'<article class="claim-review"><form method="post" action="/projects/{escape(slug)}/research/claim/{escape(str(c.get("id")))}/edit"><label>Claimtekst<textarea name="text" rows="3">{escape(str(c.get("text", "")))}</textarea></label><p><strong>Bron:</strong> {escape(", ".join(str(x) for x in c.get("source_ids", [])))} · <strong>Status:</strong> {escape(labels.get(str(c.get("review_status", "")), str(c.get("review_status", ""))))}</p><button>Aanpassen</button></form>{self.review_buttons(slug, "claim", str(c.get("id")))}</article>' for c in claims)
+        approved_relevant = {str(s.get("id")) for s in sources if s.get("review_status") == "approved" and s.get("relevance_status", "relevant") == "relevant"}
+        linked_approved = any(c.get("review_status") == "approved" and approved_relevant.intersection(map(str, c.get("source_ids", []))) for c in claims)
+        missing = []
+        if not approved_relevant: missing.append("minimaal één goedgekeurde relevante bron")
+        if not linked_approved: missing.append("minimaal één goedgekeurde claim die aan zo’n bron is gekoppeld")
+        recovery = '' if claims else f'<section class="panel recovery-card"><h2>Er zijn nog geen controleerbare feiten opgesteld</h2><form method="post" action="/projects/{escape(slug)}/dossier-review/extract-claims"><button>Claims uit relevante bronnen opstellen</button></form><form method="post" action="/projects/{escape(slug)}/dossier-review/research-further"><button class="secondary">Onderzoek verder</button></form></section>'
+        approval = f'<section class="panel"><form method="post" action="/projects/{escape(slug)}/research/approve"><button {"disabled" if missing else ""}>Goedkeuren en doorgaan</button></form><p>{escape("Nog nodig: " + "; ".join(missing) if missing else "Klaar om goed te keuren.")}</p></section>'
         mappings = "".join(f'<article class="subpanel"><strong>{escape(str(item["scene_id"]))}</strong><p>{escape(str(item["script"]))}</p><p>Ondersteund door: {escape(", ".join(str(c.get("id")) for c in item["claims"]) or "geen claim")}</p></article>' for item in supported_script_map(root))
-        return self.page("Dossier & bronnen", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Dossier</strong></nav><section class="panel"><h2>Bronnen openen</h2><table>{source_rows}</table><h2>Claims beoordelen en aanpassen</h2><table>{claim_rows}</table><form method="post" action="/projects/{escape(slug)}/dossier-review/instruction" class="grid-form"><label>Claim of bron-ID<input name="item_id"></label><label class="wide">Natuurlijke instructie<textarea name="instruction" required placeholder="onderzoek dit verder"></textarea></label><button>Toepassen</button></form></section><section class="panel"><h2>Claim → scriptdekking</h2>{mappings}</section>""")
+        return self.page("Dossier & bronnen", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Dossier</strong></nav>{recovery}<section class="panel"><h2>Bronnen beoordelen</h2>{source_rows}<h2>Claims beoordelen en aanpassen</h2>{claim_rows or '<p>Geen conceptclaims.</p>'}</section>{approval}<section class="panel"><h2>Claim → scriptdekking</h2>{mappings}</section>""")
+
+    def repair_research_review(self, slug: str, action: str) -> Response:
+        root = self.project_root(slug)
+        if action == "extract-claims":
+            result = analyse_research_review(root)
+            write_progress_event(root, "completed", "research_review", f"{result['claims_created']} conceptclaims lokaal opgesteld")
+        else:
+            write_progress_event(root, "blocked", "research_review", "Aanvullend onderzoek gevraagd; betaalde zoekactie vereist opnieuw toestemming")
+        return self.redirect(f"/projects/{slug}/dossier-review")
 
     def dossier_instruction(self, slug: str, environ: dict[str, Any]) -> Response:
         form = self.read_form(environ); apply_dossier_instruction(self.project_root(slug), self.form_value(form, "instruction"), item_id=self.form_value(form, "item_id")); return self.redirect(f"/projects/{slug}/dossier-review")
@@ -1466,8 +1489,8 @@ class DashboardApp:
 
     def review_buttons(self, slug: str, kind: str, item_id: str) -> str:
         return (
-            f"<div class=\"actions\"><form method=\"post\" action=\"/projects/{escape(slug)}/research/{kind}/{escape(item_id)}/approve\"><button type=\"submit\">Approve</button></form>"
-            f"<form method=\"post\" action=\"/projects/{escape(slug)}/research/{kind}/{escape(item_id)}/reject\"><button type=\"submit\" class=\"secondary\">Reject</button></form></div>"
+            f"<div class=\"actions\"><form method=\"post\" action=\"/projects/{escape(slug)}/research/{kind}/{escape(item_id)}/approve\"><button type=\"submit\">Goedkeuren</button></form>"
+            f"<form method=\"post\" action=\"/projects/{escape(slug)}/research/{kind}/{escape(item_id)}/reject\"><button type=\"submit\" class=\"secondary\">Afwijzen</button></form></div>"
         )
 
     def script_panel(self, project_root: Path, slug: str) -> str:

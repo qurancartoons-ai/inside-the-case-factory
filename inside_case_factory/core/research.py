@@ -71,6 +71,104 @@ SEO_TITLE_PATTERNS = (
     "ultimate guide",
 )
 
+ATTRIBUTION_MARKERS = (
+    "zou", "volgens", "beweert", "stelt", "theorie", "verdachte", "beschuldigd",
+    "vermoed", "mogelijk", "kan ", "kunnen ", "schijn", "ontkent",
+)
+
+
+def _topic_terms(project_root: Path) -> set[str]:
+    request_path = project_root / "manifests" / "production_request.json"
+    request = read_json(request_path) if request_path.exists() else {}
+    topic = str(request.get("topic") or request.get("prompt") or project_root.name).lower()
+    terms = set(re.findall(r"[a-zà-ÿ0-9]+", topic)) - {
+        "maak", "een", "de", "het", "over", "van", "docu", "documentaire", "video", "vermissing",
+    }
+    # Common spelling variants should not make an otherwise exact case match fail.
+    if terms & {"maddie", "madeleine", "maccain", "mccann"}:
+        terms.update({"maddie", "madeleine", "maccain", "mccann"})
+    return terms
+
+
+def _canonical_source_url(url: str) -> str:
+    parsed = urlparse(url.lower().strip())
+    host = parsed.netloc.removeprefix("www.")
+    return f"{host}{parsed.path.rstrip('/')}"
+
+
+def _claim_sentence(content: str, terms: set[str]) -> list[str]:
+    clean = compact_whitespace(re.sub(r"Image \d+[^.]*", " ", content))
+    sentences = re.split(r"(?<=[.!?])\s+", clean)
+    selected: list[str] = []
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if not 45 <= len(sentence) <= 360 or not any(term in lowered for term in terms):
+            continue
+        if sentence.startswith((".", "%")) or any(noise in lowered for noise in ("cookie", "privacy", "abonne", "lees ook", "image ", "nieuwsbrief", "misdaadcolumn:", "geen zucht van verlichting", "soms duikt er iemand", "kwam onvermijdelijk")):
+            continue
+        selected.append(sentence.strip())
+        if len(selected) == 3:
+            break
+    return selected
+
+
+def analyse_research_review(project_root: Path, *, create_claims: bool = True) -> dict[str, int]:
+    """Locally filter existing research and draft source-backed claims; never calls a provider."""
+    ensure_research_manifests(project_root)
+    sources_data = load_manifest(project_root, "sources.json")
+    sources = [item for item in sources_data.get("sources", []) if isinstance(item, dict)]
+    snapshots_data = load_manifest(project_root, "source_snapshots.json")
+    snapshots = {str(item.get("source_id")): item for item in snapshots_data.get("snapshots", []) if isinstance(item, dict)}
+    terms = _topic_terms(project_root)
+    seen: dict[str, str] = {}
+    relevant_ids: set[str] = set()
+    duplicates = 0
+    for source in sources:
+        source_id = str(source.get("id", ""))
+        key = _canonical_source_url(str(source.get("url", ""))) or compact_whitespace(str(source.get("title", ""))).lower()
+        if key in seen:
+            source.update({"relevance_score": 0.0, "relevance_reason": f"Dubbel zoekresultaat van {seen[key]}", "relevance_status": "duplicate", "review_status": "rejected"})
+            duplicates += 1
+            continue
+        seen[key] = source_id
+        haystack = " ".join((str(source.get("title", "")), str(snapshots.get(source_id, {}).get("content", ""))[:2500])).lower()
+        matches = {term for term in terms if term in haystack}
+        score = min(1.0, len(matches) / max(2, min(4, len(terms))))
+        relevant = bool(matches & {"maddie", "madeleine", "maccain", "mccann"}) if terms & {"maddie", "madeleine", "maccain", "mccann"} else score >= 0.5
+        if relevant:
+            summary_candidates = _claim_sentence(str(snapshots.get(source_id, {}).get("content", "")), terms)
+            source.update({"relevance_score": round(max(score, 0.7), 2), "relevance_reason": "Gaat rechtstreeks over het gekozen onderwerp.", "relevance_status": "relevant", "summary": summary_candidates[0] if summary_candidates else str(source.get("title", ""))})
+            relevant_ids.add(source_id)
+        else:
+            source.update({"relevance_score": round(score, 2), "relevance_reason": "Gaat over een andere zaak of een niet-gerelateerd onderwerp.", "relevance_status": "irrelevant", "review_status": "rejected"})
+    save_manifest(project_root, "sources.json", sources_data)
+
+    created = 0
+    if create_claims:
+        claims_data = load_manifest(project_root, "claims.json")
+        claims = [item for item in claims_data.get("claims", []) if isinstance(item, dict)]
+        existing = {(compact_whitespace(str(item.get("text", ""))).lower(), tuple(item.get("source_ids", []))) for item in claims}
+        for source in sources:
+            source_id = str(source.get("id", ""))
+            if source_id not in relevant_ids:
+                continue
+            for sentence in _claim_sentence(str(snapshots.get(source_id, {}).get("content", "")), terms):
+                lowered = sentence.lower()
+                attributed = any(marker in lowered for marker in ATTRIBUTION_MARKERS)
+                text = f"Volgens {source.get('publisher') or source.get('title')}: {sentence}" if attributed else sentence
+                key = (compact_whitespace(text).lower(), (source_id,))
+                if key in existing:
+                    continue
+                claims.append({
+                    "id": f"c{len(claims) + 1:03}", "text": compact_whitespace(text), "source_ids": [source_id],
+                    "evidence_classification": "attributed_statement" if attributed else "source_reported_fact",
+                    "confidence": "needs_review", "review_status": "pending_review", "relevance_score": source["relevance_score"], "origin": "local_review_extraction",
+                })
+                existing.add(key); created += 1
+        claims_data["claims"] = claims
+        save_manifest(project_root, "claims.json", claims_data)
+    return {"sources": len(sources), "relevant": len(relevant_ids), "duplicates": duplicates, "claims_created": created}
+
 
 class ResearchProvider:
     name = "base"
@@ -766,7 +864,9 @@ def approved_claims(project_root: Path) -> list[dict[str, Any]]:
 
 
 def approve_research(project_root: Path) -> bool:
-    if not approved_sources(project_root) or not approved_claims(project_root):
+    sources = {str(source.get("id")): source for source in approved_sources(project_root) if source.get("relevance_status", "relevant") == "relevant"}
+    claims = approved_claims(project_root)
+    if not sources or not any(any(str(source_id) in sources for source_id in claim.get("source_ids", [])) for claim in claims):
         return False
     workflow = load_manifest(project_root, "workflow.json")
     workflow["research_approved"] = True
