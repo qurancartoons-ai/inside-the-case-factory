@@ -17,6 +17,12 @@ test.afterAll(() => {
 });
 
 test('volledige bestaande gebruikersreis en routecontracten', async ({ page, request }, testInfo) => {
+  const projectsDir = path.join(runtime, 'projects');
+  const projectRoot = path.join(projectsDir, slug);
+  const baseline = path.join(runtime, 'baseline', slug);
+  fs.mkdirSync(projectsDir, { recursive: true });
+  for (const entry of fs.readdirSync(projectsDir)) fs.rmSync(path.join(projectsDir, entry), { recursive: true, force: true });
+  fs.cpSync(baseline, projectRoot, { recursive: true });
   const shots = path.join(runtime, 'screenshots'); fs.mkdirSync(shots, { recursive: true });
   const approvalPath = path.join(runtime, 'projects', slug, 'manifests', 'paid_research_approval.json');
   fs.writeFileSync(approvalPath, JSON.stringify({ version: 1, approval_required: true, estimated_cost_usd: 0.04, extra_sources: 6, reason: 'Een internationale bron ontbreekt nog.', countries: ['Nederland', 'België'], languages: ['Nederlands', 'Frans'], claims: ['De dienstregeling beter vergelijken.'] }, null, 2));

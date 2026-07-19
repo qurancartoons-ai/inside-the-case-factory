@@ -12,6 +12,15 @@ const routes = [
   `/projects/${slug}/draft-review`, `/projects/${slug}/youtube-draft`,
 ];
 
+function resetFixture() {
+  const projectsDir = path.join(runtime, 'projects');
+  const projectRoot = path.join(projectsDir, slug);
+  const baseline = path.join(runtime, 'baseline', slug);
+  fs.mkdirSync(projectsDir, { recursive: true });
+  for (const entry of fs.readdirSync(projectsDir)) fs.rmSync(path.join(projectsDir, entry), { recursive: true, force: true });
+  fs.cpSync(baseline, projectRoot, { recursive: true });
+}
+
 function labelFor(item) {
   return (item.getAttribute('aria-label') || item.innerText || item.value || item.name || item.type || item.tagName).trim().replace(/\s+/g, ' ').slice(0, 120);
 }
@@ -39,6 +48,7 @@ async function discover(page) {
 }
 
 test('inventariseer alle zichtbare acties', async ({}, testInfo) => {
+  resetFixture();
   const browser = await chromium.launch({ headless: true, args: ['--disable-gpu', '--single-process', '--no-zygote'] });
   const context = await browser.newContext({ ...(testInfo.project.name.startsWith('mobiel') ? devices['Pixel 7'] : devices['Desktop Chrome']), baseURL: 'http://127.0.0.1:8766' });
   const page = await context.newPage();
@@ -55,6 +65,7 @@ test('voer iedere zichtbare actie afzonderlijk uit', async ({}, testInfo) => {
   let browser = await chromium.launch({ headless: true, args: ['--disable-gpu', '--single-process', '--no-zygote'] });
   let context = await browser.newContext(contextOptions);
   let page = await context.newPage();
+  resetFixture();
   const actions = await discover(page), results = [], failures = [];
   const projectRoot = path.join(runtime, 'projects', slug), baseline = path.join(runtime, 'baseline', slug);
   const interactive = 'a[href],button,input:not([type=hidden]):not([readonly]),textarea:not([readonly]),select,summary';
@@ -65,14 +76,7 @@ test('voer iedere zichtbare actie afzonderlijk uit', async ({}, testInfo) => {
   page.setDefaultTimeout(5000);
   page.setDefaultNavigationTimeout(5000);
 
-  const reset = () => {
-    const projectsDir = path.join(runtime, 'projects');
-    const discarded = path.join(runtime, 'discarded-projects');
-    fs.mkdirSync(discarded, { recursive: true });
-    for (const entry of fs.readdirSync(projectsDir)) if (entry !== slug) fs.renameSync(path.join(projectsDir, entry), path.join(discarded, `${Date.now()}-${Math.random().toString(16).slice(2)}-${entry}`));
-    if (fs.existsSync(projectRoot)) fs.renameSync(projectRoot, path.join(discarded, `${Date.now()}-${Math.random().toString(16).slice(2)}`));
-    fs.cpSync(baseline, projectRoot, { recursive: true });
-  };
+  const reset = resetFixture;
   const fillForm = async form => {
     for (const input of await form.locator('input:not([type=hidden]):not([readonly]),textarea:not([readonly]),select').all()) {
       if (!await input.isVisible() || await input.isDisabled()) continue;
