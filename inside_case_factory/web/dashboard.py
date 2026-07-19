@@ -516,6 +516,17 @@ class DashboardApp:
             write_progress_event(root, "completed", "research_review", f"{result['claims_created']} conceptclaims lokaal opgesteld")
         else:
             manifests = root / "manifests"
+            confirmation_path = manifests / "paid_api_confirmation.json"
+            confirmation = read_json(confirmation_path) if confirmation_path.exists() else {}
+            approval_path = manifests / "paid_research_approval.json"
+            approval = read_json(approval_path) if approval_path.exists() else {}
+            if confirmation.get("confirmed") is True and approval.get("resolution") == "approved":
+                result = analyse_research_review(root)
+                write_progress_event(
+                    root, "completed", "research_review",
+                    f"Bestaande onderzoeksronde opnieuw geëxtraheerd zonder nieuwe betaaltoestemming: {result['claims_created']} conceptclaims",
+                )
+                return self.redirect(f"/projects/{slug}/dossier-review")
             plan = read_json(manifests / "research_plan.json") if (manifests / "research_plan.json").exists() else {}
             claims_data = read_json(manifests / "claims.json") if (manifests / "claims.json").exists() else {"claims": []}
             claims = [str(item.get("text")) for item in claims_data.get("claims", []) if item.get("review_status") != "approved"]

@@ -59,6 +59,7 @@ class DirectorEngine:
         improvements: list[str] = []
         global_shot_index = 0
         for index, scene in enumerate(plan["scenes"]):
+            source_scene = scenes[index] if index < len(scenes) else {}
             position = index / max(1, len(plan["scenes"]) - 1)
             producer_section = producer_sections.get(str(scene.get("scene_id")), {})
             role = str(producer_section.get("role") or ("hook" if index == 0 else "outro" if index == len(plan["scenes"]) - 1 else "climax" if position >= .65 else "development"))
@@ -67,6 +68,16 @@ class DirectorEngine:
             scene["producer_ratios"] = producer_section.get("ratios", {})
             scene["effect_policy"] = "restrained"
             scene["asset_strategy"] = sorted({str(shot["asset"].get("kind", "archive")) for shot in scene["shots"]})
+            scene["media_search_queries"] = [str(item) for item in source_scene.get("archival_media_queries", []) if str(item).strip()]
+            scene["alternative_media_queries"] = [str(item) for item in source_scene.get("alternative_media_queries", []) if str(item).strip()]
+            scene["asset_requirements"] = {
+                "scene_id": str(source_scene.get("id", scene.get("scene_id", ""))),
+                "required_count": 1,
+                "subjects": [*map(str, source_scene.get("people", [])), *map(str, source_scene.get("locations", []))],
+                "events": [str(item) for item in source_scene.get("events", [])],
+                "content_reason": str(source_scene.get("media_requirements", "Relevant archival evidence for this scene.")),
+                "rights_review_separate": True,
+            }
             if role == "climax":
                 scene["emotional_intensity"] = 5
             elif role == "outro":

@@ -35,9 +35,6 @@ before_render = true
 before_publish = true
 
 [script]
-minimum_words = 1400
-target_words = 1600
-maximum_words = 1900
 words_per_minute = 125
 duration_tolerance = 1.0
 minimum_story_beat_coverage = 1.0

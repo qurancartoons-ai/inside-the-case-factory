@@ -36,11 +36,13 @@ def detect_geographic_context(topic: str, plan: dict[str, Any] | None = None) ->
 
 def build_international_strategy(topic: str, project_language: str, plan: dict[str, Any] | None = None) -> dict[str, Any]:
     contexts = detect_geographic_context(topic, plan)
+    planned_topic = str((plan or {}).get("exact_topic") or "").strip()
+    search_topic = planned_topic if len(planned_topic.split()) >= 2 else topic
     query_parts = []
-    official = {"English": "official police court government report", "Português": "polícia tribunal relatório oficial", "Deutsch": "Polizei Gericht offizieller Bericht", "Bahasa Melayu": "polis mahkamah laporan rasmi", "中文": "警方 法院 官方 报告", "עברית": "משטרה בית משפט דוח רשמי", "العربية": "شرطة محكمة تقرير رسمي"}
+    official = {"English": "official police court government report", "Dutch": "politie rechtbank officieel dossier", "Nederlands": "politie rechtbank officieel dossier", "Português": "polícia tribunal relatório oficial", "Deutsch": "Polizei Gericht offizieller Bericht", "Bahasa Melayu": "polis mahkamah laporan rasmi", "中文": "警方 法院 官方 报告", "עברית": "משטרה בית משפט דוח רשמי", "العربية": "شرطة محكمة تقرير رسمي"}
     for context in contexts:
         language = context["language"]
-        query_parts.append(f'("{topic}" {official.get(language, official["English"])})')
+        query_parts.append(f'("{search_topic}" {official.get(language, official["English"])})')
     return {
         "version": 1, "project_language": project_language, "contexts": contexts,
         "search_languages": list(dict.fromkeys(item["language"] for item in contexts)),

@@ -147,6 +147,9 @@ def rebuild_relevance_cache(project_root: Path) -> dict[str, int]:
     threshold = media_threshold(project_root)
     for asset in assets:
         result = topic_relevance(context, asset)
+        scene_score = float(asset.get("scene_relevance_score", 0) or 0)
+        effective_score = max(float(result["score"] or 0), scene_score) if result["score"] is not None or scene_score else result["score"]
+        effective_reason = str(asset.get("relevance_reason", "")) if scene_score > float(result["score"] or 0) else result["reason"]
         recorded_project = str(asset.get("project_slug", ""))
         cross_project = bool(recorded_project and recorded_project != project_root.name)
         sha = str(asset.get("sha256", ""))
@@ -161,10 +164,10 @@ def rebuild_relevance_cache(project_root: Path) -> dict[str, int]:
         linked = bool(asset.get("mapped_scenes") or asset.get("suggested_scenes") or asset.get("claim_ids") or asset.get("research_question_ids"))
         preview = project_root / str(asset.get("path", ""))
         valid_preview = bool(asset.get("preview_url") or preview.is_file())
-        eligible = bool(result["score"] is not None and result["score"] >= threshold and linked and valid_preview and asset.get("source_url") and not duplicate_of and not cross_project)
+        eligible = bool(effective_score is not None and effective_score >= threshold and linked and valid_preview and asset.get("source_url") and not duplicate_of and not cross_project)
         if not eligible:
             excluded += 1
-        asset.update({"topic_relevance": result["score"], "relevance_score": result["score"], "relevance_reason": result["reason"], "relevance_matches": result["matched"], "relevance_missing": result["missing"], "source_reliability": media_source_reliability(asset), "rights_status": rights_status(asset), "review_eligible": eligible, "review_exclusion_reason": "" if eligible else "Niet inhoudelijk gekoppeld, onvoldoende relevant, geen geldige preview/herkomst, duplicaat, of ander project.", "relevance_model_version": RELEVANCE_MODEL_VERSION})
+        asset.update({"topic_relevance": effective_score, "relevance_score": effective_score, "relevance_reason": effective_reason, "relevance_matches": result["matched"], "relevance_missing": result["missing"], "source_reliability": media_source_reliability(asset), "rights_status": rights_status(asset), "review_eligible": eligible, "review_exclusion_reason": "" if eligible else "Niet inhoudelijk gekoppeld, onvoldoende relevant, geen geldige preview/herkomst, duplicaat, of ander project.", "relevance_model_version": RELEVANCE_MODEL_VERSION})
         if not recorded_project:
             asset["project_slug"] = project_root.name
     if media_path.exists():

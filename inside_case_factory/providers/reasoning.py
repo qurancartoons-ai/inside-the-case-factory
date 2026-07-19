@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.utils.text import compact_whitespace
 from inside_case_factory.core.content_modes import mode_prompt
+from inside_case_factory.core.narrative_quality import ARCHITECTURE_BEAT_FIELDS, ARCHITECTURE_FIELDS, STORY_ARCHITECTURE_SCHEMA
 
 
 class ReasoningProviderError(RuntimeError):
@@ -95,6 +96,10 @@ class ReasoningProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def build_story_architecture(self, project_root: Path, research_plan: dict[str, Any], dossier: dict[str, Any], timeline: dict[str, Any], claims: list[dict[str, Any]], snapshots: list[dict[str, Any]], target_duration_minutes: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def create_narrative_outline(
         self,
         project_root: Path,
@@ -117,6 +122,7 @@ class ReasoningProvider(ABC):
         target_duration_minutes: int,
         language: str,
         quality_report: dict[str, Any] | None = None,
+        word_range: tuple[int, int] | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -168,6 +174,9 @@ class DisabledReasoningProvider(ReasoningProvider):
         tavily_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self._blocked(project_root, "source_analysis", "Reasoning provider is disabled.")
+
+    def build_story_architecture(self, project_root: Path, research_plan: dict[str, Any], dossier: dict[str, Any], timeline: dict[str, Any], claims: list[dict[str, Any]], snapshots: list[dict[str, Any]], target_duration_minutes: int) -> dict[str, Any]:
+        return self._blocked(project_root, "story_architecture", "Reasoning provider is disabled.")
 
     def create_narrative_outline(
         self,
@@ -275,14 +284,17 @@ class OpenAIReasoningProvider(ReasoningProvider):
         result = self._json_response(
             project_root,
             "story_architecture",
-            "Build a detailed continuous narrative architecture before scriptwriting. Only genuine narrative events belong in beats; all audit, closing, reflection, and metadata content belongs in its dedicated top-level field.",
+            "Build a detailed continuous narrative architecture before scriptwriting. Return exactly the requested top-level and beat fields; only genuine narrative events belong in beats, while audit, closing, reflection, and metadata content belongs in its dedicated top-level field.",
             {
                 "research_plan": research_plan, "dossier": dossier, "timeline": timeline,
                 "claims": compact_claims, "extracted_source_count": len(snapshots), "target_duration_minutes": target_duration_minutes,
                 "mode_instructions": mode_prompt(_project_content_mode(project_root)),
                 "requirements": [
+                    f"Return exactly these top-level fields: {', '.join(ARCHITECTURE_FIELDS)}.",
+                    f"Every beat must contain exactly: {', '.join(ARCHITECTURE_BEAT_FIELDS)}.",
+                    "Treat beat_id as an opaque stable identifier that only needs to match beat_ followed by exactly two digits; do not infer a separate contiguity rule.",
                     "For every beat provide: what happens, what the viewer learns, why it appears there, the carried curiosity question, supporting claim IDs, and high-value details to use.",
-                    "Move primarily chronologically while slowing down at the emergency, medical evidence, investigation, and trial contradictions.",
+                    "Move primarily chronologically while slowing down at the decisive events, strongest evidence, investigation, and material contradictions identified by the research.",
                     "Audit unused high-value research details and identify unsupported or uncertain areas; never invent missing events.",
                 ],
             }, STORY_ARCHITECTURE_SCHEMA,
@@ -328,9 +340,9 @@ class OpenAIReasoningProvider(ReasoningProvider):
                 "sources": limited_results,
                 "rules": [
                     "Reject navigation, captions, lyrics, transcript filler, ads, UI fragments, unrelated descriptions, and unsupported statements.",
-                    "Extract multiple atomic claims from every usable source; each claim must be one independently verifiable factual statement.",
-                    "Across the full research set, target 30-60 proposed claims when the evidence supports them.",
-                    "Each claim must include exact evidence, source IDs, a stable semantic canonical_key, and applicable research_question_ids.",
+                    "Extract 3-8 distinct atomic claims from every usable source when its text supports that many; one source may and normally should yield multiple claims.",
+                    "Across the full research set, target at least 20 proposed claims and 30-60 when the evidence supports them; never return zero claims while relevant factual source passages are present.",
+                    "Copy every exact_excerpt verbatim from supplied content; never paraphrase evidence. Each claim must include exact evidence, source IDs, a stable semantic canonical_key, and applicable research_question_ids.",
                     "Classify every claim as exactly one of: verified_fact, single_source_claim, allegation, witness_statement, official_explanation, alternative_explanation, disputed_claim, interpretation, speculation, unanswered_question.",
                     "Preserve supported dates, times, people, locations, and events; never invent precision.",
                     "Prefer primary and high-quality secondary sources. Flag weak single-source claims.",
@@ -352,7 +364,10 @@ class OpenAIReasoningProvider(ReasoningProvider):
         approved_claims: list[dict[str, Any]],
         target_duration_minutes: int,
         language: str,
+        quality_report: dict[str, Any] | None = None,
+        word_range: tuple[int, int] | None = None,
     ) -> dict[str, Any]:
+        minimum_words, maximum_words = word_range or (0, 0)
         result = self._json_response(
             project_root,
             "narrative_outline",
@@ -363,6 +378,7 @@ class OpenAIReasoningProvider(ReasoningProvider):
                 "approved_claims": approved_claims,
                 "target_duration_minutes": target_duration_minutes,
                 "video_language": language,
+                "narration_word_range": {"minimum": minimum_words, "maximum": maximum_words} if word_range else None,
             },
             NARRATIVE_OUTLINE_SCHEMA,
         )
@@ -379,9 +395,14 @@ class OpenAIReasoningProvider(ReasoningProvider):
         target_duration_minutes: int,
         language: str,
         quality_report: dict[str, Any] | None = None,
-        word_range: tuple[int, int] = (1500, 1700),
+        word_range: tuple[int, int] | None = None,
     ) -> dict[str, Any]:
-        minimum_words, maximum_words = word_range
+        if word_range is None:
+            from inside_case_factory.core.narrative_quality import script_word_targets
+            contract = script_word_targets(target_duration_minutes, 125, 1.0)
+            minimum_words, maximum_words = contract["minimum_words"], contract["maximum_words"]
+        else:
+            minimum_words, maximum_words = word_range
         result = self._json_response(
             project_root,
             "script",
@@ -415,6 +436,14 @@ class OpenAIReasoningProvider(ReasoningProvider):
             },
             SCRIPT_SCHEMA,
         )
+        narration = str(result.get("narration", "")).strip()
+        sections = result.get("sections", [])
+        if narration and isinstance(sections, list) and sections:
+            joined = " ".join(str(section.get("text", "")) for section in sections if isinstance(section, dict))
+            if compact_whitespace(joined) != compact_whitespace(narration):
+                sections[0]["text"] = narration
+                for section in sections[1:]:
+                    section["text"] = ""
         return result
 
     def rewrite_script_passages(
@@ -521,6 +550,9 @@ class OpenAIReasoningProvider(ReasoningProvider):
             raise ReasoningProviderError(f"OpenAI Responses API network error: {error}") from error
 
         parsed = parse_response_json(response_data)
+        instance_errors = validate_response_instance(parsed, schema["schema"])
+        if instance_errors:
+            raise ReasoningProviderError(f"OpenAI response for {operation} did not match {schema['name']} schema: " + "; ".join(instance_errors))
         self._record_usage(project_root, operation, response_data)
         return parsed
 
@@ -625,7 +657,7 @@ def paid_api_confirmed(project_root: Path, operation: str = "", required_cost_us
 
 def estimate_reasoning_cost(config: ReasoningConfig) -> dict[str, Any]:
     stages = []
-    for operation in ("research_plan", "source_analysis", "narrative_outline", "script", "scenes"):
+    for operation in ("research_plan", "source_analysis", "story_architecture", "narrative_outline", "script", "scenes"):
         stage = config.stage(operation)
         cost = (
             stage["max_input_tokens"] / 1_000_000.0 * stage["input_cost_per_million_tokens_usd"]
@@ -662,6 +694,37 @@ def parse_response_json(response_data: dict[str, Any]) -> dict[str, Any]:
                         if isinstance(text, str) and text.strip():
                             return json.loads(text)
     raise ReasoningProviderError("OpenAI response did not contain parseable JSON text.")
+
+
+def validate_response_instance(value: Any, schema: dict[str, Any], path: str = "$") -> list[str]:
+    """Validate the strict Responses JSON-schema subset before domain parsing."""
+    errors: list[str] = []
+    allowed = schema.get("type")
+    allowed_types = allowed if isinstance(allowed, list) else [allowed]
+    type_matches = {
+        "object": lambda item: isinstance(item, dict), "array": lambda item: isinstance(item, list),
+        "string": lambda item: isinstance(item, str), "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+        "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool), "boolean": lambda item: isinstance(item, bool),
+        "null": lambda item: item is None,
+    }
+    if allowed and not any(type_matches.get(kind, lambda item: True)(value) for kind in allowed_types):
+        return [f"{path} must be {' or '.join(str(kind) for kind in allowed_types)}"]
+    if isinstance(value, dict) and "object" in allowed_types:
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        for key in required:
+            if key not in value: errors.append(f"{path}.{key} is required")
+        if schema.get("additionalProperties") is False:
+            for key in value:
+                if key not in properties: errors.append(f"{path}.{key} is not allowed")
+        for key, child in properties.items():
+            if key in value: errors.extend(validate_response_instance(value[key], child, f"{path}.{key}"))
+    if isinstance(value, list) and "array" in allowed_types:
+        if len(value) < int(schema.get("minItems", 0)): errors.append(f"{path} must contain at least {schema['minItems']} item(s)")
+        for index, item in enumerate(value): errors.extend(validate_response_instance(item, schema.get("items", {}), f"{path}[{index}]"))
+    if isinstance(value, str) and schema.get("pattern") and not re.fullmatch(str(schema["pattern"]), value):
+        errors.append(f"{path} must match {schema['pattern']}")
+    return errors
 
 
 def reasoning_config_from_settings(settings: dict[str, Any]) -> ReasoningConfig:
@@ -1050,29 +1113,6 @@ CORROBORATION_SCHEMA = {
                     "confidence": {"type": "string"},
                 },
             }},
-        },
-    },
-}
-
-STORY_ARCHITECTURE_SCHEMA = {
-    "name": "story_architecture",
-    "schema": {
-        "type": "object", "additionalProperties": False,
-        "required": ["version", "status", "beats", "research_utilization_audit", "unused_high_value_details", "coverage_gaps", "final_reflection", "closing_requirements", "supplementary_metadata"],
-        "properties": {
-            "version": {"type": "integer"}, "status": {"type": "string"},
-            "beats": {"type": "array", "minItems": 1, "items": {
-                "type": "object", "additionalProperties": False,
-                "required": ["beat_id", "what_happens", "viewer_learns", "why_here", "curiosity_forward", "claim_ids", "high_value_details"],
-                "properties": {
-                    "beat_id": {"type": "string", "pattern": "^beat_[0-9]{2}$"}, "what_happens": {"type": "string"}, "viewer_learns": {"type": "string"},
-                    "why_here": {"type": "string"}, "curiosity_forward": {"type": "string"}, "claim_ids": STRING_ARRAY, "high_value_details": STRING_ARRAY,
-                },
-            }},
-            "research_utilization_audit": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["detail", "claim_ids", "use_or_omit_reason"], "properties": {"detail": {"type": "string"}, "claim_ids": STRING_ARRAY, "use_or_omit_reason": {"type": "string"}}}},
-            "unused_high_value_details": STRING_ARRAY, "coverage_gaps": STRING_ARRAY,
-            "final_reflection": {"type": "string"}, "closing_requirements": STRING_ARRAY,
-            "supplementary_metadata": {"type": "object", "additionalProperties": False, "required": ["notes"], "properties": {"notes": {"type": ["string", "null"]}}},
         },
     },
 }

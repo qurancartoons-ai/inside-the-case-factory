@@ -7,6 +7,7 @@ from html import unescape
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import quote, urlencode
@@ -43,13 +44,16 @@ def _get_json(url: str) -> dict[str, Any]:
 
 def _download(url: str, path: Path) -> bool:
     request = Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urlopen(request, timeout=30) as response:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(response.read())
-        return True
-    except URLError:
-        return False
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=45) as response:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(response.read())
+            return True
+        except (OSError, URLError):
+            if attempt < 2:
+                time.sleep(attempt + 1)
+    return False
 
 
 def _strip_html(value: str) -> str:
@@ -248,18 +252,72 @@ class InternetArchiveConnector(ArchiveConnector):
         return candidates
 
 
-def default_connectors() -> list[ArchiveConnector]:
-    return [WikimediaCommonsConnector(), InternetArchiveConnector()]
+class ResearchSourceImageConnector(ArchiveConnector):
+    """Use the lead image from already retrieved, topic-matched research pages."""
+
+    name = "research_source_pages"
+
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = project_root
+
+    def search(self, query: DiscoveryQuery) -> list[dict[str, Any]]:
+        sources = read_json(self.project_root / "manifests" / "sources.json").get("sources", [])
+        claims = read_json(self.project_root / "manifests" / "claims.json").get("claims", [])
+        query_terms = _terms(query.topic)
+        candidates: list[dict[str, Any]] = []
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            source_id = str(source.get("id", ""))
+            linked_claim_text = " ".join(str(claim.get("text", "")) for claim in claims if isinstance(claim, dict) and source_id in {str(value) for value in claim.get("source_ids", [])})
+            if len(query_terms & _terms(str(source.get("title", "")), source_id, linked_claim_text)) < 1:
+                continue
+            source_url = str(source.get("url", ""))
+            if not source_url:
+                continue
+            try:
+                request = Request(source_url, headers={"User-Agent": USER_AGENT, "Accept": "text/html"})
+                with urlopen(request, timeout=30) as response:
+                    html = response.read(1_500_000).decode("utf-8", errors="replace")
+            except (OSError, URLError):
+                continue
+            match = re.search(r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)', html, re.I)
+            if not match:
+                match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']', html, re.I)
+            if not match:
+                continue
+            preview_url = unescape(match.group(1))
+            candidates.append({
+                "source": self.name, "source_id": source_id,
+                "title": str(source.get("title", "")), "creator": str(source.get("publisher", "")),
+                "date": str(source.get("publication_date", "")), "license": "Rights status requires separate review",
+                "usage_notes": "Lead image from the cited research source; verify publication rights separately.",
+                "source_url": source_url, "preview_url": preview_url,
+                "description": f"Lead image for the research source: {source.get('title', '')}",
+                "copyright_status": "unknown", "provider_metadata": {"research_source_id": source.get("id", "")},
+            })
+        return candidates[: query.limit_per_source]
+
+
+def default_connectors(project_root: Path | None = None) -> list[ArchiveConnector]:
+    connectors: list[ArchiveConnector] = [WikimediaCommonsConnector(), InternetArchiveConnector()]
+    if project_root is not None:
+        connectors.append(ResearchSourceImageConnector(project_root))
+    return connectors
 
 
 def discover_archival_media(
     project_root: Path,
     query: DiscoveryQuery,
     connectors: list[ArchiveConnector] | None = None,
+    *,
+    scene_id: str = "",
 ) -> dict[str, Any]:
-    connectors = connectors or default_connectors()
+    connectors = connectors or default_connectors(project_root)
     previews_dir = project_root / "assets" / "images" / "discovered"
     scenes = scene_texts(project_root)
+    if scene_id:
+        scenes = {scene_id: scenes.get(scene_id, "")}
     manifest = load_media_manifest(project_root)
     existing = [asset for asset in manifest.get("assets", []) if isinstance(asset, dict)]
     known_hashes = {str(asset.get("sha256", "")): str(asset.get("id", "")) for asset in existing if asset.get("sha256")}
@@ -280,6 +338,21 @@ def discover_archival_media(
             preview_url = str(candidate.get("preview_url", ""))
             if not preview_url:
                 continue
+            scene_score, suggested_scenes = rank_candidate(candidate, query, scenes)
+            relevance = topic_relevance(context, candidate)
+            project_score = relevance["score"]
+            score = round(max(scene_score, float(project_score or 0.0)), 3)
+            if scene_score >= threshold:
+                relevance = {
+                    **relevance,
+                    "reason": f"Scene-inhoudelijke match met zoekopdracht '{query.topic}'. {relevance['reason']}",
+                    "matched": list(dict.fromkeys([query.topic, *relevance["matched"]])),
+                }
+            if scene_id and score is not None and score >= threshold:
+                suggested_scenes = [scene_id]
+            if score is None or score < threshold or not suggested_scenes:
+                filtered_count += 1
+                continue
             base_id = slugify(f"{candidate.get('source')}-{candidate.get('source_id') or candidate.get('title')}")
             preview_path = previews_dir / f"{base_id}.jpg"
             if not _download(preview_url, preview_path):
@@ -295,15 +368,8 @@ def discover_archival_media(
                         duplicate_of = known_id
                         duplicate_kind = "near"
                         break
-            score, suggested_scenes = rank_candidate(candidate, query, scenes)
-            relevance = topic_relevance(context, candidate)
-            score = relevance["score"]
             if duplicate_of:
                 duplicate_count += 1
-                preview_path.unlink(missing_ok=True)
-                continue
-            if score is None or score < threshold or not suggested_scenes:
-                filtered_count += 1
                 preview_path.unlink(missing_ok=True)
                 continue
             extra = {
@@ -325,6 +391,7 @@ def discover_archival_media(
                 "duplicate_kind": "",
                 "duplicate_confidence": 0.0,
                 "topic_relevance": score,
+                "scene_relevance_score": scene_score,
                 "relevance_score": score,
                 "relevance_reason": relevance["reason"],
                 "relevance_matches": relevance["matched"],
@@ -333,6 +400,8 @@ def discover_archival_media(
                 "review_eligible": True,
                 "rights_status": rights_status(candidate),
                 "project_slug": project_root.name,
+                "scene_id": scene_id or (suggested_scenes[0] if len(suggested_scenes) == 1 else ""),
+                "content_reason": str(query.events or query.topic),
                 "provider_metadata": candidate.get("provider_metadata", {}),
             }
             asset = add_image_asset(
@@ -343,7 +412,7 @@ def discover_archival_media(
                 license_notes=str(candidate.get("license", "")),
                 usage_notes=str(candidate.get("usage_notes", "")),
                 scene_relevance=str(candidate.get("description", "")),
-                scene_ids=[],
+                scene_ids=suggested_scenes,
                 media_id=base_id,
                 review_status="pending_review",
                 extra=extra,
@@ -351,6 +420,8 @@ def discover_archival_media(
             added.append(asset)
             known_hashes[sha] = str(asset.get("id", ""))
             known_fingerprints[fingerprint] = str(asset.get("id", ""))
+            if scene_id:
+                break
 
     added.sort(key=lambda item: float(item.get("relevance_score", 0)), reverse=True)
     discovery_manifest = {
@@ -380,3 +451,71 @@ def discover_archival_media(
     }
     write_json(project_root / "manifests" / DISCOVERY_MANIFEST_NAME, discovery_manifest)
     return discovery_manifest
+
+
+def discover_project_scene_media(
+    project_root: Path,
+    connectors: list[ArchiveConnector] | None = None,
+    *,
+    limit_per_source: int = 6,
+) -> dict[str, Any]:
+    """Use real providers in order until every scene has a relevant review asset."""
+    connectors = connectors or default_connectors(project_root)
+    scenes_data = read_json(project_root / "manifests" / "scenes.json")
+    scenes = [item for item in scenes_data.get("scenes", []) if isinstance(item, dict)]
+    director_path = project_root / "manifests" / "director_plan.json"
+    director_data = read_json(director_path) if director_path.exists() else {}
+    directed = {str(item.get("scene_id")): item for item in director_data.get("scenes", []) if isinstance(item, dict)}
+    attempts: list[dict[str, Any]] = []
+    uncovered: list[str] = []
+    used_providers: set[str] = set()
+    for scene in scenes:
+        scene_id = str(scene.get("id", ""))
+        current_assets = [item for item in load_media_manifest(project_root).get("assets", []) if isinstance(item, dict)]
+        if any(scene_id in {str(value) for value in item.get("mapped_scenes", [])} and (project_root / str(item.get("path", ""))).is_file() for item in current_assets):
+            used_providers.update(str(item.get("discovery", {}).get("source", "")) for item in current_assets if scene_id in {str(value) for value in item.get("mapped_scenes", [])})
+            continue
+        direction = directed.get(scene_id, {})
+        query_values = [str(value).strip() for value in (
+            direction.get("media_search_queries", [])
+            or scene.get("archival_media_queries", [])
+        ) if str(value).strip()]
+        query_values.extend(str(value).strip() for value in direction.get("alternative_media_queries", []) if str(value).strip())
+        fallback_query = compact_whitespace(" ".join([
+            str(scene.get("heading", "")), *map(str, scene.get("people", [])),
+            *map(str, scene.get("locations", [])), *map(str, scene.get("events", [])),
+        ]))
+        if fallback_query:
+            query_values.append(fallback_query)
+        query_values = list(dict.fromkeys(query_values))
+        found = False
+        for connector in connectors:
+            for topic in query_values:
+                result = discover_archival_media(
+                    project_root,
+                    DiscoveryQuery(topic=topic, limit_per_source=limit_per_source),
+                    [connector], scene_id=scene_id,
+                )
+                attempts.append({"scene_id": scene_id, "provider": connector.name, "query": topic, "added_count": result["added_count"], "errors": result["errors"]})
+                if result["added_count"]:
+                    used_providers.add(connector.name)
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            uncovered.append(scene_id)
+    manifest = load_media_manifest(project_root)
+    assets = [item for item in manifest.get("assets", []) if isinstance(item, dict)]
+    result = {
+        "version": 2, "created_at": datetime.now(UTC).isoformat(),
+        "provider_order": [item.name for item in connectors], "providers_used": sorted(used_providers),
+        "scene_count": len(scenes), "asset_count": len(assets), "uncovered_scenes": uncovered,
+        "attempts": attempts,
+    }
+    write_json(project_root / "manifests" / DISCOVERY_MANIFEST_NAME, result)
+    if uncovered:
+        errors = [f"{item['provider']}: {error['error']}" for item in attempts for error in item.get("errors", [])]
+        detail = "; ".join(errors[-6:]) or "no relevant result"
+        raise RuntimeError(f"All configured real media providers failed for scenes {', '.join(uncovered)}: {detail}")
+    return result

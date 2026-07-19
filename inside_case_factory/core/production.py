@@ -9,7 +9,9 @@ import re
 from typing import Any
 
 from inside_case_factory.config.settings import Settings
-from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media
+from inside_case_factory.core.discovery import discover_archival_media, discover_project_scene_media
+from inside_case_factory.core.autonomous_direction import DirectorEngine
+from inside_case_factory.core.producer import ProducerEngine
 from inside_case_factory.core.project import create_project, slugify
 from inside_case_factory.core.progress import write_progress_event
 from inside_case_factory.core.content_modes import normalize_content_mode
@@ -116,6 +118,7 @@ PRODUCTION_STAGES = [
     "build_dossier",
     "review_sources_claims",
     "approve_research",
+    "story_architecture",
     "narrative_outline",
     "generate_script",
     "review_edit_script",
@@ -346,12 +349,18 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
     script_path = project_root / "manifests" / "script.json"
     if not script_path.exists() or not read_json(script_path).get("narration"):
         try:
-            architecture_path = project_root / "manifests" / "story_architecture.json"
-            architecture = read_json(architecture_path) if architecture_path.exists() else {}
-            architecture_report = validate_architecture_file(project_root, architecture)
-            if not architecture_report["valid"]:
-                raise RuntimeError("Malformed story architecture: " + "; ".join(architecture_report["errors"]))
-            generated_script = generate_script(project_root, int(request.get("target_duration_minutes", 10)), reasoning_provider=reasoning_provider)
+            from inside_case_factory.core.narrative_quality import script_word_targets
+            duration_minutes = int(request.get("target_duration_minutes", 10))
+            word_contract = script_word_targets(
+                duration_minutes,
+                float(settings.script.get("words_per_minute", 125)),
+                float(settings.script.get("duration_tolerance", 1.0)),
+            )
+            generated_script = generate_script(
+                project_root, duration_minutes, reasoning_provider=reasoning_provider,
+                word_range=(word_contract["minimum_words"], word_contract["maximum_words"]),
+            )
+            architecture = read_json(project_root / "manifests" / "story_architecture.json")
             script_config = {**settings.script, "language": str(request.get("language", workflow.get("language", "English")))}
             claims = approved_claims(project_root)
             generated_script, attempts = _generate_validated_script_candidates(
@@ -368,6 +377,7 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
                 append_activity(project_root, "Script rejected by hard quality requirements.", stage="generate_script")
                 _save_orchestration(project_root, state, status="blocked", current_stage="generate_script", last_error="; ".join(quality["failure_reasons"]))
                 return
+            update_plan_stage(project_root, "story_architecture", "completed")
             update_plan_stage(project_root, "narrative_outline", "completed" if (project_root / "manifests" / "narrative_outline.json").exists() else "pending")
             update_plan_stage(project_root, "generate_script", "completed")
             update_plan_stage(project_root, "review_edit_script", "waiting_for_review")
@@ -399,13 +409,24 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
     else:
         _complete_stage(project_root, state, "generate_scenes")
 
+    scenes = read_json(scenes_path).get("scenes", [])
+    if not (project_root / "manifests" / "producer_blueprint.json").exists():
+        ProducerEngine().plan(project_root, scenes)
+        update_plan_stage(project_root, "producer", "completed")
+    if not (project_root / "manifests" / "director_plan.json").exists():
+        DirectorEngine().plan(project_root, scenes, width=1920, height=1080)
+        update_plan_stage(project_root, "director", "completed")
+
     if "discover_media" not in state.get("completed_stages", []):
         _save_orchestration(project_root, state, status="running", current_stage="discover_media")
-        existing_media = read_json(project_root / "manifests" / "media_sources.json").get("assets", [])
-        if not existing_media:
-            discover_archival_media(project_root, DiscoveryQuery(topic=topic, limit_per_source=4))
-        update_plan_stage(project_root, "discover_media", "completed")
-        _complete_stage(project_root, state, "discover_media")
+        try:
+            discover_project_scene_media(project_root, limit_per_source=3)
+            update_plan_stage(project_root, "discover_media", "completed")
+            _complete_stage(project_root, state, "discover_media")
+        except Exception as error:
+            update_plan_stage(project_root, "discover_media", "blocked", str(error))
+            _save_orchestration(project_root, state, status="blocked", current_stage="discover_media", last_error=str(error))
+            return
 
     media = read_json(project_root / "manifests" / "media_sources.json")
     assets = media.get("assets", []) if isinstance(media, dict) else []

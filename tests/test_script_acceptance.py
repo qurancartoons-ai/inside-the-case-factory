@@ -5,6 +5,7 @@ import json
 from unittest.mock import patch
 
 from inside_case_factory.core.narrative_quality import validate_script, validate_story_architecture, validate_architecture_file
+from inside_case_factory.core.research import generate_script
 from inside_case_factory.core.production import (
     _generate_validated_script_candidates,
     _persist_candidate,
@@ -24,7 +25,7 @@ from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, Rea
 
 class ScriptAcceptanceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.architecture = {"version": 1, "status": "final", "beats": [{"beat_id": f"beat_{i:02}", "what_happens": "event", "viewer_learns": "fact", "why_here": "order", "curiosity_forward": "next", "claim_ids": [], "high_value_details": []} for i in range(1, 4)], "research_utilization_audit": [], "unused_high_value_details": [], "coverage_gaps": [], "final_reflection": "reflection", "closing_requirements": [], "supplementary_metadata": {}}
+        self.architecture = {"version": 1, "status": "final", "beats": [{"beat_id": f"beat_{i:02}", "what_happens": "event", "viewer_learns": "fact", "why_here": "order", "curiosity_forward": "next", "claim_ids": [], "high_value_details": []} for i in range(1, 4)], "research_utilization_audit": [], "unused_high_value_details": [], "coverage_gaps": [], "final_reflection": "reflection", "closing_requirements": [], "supplementary_metadata": {"notes": None}}
         self.claims = [{"id": "c001", "text": "Goedgekeurde testfeiten: 1998, 2001, 2004, 2012, twee, drie, acht, twaalf en zestig.", "date": "2012-03-12"}]
 
     def script(self, words: int, beat_ids: list[str]) -> dict[str, object]:
@@ -40,6 +41,15 @@ class ScriptAcceptanceTests(unittest.TestCase):
         report = self.language_report(text)
         self.assertTrue(report["pass"])
         self.assertEqual(report["dutch_language_quality"], "pass")
+
+    def test_architecture_accepts_schema_valid_noncontiguous_beat_ids(self) -> None:
+        architecture = {**self.architecture, "beats": [
+            {**beat, "beat_id": f"beat_{index}1"}
+            for index, beat in enumerate(self.architecture["beats"], start=1)
+        ]}
+        report = validate_story_architecture(architecture)
+        self.assertTrue(report["valid"], report["errors"])
+        self.assertEqual(report["narrative_beat_ids"], ["beat_11", "beat_21", "beat_31"])
 
     def test_translated_english_dutch_fails(self) -> None:
         report = self.language_report("De onderzoeker maakte zijn weg naar het gebouw. Aan het einde van de dag was het dossier compleet.")
@@ -141,7 +151,7 @@ class ScriptAcceptanceTests(unittest.TestCase):
                 "text": "De gemeente sluit de brug. Ingenieurs plaatsen sensoren.",
             }],
         }
-        config = {"minimum_words": 10, "maximum_words": 100, "duration_tolerance": 10}
+        config = {"words_per_minute": 20, "duration_tolerance": 0.5}
         report = validate_script(script, claims, self.architecture, config)
         self.assertFalse(report["pass"])
         plan = build_script_repair_plan(script, report, claims)
@@ -174,7 +184,7 @@ class ScriptAcceptanceTests(unittest.TestCase):
             "coverage_gaps": [],
             "final_reflection": "reflection",
             "closing_requirements": [],
-            "supplementary_metadata": {},
+            "supplementary_metadata": {"notes": None},
         }
         script = {
             "narration": "De gemeente sluit de brug. Ingenieurs plaatsen sensoren.",
@@ -212,7 +222,7 @@ class ScriptAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             accepted, attempts = run_writer_critic_rewriter(
                 Path(tmp), script, provider, claims, architecture,
-                {"minimum_words": 10, "maximum_words": 100, "duration_tolerance": 10},
+                {"words_per_minute": 20, "duration_tolerance": 0.5},
                 {}, {}, {}, 3, "Nederlands", maximum_model_calls=2,
             )
         self.assertIsNotNone(accepted)
@@ -343,6 +353,41 @@ class ScriptAcceptanceTests(unittest.TestCase):
             report = validate_architecture_file(Path(tmp), {"beats": ["coverage_gaps"]})
             self.assertFalse(report["valid"])
             self.assertTrue((Path(tmp) / "manifests/story_architecture_validation_report.json").exists())
+
+    def test_missing_architecture_is_generated_before_outline_and_script(self) -> None:
+        class Provider:
+            available = True
+
+            def __init__(self, architecture): self.architecture, self.calls = architecture, []
+            def build_story_architecture(self, project_root, *args):
+                self.calls.append("story_architecture")
+                write_json(project_root / "manifests/story_architecture.json", self.architecture)
+                return self.architecture
+            def create_narrative_outline(self, project_root, *args, **kwargs):
+                self.calls.append("narrative_outline")
+                self.assert_architecture(project_root)
+                outline = {"status": "final"}; write_json(project_root / "manifests/narrative_outline.json", outline); return outline
+            def write_script(self, project_root, *args, **kwargs):
+                self.calls.append("script")
+                self.assert_architecture(project_root)
+                return {"version": 1, "title": "Test", "target_duration_minutes": 8, "language": "English", "status": "final", "generated_from": ["c001"], "opening_hook": "Hook", "narration": "Documented fact.", "sections": [{"id": "section_01", "heading": "Fact", "claim_ids": ["c001"], "beat_ids": ["beat_01"], "text": "Documented fact."}]}
+            def assert_architecture(self, project_root):
+                if not validate_story_architecture(read_json(project_root / "manifests/story_architecture.json"))["valid"]: raise AssertionError("architecture missing or invalid")
+
+        architecture = {**self.architecture, "beats": [self.architecture["beats"][0]]}
+        architecture["beats"][0]["claim_ids"] = ["c001"]
+        with tempfile.TemporaryDirectory() as temporary:
+            project = create_project(Path(temporary), "Architecture regression")
+            manifests = project.root / "manifests"
+            write_json(manifests / "workflow.json", {"research_approved": True, "language": "English"})
+            write_json(manifests / "claims.json", {"claims": [{"id": "c001", "text": "Documented fact.", "source_ids": ["src01"], "review_status": "approved"}]})
+            for name, payload in (("research_plan.json", {}), ("dossier.json", {}), ("timeline.json", {"events": []}), ("source_snapshots.json", {"snapshots": []})):
+                write_json(manifests / name, payload)
+            provider = Provider(architecture)
+            script = generate_script(project.root, 8, reasoning_provider=provider)
+            self.assertEqual(provider.calls, ["story_architecture", "narrative_outline", "script"])
+            self.assertEqual(script["sections"][0]["beat_ids"], ["beat_01"])
+            self.assertTrue(read_json(manifests / "story_architecture_validation_report.json")["valid"])
 
     def test_only_genuine_ids_required_and_unknown_fails(self) -> None:
         report = validate_script(self.script(1600, ["beat_01", "beat_02", "beat_03", "final_reflection"]), self.claims, self.architecture)

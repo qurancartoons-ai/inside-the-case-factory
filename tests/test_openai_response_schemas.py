@@ -9,7 +9,7 @@ from inside_case_factory.core.project import create_project
 from inside_case_factory.core.production import recover_invalid_schema_task
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.web.dashboard import DashboardApp, run_dashboard
-from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, RESEARCH_PLAN_SCHEMA, RESPONSE_FORMAT_SCHEMAS, ReasoningConfig, ReasoningProviderError, build_response_format, validate_strict_response_schema
+from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, RESEARCH_PLAN_SCHEMA, RESPONSE_FORMAT_SCHEMAS, STORY_ARCHITECTURE_SCHEMA, ReasoningConfig, ReasoningProviderError, build_response_format, validate_strict_response_schema
 
 
 class _Response:
@@ -71,6 +71,19 @@ class OpenAIResponseSchemaTests(unittest.TestCase):
         self.assertEqual(set(sent["required"]), set(sent["properties"]))
         self.assertEqual(captured["text"]["format"], build_response_format(RESEARCH_PLAN_SCHEMA))
         self.assertIn("involved_countries", captured["text"]["format"]["schema"]["required"])
+
+    def test_story_architecture_parser_rejects_the_exact_missing_structure_error(self):
+        captured = {}
+        def fake_urlopen(request, timeout=0):
+            captured.update(json.loads(request.data.decode()))
+            return _Response({"output_text": json.dumps({}), "usage": {"input_tokens": 1, "output_tokens": 1}})
+        with tempfile.TemporaryDirectory() as temporary:
+            project = create_project(Path(temporary), "Architecture schema regression")
+            provider = OpenAIReasoningProvider(ReasoningConfig(enabled=True), api_key="test")
+            with patch("inside_case_factory.providers.reasoning.urlopen", side_effect=fake_urlopen):
+                with self.assertRaisesRegex(ReasoningProviderError, r"story_architecture schema: .*\.beats is required"):
+                    provider._json_response(project.root, "story_architecture", "test", {}, STORY_ARCHITECTURE_SCHEMA)
+        self.assertEqual(captured["text"]["format"], build_response_format(STORY_ARCHITECTURE_SCHEMA))
 
     def test_failed_project_is_queued_without_losing_approval_or_calling_provider(self):
         with tempfile.TemporaryDirectory() as temporary:

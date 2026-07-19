@@ -930,6 +930,7 @@ def generate_script(
     target_duration_minutes: int = 10,
     *,
     reasoning_provider: ReasoningProvider | None = None,
+    word_range: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     workflow = load_manifest(project_root, "workflow.json")
     if not workflow.get("research_approved"):
@@ -941,12 +942,20 @@ def generate_script(
     if reasoning_provider is not None and reasoning_provider.available:
         from inside_case_factory.core.narrative_quality import validate_architecture_file
         architecture_path = project_root / "manifests" / "story_architecture.json"
-        architecture = read_json(architecture_path) if architecture_path.exists() else {}
+        research_plan = load_optional_manifest(project_root, "research_plan.json")
+        dossier = load_optional_manifest(project_root, "dossier.json")
+        if architecture_path.exists():
+            architecture = read_json(architecture_path)
+        else:
+            timeline = load_optional_manifest(project_root, "timeline.json")
+            snapshots_manifest = load_optional_manifest(project_root, "source_snapshots.json")
+            snapshots = snapshots_manifest.get("snapshots", []) if isinstance(snapshots_manifest.get("snapshots", []), list) else []
+            architecture = reasoning_provider.build_story_architecture(
+                project_root, research_plan, dossier, timeline, claims, snapshots, target_duration_minutes,
+            )
         architecture_report = validate_architecture_file(project_root, architecture)
         if not architecture_report["valid"]:
             raise RuntimeError("Malformed story architecture: " + "; ".join(architecture_report["errors"]))
-        research_plan = load_optional_manifest(project_root, "research_plan.json")
-        dossier = load_optional_manifest(project_root, "dossier.json")
         language = str(workflow.get("language", research_plan.get("video_language", "English")))
         narrative_outline = reasoning_provider.create_narrative_outline(
             project_root,
@@ -955,6 +964,7 @@ def generate_script(
             claims,
             target_duration_minutes,
             language,
+            word_range=word_range,
         )
         script = reasoning_provider.write_script(
             project_root,

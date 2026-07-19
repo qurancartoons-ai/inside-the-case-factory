@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -8,11 +9,51 @@ from inside_case_factory.utils.files import write_json
 
 
 BEAT_ID_RE = re.compile(r"^beat_\d{2}$")
-ARCHITECTURE_FIELDS = {
+ARCHITECTURE_FIELDS = (
     "version", "status", "beats", "research_utilization_audit",
     "unused_high_value_details", "coverage_gaps", "final_reflection",
     "closing_requirements", "supplementary_metadata",
+)
+ARCHITECTURE_BEAT_FIELDS = (
+    "beat_id", "what_happens", "viewer_learns", "why_here",
+    "curiosity_forward", "claim_ids", "high_value_details",
+)
+_STRING_ARRAY_SCHEMA = {"type": "array", "items": {"type": "string"}}
+STORY_ARCHITECTURE_SCHEMA = {
+    "name": "story_architecture",
+    "schema": {
+        "type": "object", "additionalProperties": False,
+        "required": list(ARCHITECTURE_FIELDS),
+        "properties": {
+            "version": {"type": "integer"}, "status": {"type": "string"},
+            "beats": {"type": "array", "minItems": 1, "items": {
+                "type": "object", "additionalProperties": False,
+                "required": list(ARCHITECTURE_BEAT_FIELDS),
+                "properties": {
+                    "beat_id": {"type": "string", "pattern": "^beat_[0-9]{2}$"},
+                    "what_happens": {"type": "string"}, "viewer_learns": {"type": "string"},
+                    "why_here": {"type": "string"}, "curiosity_forward": {"type": "string"},
+                    "claim_ids": _STRING_ARRAY_SCHEMA, "high_value_details": _STRING_ARRAY_SCHEMA,
+                },
+            }},
+            "research_utilization_audit": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["detail", "claim_ids", "use_or_omit_reason"],
+                "properties": {"detail": {"type": "string"}, "claim_ids": _STRING_ARRAY_SCHEMA, "use_or_omit_reason": {"type": "string"}},
+            }},
+            "unused_high_value_details": _STRING_ARRAY_SCHEMA, "coverage_gaps": _STRING_ARRAY_SCHEMA,
+            "final_reflection": {"type": "string"}, "closing_requirements": _STRING_ARRAY_SCHEMA,
+            "supplementary_metadata": {"type": "object", "additionalProperties": False, "required": ["notes"], "properties": {"notes": {"type": ["string", "null"]}}},
+        },
+    },
 }
+
+
+def script_word_targets(target_duration_minutes: float, words_per_minute: float, tolerance_minutes: float) -> dict[str, int]:
+    target = max(1, round(target_duration_minutes * words_per_minute))
+    minimum = max(1, math.ceil(max(0.0, target_duration_minutes - tolerance_minutes) * words_per_minute))
+    maximum = max(minimum, math.floor((target_duration_minutes + tolerance_minutes) * words_per_minute))
+    return {"minimum_words": minimum, "target_words": target, "maximum_words": maximum}
 
 
 def validate_story_architecture(architecture: Any) -> dict[str, Any]:
@@ -20,7 +61,7 @@ def validate_story_architecture(architecture: Any) -> dict[str, Any]:
     if not isinstance(architecture, dict):
         errors.append("Architecture must be a JSON object.")
         architecture = {}
-    unknown = sorted(set(architecture) - ARCHITECTURE_FIELDS)
+    unknown = sorted(set(architecture) - set(ARCHITECTURE_FIELDS))
     if unknown:
         errors.append(f"Unknown top-level architecture fields: {', '.join(unknown)}.")
     beats = architecture.get("beats")
@@ -28,7 +69,7 @@ def validate_story_architecture(architecture: Any) -> dict[str, Any]:
         errors.append("beats must be a non-empty array of narrative beat objects.")
         beats = []
     ids: list[str] = []
-    required_fields = {"beat_id", "what_happens", "viewer_learns", "why_here", "curiosity_forward", "claim_ids", "high_value_details"}
+    required_fields = set(ARCHITECTURE_BEAT_FIELDS)
     for index, beat in enumerate(beats):
         if not isinstance(beat, dict):
             errors.append(f"beats[{index}] must be an object, not metadata or a section label.")
@@ -42,16 +83,23 @@ def validate_story_architecture(architecture: Any) -> dict[str, Any]:
             errors.append(f"beats[{index}].beat_id must match beat_01, beat_02, etc.")
         else:
             ids.append(beat_id)
-    duplicates = sorted({item for item in ids if ids.count(item) > 1})
-    if duplicates: errors.append(f"Duplicate beat IDs: {', '.join(duplicates)}.")
-    expected = [f"beat_{number:02d}" for number in range(1, len(ids) + 1)]
-    if ids and ids != expected:
-        errors.append("Narrative beat IDs must be unique, ordered, and contiguous from beat_01.")
+        for field in ("what_happens", "viewer_learns", "why_here", "curiosity_forward"):
+            if not isinstance(beat.get(field), str): errors.append(f"beats[{index}].{field} must be a string.")
+        for field in ("claim_ids", "high_value_details"):
+            value = beat.get(field)
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value): errors.append(f"beats[{index}].{field} must be an array of strings.")
     for field in ("research_utilization_audit", "unused_high_value_details", "coverage_gaps", "closing_requirements"):
         if not isinstance(architecture.get(field), list): errors.append(f"{field} must be an array outside beats.")
+    for index, item in enumerate(architecture.get("research_utilization_audit", []) if isinstance(architecture.get("research_utilization_audit"), list) else []):
+        if not isinstance(item, dict) or set(item) != {"detail", "claim_ids", "use_or_omit_reason"}:
+            errors.append(f"research_utilization_audit[{index}] must contain exactly detail, claim_ids, and use_or_omit_reason.")
+        elif not isinstance(item.get("detail"), str) or not isinstance(item.get("use_or_omit_reason"), str) or not isinstance(item.get("claim_ids"), list) or any(not isinstance(value, str) for value in item["claim_ids"]):
+            errors.append(f"research_utilization_audit[{index}] has invalid field types.")
     if not isinstance(architecture.get("final_reflection"), str): errors.append("final_reflection must be a string outside beats.")
-    if not isinstance(architecture.get("supplementary_metadata"), dict): errors.append("supplementary_metadata must be an object outside beats.")
-    return {"version": 1, "valid": not errors, "narrative_beat_ids": ids if not duplicates else [], "errors": errors}
+    metadata = architecture.get("supplementary_metadata")
+    if not isinstance(metadata, dict): errors.append("supplementary_metadata must be an object outside beats.")
+    elif set(metadata) != {"notes"} or not (isinstance(metadata.get("notes"), str) or metadata.get("notes") is None): errors.append("supplementary_metadata must contain exactly notes as a string or null.")
+    return {"version": 1, "valid": not errors, "narrative_beat_ids": ids, "errors": errors}
 
 
 def validate_architecture_file(project_root: Path, architecture: Any) -> dict[str, Any]:
@@ -191,6 +239,15 @@ def _internal_capitalized_names(text: str) -> set[str]:
     return names
 
 
+def _supported_capitalized_names(claims: list[dict[str, Any]]) -> set[str]:
+    text = " ".join(
+        value
+        for claim in claims if isinstance(claim, dict)
+        for value in [str(claim.get("text", "")), *map(str, claim.get("people", []))]
+    )
+    return {match.group(0) for match in re.finditer(r"\b[\wÀ-ÖØ-öø-ÿ'-]+\b", text) if match.group(0)[:1].isupper() and len(match.group(0)) > 1}
+
+
 def factual_lock_issues(text: str, claims: list[dict[str, Any]], language: object = "Nederlands") -> dict[str, list[Any]]:
     approved_claim_text = " ".join(str(claim.get("text", "")) for claim in claims if isinstance(claim, dict))
     approved_year_text = " ".join(
@@ -206,7 +263,7 @@ def factual_lock_issues(text: str, claims: list[dict[str, Any]], language: objec
             _concrete_numbers(text, dutch=_is_dutch(language))
             - _concrete_numbers(approved_claim_text, dutch=_is_dutch(language))
         ),
-        "unsupported_names": sorted(_internal_capitalized_names(text) - _internal_capitalized_names(approved_claim_text)),
+        "unsupported_names": sorted(_internal_capitalized_names(text) - _supported_capitalized_names(claims)),
         "metadata": sorted(set(re.findall(r"\b(?:c\d{3}|beat_\d{2}|source[_ -]?\d+|bron[_ -]?\d+)\b", text, re.I))),
     }
 
@@ -305,9 +362,6 @@ def check_script(text: str, claims: list[dict[str, Any]], architecture: dict[str
 
 def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], architecture: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
-    minimum = int(config.get("minimum_words", 1400))
-    target = int(config.get("target_words", 1600))
-    maximum = int(config.get("maximum_words", 1900))
     wpm = float(config.get("words_per_minute", 125))
     tolerance = float(config.get("duration_tolerance", config.get("duration_tolerance_minutes", 1.0)))
     text = str(script.get("narration", ""))
@@ -319,6 +373,10 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     word_count = len(text.split())
     duration = word_count / wpm if wpm else 0.0
     target_minutes = float(script.get("target_duration_minutes", 12) or 12)
+    word_contract = script_word_targets(target_minutes, wpm, tolerance)
+    minimum = word_contract["minimum_words"]
+    target = word_contract["target_words"]
+    maximum = word_contract["maximum_words"]
     required_minute = target_minutes - tolerance
     required_maxute = target_minutes + tolerance
     architecture_report = validate_story_architecture(architecture)

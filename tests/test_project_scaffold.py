@@ -620,6 +620,10 @@ class ProjectScaffoldTests(unittest.TestCase):
                                             "events": ["Emergency response"],
                                             "exclusions": ["lyrics"],
                                             "factual_questions": ["What happened in the final hours?"],
+                                            "involved_countries": [{"country": "United States", "language": "English", "reason": "Location of events"}],
+                                            "relevant_languages": ["English"],
+                                            "source_priorities": [{"level": 1, "categories": ["official records"]}],
+                                            "coverage_targets": [{"country": "United States", "minimum_percentage": 80}],
                                         }
                                     )
                                 }
@@ -669,7 +673,9 @@ class ProjectScaffoldTests(unittest.TestCase):
                         "documentary_angle": "", "requested_focus": "Test",
                         "target_duration_minutes": 1, "video_language": "English",
                         "people": [], "locations": [], "dates": [], "events": [],
-                        "exclusions": [], "factual_questions": []
+                        "exclusions": [], "factual_questions": [],
+                        "involved_countries": [], "relevant_languages": [],
+                        "source_priorities": [], "coverage_targets": []
                     }),
                     "usage": {"input_tokens": 1, "output_tokens": 1},
                 }).encode("utf-8")
@@ -723,6 +729,9 @@ class ProjectScaffoldTests(unittest.TestCase):
                                                 "claims": [
                                                     {
                                                         "text": "The hearing was held in Example City.",
+                                                        "evidence_classification": "verified_fact",
+                                                        "canonical_key": "hearing-example-city",
+                                                        "research_question_ids": [],
                                                         "source_ids": ["official-record"],
                                                         "evidence": [{
                                                             "source_id": "official-record",

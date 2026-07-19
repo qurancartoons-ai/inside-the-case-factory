@@ -133,18 +133,25 @@ class ScriptCalibrationTests(unittest.TestCase):
         }
 
         class Response:
+            def __init__(self, payload):
+                self.payload = payload
             def __enter__(self): return self
             def __exit__(self, *args): return None
             def read(self):
-                return json.dumps({"output_text": json.dumps(rejected), "usage": {
+                return json.dumps({"output_text": json.dumps(self.payload), "usage": {
                     "input_tokens": 10, "output_tokens": 10,
                 }}).encode()
+
+        responses = [rejected, {"replacements": []}, {"replacements": []}]
+
+        def fake_urlopen(request, timeout=0):
+            return Response(responses.pop(0))
 
         settings = load_settings(ROOT)
         with tempfile.TemporaryDirectory() as parent:
             output = Path(parent) / "failed-calibration"
             with patch.dict(os.environ, {"OPENAI_API_KEY": "local-test-key"}):
-                with patch("inside_case_factory.providers.reasoning.urlopen", return_value=Response()) as api:
+                with patch("inside_case_factory.providers.reasoning.urlopen", side_effect=fake_urlopen) as api:
                     report = run_dutch_script_calibration(settings, output, maximum_attempts=3)
             self.assertEqual(api.call_count, 3)
             self.assertEqual(report["attempts_used"], 3)
