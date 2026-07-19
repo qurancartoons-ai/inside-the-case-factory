@@ -1756,7 +1756,7 @@ class DashboardApp:
 
 def run_dashboard(root: Path | None = None, host: str = "127.0.0.1", port: int = 8000) -> None:
     app = DashboardApp(root)
-    app.resume_recoverable_projects()
     with make_server(host, port, app) as server:
+        app.resume_recoverable_projects()
         print(f"Inside the Case Factory dashboard: http://{host}:{port}", flush=True)
         server.serve_forever()

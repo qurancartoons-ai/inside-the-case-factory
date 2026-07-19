@@ -8,7 +8,7 @@ from unittest.mock import patch
 from inside_case_factory.core.project import create_project
 from inside_case_factory.core.production import recover_invalid_schema_task
 from inside_case_factory.utils.files import read_json, write_json
-from inside_case_factory.web.dashboard import DashboardApp
+from inside_case_factory.web.dashboard import DashboardApp, run_dashboard
 from inside_case_factory.providers.reasoning import OpenAIReasoningProvider, RESEARCH_PLAN_SCHEMA, RESPONSE_FORMAT_SCHEMAS, ReasoningConfig, ReasoningProviderError, build_response_format, validate_strict_response_schema
 
 
@@ -89,6 +89,12 @@ class OpenAIResponseSchemaTests(unittest.TestCase):
                 app.resume_recoverable_projects()
             resume.assert_not_called()
             thread.assert_called_once()
+
+    def test_failed_dashboard_bind_does_not_resume_provider_work(self):
+        with patch("inside_case_factory.web.dashboard.make_server", side_effect=OSError("port busy")), patch.object(DashboardApp, "resume_recoverable_projects") as resume:
+            with self.assertRaisesRegex(OSError, "port busy"):
+                run_dashboard(Path("."), port=8000)
+        resume.assert_not_called()
 
 
 if __name__ == "__main__": unittest.main()
