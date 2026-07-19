@@ -278,7 +278,7 @@ def _render_asset_video(
     width: int,
     height: int,
 ) -> None:
-    if asset_path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+    if asset_path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm", ".ogv", ".avi"}:
         _render_scene_video(
             asset_path, output_path, duration, fps, index, motion=motion, style=style, width=width, height=height
         )
@@ -293,6 +293,47 @@ def _render_asset_video(
         "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(asset_path), "-t", f"{duration:.3f}", "-vf", filtergraph,
         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(output_path),
     ])
+
+
+def _render_composite_video(
+    primary_path: Path,
+    secondary_path: Path,
+    output_path: Path,
+    duration: float,
+    fps: int,
+    index: int,
+    *,
+    composition: str,
+    motion: str,
+    style: dict[str, object],
+    width: int,
+    height: int,
+) -> None:
+    """Render an actual two-source composition after both sources pass selection."""
+    primary_video = output_path.with_name(f"{output_path.stem}-primary.mp4")
+    secondary_video = output_path.with_name(f"{output_path.stem}-secondary.mp4")
+    _render_asset_video(primary_path, primary_video, duration, fps, index, motion=motion, style=style, width=width, height=height)
+    _render_asset_video(secondary_path, secondary_video, duration, fps, index + 1, motion="controlled_push_in", style=style, width=width, height=height)
+    try:
+        if composition == "split_screen":
+            graph = (
+                f"[0:v]scale={width // 2}:{height}:force_original_aspect_ratio=increase,crop={width // 2}:{height}[left];"
+                f"[1:v]scale={width // 2}:{height}:force_original_aspect_ratio=increase,crop={width // 2}:{height}[right];"
+                "[left][right]hstack=inputs=2,format=yuv420p[out]"
+            )
+        else:
+            inset_width = max(320, int(width * 0.34))
+            graph = (
+                f"[1:v]scale={inset_width}:-2,pad=iw+8:ih+8:4:4:color=white[inset];"
+                "[0:v][inset]overlay=W-w-60:H-h-60:format=auto,format=yuv420p[out]"
+            )
+        _run([
+            "ffmpeg", "-y", "-i", str(primary_video), "-i", str(secondary_video), "-filter_complex", graph,
+            "-map", "[out]", "-t", f"{duration:.3f}", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(output_path),
+        ])
+    finally:
+        primary_video.unlink(missing_ok=True)
+        secondary_video.unlink(missing_ok=True)
 
 
 def _concat_audio(audio_paths: list[Path], list_path: Path, output_path: Path) -> None:
@@ -329,47 +370,34 @@ def _xfade_videos(
         _run(["ffmpeg", "-y", "-i", str(scene_videos[0]), "-c", "copy", str(output_path)])
         return
 
-    command = ["ffmpeg", "-y"]
-    for path in scene_videos:
-        command.extend(["-i", str(path)])
-
-    filters: list[str] = []
-    previous = "[0:v]"
-    cumulative = narration_durations[0]
     transition_map = {
         "hard_cut": "fade", "cross_dissolve": "fade", "dip_to_black": "fadeblack", "match_cut": "distance",
         "directional_wipe": "smoothleft", "document_to_scene": "circleopen", "blur": "fade",
     }
     planned = transitions or ["cross_dissolve", "directional_wipe", "document_to_scene", "match_cut", "dip_to_black"]
-    for index in range(1, len(scene_videos)):
-        out_label = f"[vx{index}]"
-        transition_name = transition_map.get(planned[(index - 1) % len(planned)], "fade")
-        filters.append(
-            f"{previous}[{index}:v]xfade=transition={transition_name}:duration={transition:.3f}:"
-            f"offset={cumulative:.3f}{out_label}"
-        )
-        previous = out_label
-        if index < len(scene_videos) - 1:
-            cumulative += narration_durations[index]
-
-    command.extend(
-        [
-            "-filter_complex",
-            ";".join(filters),
-            "-map",
-            previous,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
-            str(output_path),
-        ]
-    )
-    _run(command)
+    current = scene_videos[0]
+    temporary: list[Path] = []
+    current_duration = narration_durations[0] + transition
+    try:
+        for index in range(1, len(scene_videos)):
+            target = output_path.with_name(f"{output_path.stem}-step-{index:03}.mp4")
+            temporary.append(target)
+            transition_name = transition_map.get(planned[(index - 1) % len(planned)], "fade")
+            offset = max(0.0, current_duration - transition)
+            _run([
+                "ffmpeg", "-y", "-i", str(current), "-i", str(scene_videos[index]),
+                "-filter_complex", f"[0:v][1:v]xfade=transition={transition_name}:duration={transition:.3f}:offset={offset:.3f}[out]",
+                "-map", "[out]", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", str(target),
+            ])
+            if current in temporary:
+                current.unlink(missing_ok=True)
+            current = target
+            current_duration += narration_durations[index]
+        current.replace(output_path)
+        temporary.remove(current)
+    finally:
+        for path in temporary:
+            path.unlink(missing_ok=True)
 
 
 def _mux_subtitles_and_audio(video_path: Path, audio_path: Path, subtitles_path: Path, output_path: Path) -> None:
@@ -670,10 +698,24 @@ def generate_video_project(
             video_path = generated_dir / f"{shot['id']}_animated.mp4"
             shot_duration = float(shot["duration_seconds"])
             render_duration = shot_duration + transition
-            _render_asset_video(
-                image_path, video_path, render_duration, fps, shot_number,
-                motion=str(shot["motion"]), style=style_profile, width=width, height=height,
-            )
+            secondary = shot.get("secondary_asset")
+            secondary_info = None
+            if isinstance(secondary, dict) and secondary.get("path") and shot.get("composition") in {"picture_in_picture", "split_screen", "document_overlay"}:
+                secondary_path = project.root / str(secondary["path"])
+                if secondary_path.is_file():
+                    _render_composite_video(
+                        image_path, secondary_path, video_path, render_duration, fps, shot_number,
+                        composition=str(shot["composition"]), motion=str(shot["motion"]), style=style_profile,
+                        width=width, height=height,
+                    )
+                    secondary_info = {**secondary, "composition_role": "secondary"}
+                else:
+                    _render_asset_video(image_path, video_path, render_duration, fps, shot_number, motion=str(shot["motion"]), style=style_profile, width=width, height=height)
+            else:
+                _render_asset_video(
+                    image_path, video_path, render_duration, fps, shot_number,
+                    motion=str(shot["motion"]), style=style_profile, width=width, height=height,
+                )
             source_info = {
                 **asset,
                 "path": asset_path,
@@ -682,7 +724,7 @@ def generate_video_project(
                 "duration_seconds": shot_duration,
                 "provenance_claim_ids": shot["claim_ids"],
             }
-            rendered_shots.append({**shot, "asset": source_info, "animated_video": str(video_path.relative_to(project.root))})
+            rendered_shots.append({**shot, "asset": source_info, "secondary_asset": secondary_info, "composition_executed": bool(secondary_info), "animated_video": str(video_path.relative_to(project.root))})
             scene_image_sources.append({"scene_id": scene_id, **source_info})
             scene_videos.append(video_path)
             shot_durations.append(shot_duration)

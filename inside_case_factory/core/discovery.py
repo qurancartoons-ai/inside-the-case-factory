@@ -9,11 +9,11 @@ from pathlib import Path
 import re
 import time
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from inside_case_factory.core.media import add_image_asset, load_media_manifest
+from inside_case_factory.core.media import add_image_asset, load_media_manifest, save_media_manifest
 from inside_case_factory.core.project import slugify
 from inside_case_factory.core.relevance import media_threshold, project_context, rights_status, topic_relevance
 from inside_case_factory.utils.files import read_json, write_json
@@ -33,13 +33,24 @@ class DiscoveryQuery:
     locations: str = ""
     dates: str = ""
     events: str = ""
+    desired_media_type: str = "image"
+    shot_id: str = ""
+    composition: str = "single_frame"
+    content_reason: str = ""
     limit_per_source: int = 6
 
 
 def _get_json(url: str) -> dict[str, Any]:
     request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    with urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            if error.code != 429 or attempt == 2:
+                raise
+            time.sleep(float(error.headers.get("Retry-After", attempt + 1)))
+    return {}
 
 
 def _download(url: str, path: Path) -> bool:
@@ -155,8 +166,46 @@ class WikimediaCommonsConnector(ArchiveConnector):
     name = "wikimedia_commons"
     api_url = "https://commons.wikimedia.org/w/api.php"
 
+    @staticmethod
+    def _candidates(pages: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates = []
+        for page in pages.values():
+            if not isinstance(page, dict):
+                continue
+            imageinfo = page.get("imageinfo", [])
+            info = imageinfo[0] if imageinfo and isinstance(imageinfo[0], dict) else {}
+            videoinfo = page.get("videoinfo", [])
+            video_info = videoinfo[0] if videoinfo and isinstance(videoinfo[0], dict) else {}
+            if video_info:
+                info = {**info, **video_info}
+            metadata = info.get("extmetadata", {}) if isinstance(info.get("extmetadata"), dict) else {}
+            title = str(page.get("title", ""))
+            source_url = _metadata_value(metadata, "ObjectURL") or str(info.get("descriptionurl", ""))
+            license_text = _metadata_value(metadata, "LicenseShortName") or _metadata_value(metadata, "UsageTerms")
+            extension = Path(str(info.get("url", "")).split("?", 1)[0]).suffix.lower()
+            derivatives = [item for item in video_info.get("derivatives", []) if isinstance(item, dict)]
+            playable = [item for item in derivatives if "webm" in str(item.get("type", "")) and 640 <= int(item.get("width", 0) or 0) <= 1280]
+            playable.sort(key=lambda item: int(item.get("width", 0) or 0), reverse=True)
+            playable_url = str(playable[0].get("src", "")) if playable else str(info.get("url") or "")
+            candidates.append({
+                "source": "wikimedia_commons", "source_id": title,
+                "title": _metadata_value(metadata, "ObjectName") or title.replace("File:", ""),
+                "creator": _metadata_value(metadata, "Artist") or _metadata_value(metadata, "Credit"),
+                "date": _metadata_value(metadata, "DateTimeOriginal") or _metadata_value(metadata, "DateTime"),
+                "license": license_text, "attribution_requirements": _metadata_value(metadata, "AttributionRequired") or _metadata_value(metadata, "Credit"),
+                "usage_notes": _metadata_value(metadata, "UsageTerms"), "source_url": source_url,
+                "preview_url": str(info.get("thumburl") or playable_url), "download_url": playable_url,
+                "media_type": "video" if str(info.get("mime", "")).startswith("video/") or extension in {".webm", ".ogv", ".mp4", ".mov"} else "image",
+                "description": _metadata_value(metadata, "ImageDescription"),
+                "copyright_status": copyright_status(license_text, _metadata_value(metadata, "UsageTerms")),
+                "provider_metadata": {"mime": info.get("mime", ""), "sha1": info.get("sha1", ""), "width": info.get("width"), "height": info.get("height")},
+            })
+        return candidates
+
     def search(self, query: DiscoveryQuery) -> list[dict[str, Any]]:
         search_query = " ".join(part for part in [query.topic, query.people, query.locations, query.dates, query.events] if part)
+        if query.desired_media_type == "video":
+            search_query = f"{search_query} filetype:video"
         params = {
             "action": "query",
             "format": "json",
@@ -164,41 +213,51 @@ class WikimediaCommonsConnector(ArchiveConnector):
             "gsrsearch": search_query,
             "gsrnamespace": "6",
             "gsrlimit": str(query.limit_per_source),
-            "prop": "imageinfo",
+            "prop": "imageinfo|videoinfo",
             "iiprop": "url|extmetadata|mime|sha1|size",
             "iiurlwidth": "640",
+            "viprop": "url|derivatives",
         }
         data = _get_json(f"{self.api_url}?{urlencode(params)}")
         pages = data.get("query", {}).get("pages", {})
-        candidates = []
-        if isinstance(pages, dict):
-            for page in pages.values():
-                if not isinstance(page, dict):
-                    continue
-                imageinfo = page.get("imageinfo", [])
-                info = imageinfo[0] if imageinfo and isinstance(imageinfo[0], dict) else {}
-                metadata = info.get("extmetadata", {}) if isinstance(info.get("extmetadata"), dict) else {}
-                title = str(page.get("title", ""))
-                source_url = _metadata_value(metadata, "ObjectURL") or str(info.get("descriptionurl", ""))
-                license_text = _metadata_value(metadata, "LicenseShortName") or _metadata_value(metadata, "UsageTerms")
-                candidates.append(
-                    {
-                        "source": self.name,
-                        "source_id": title,
-                        "title": _metadata_value(metadata, "ObjectName") or title.replace("File:", ""),
-                        "creator": _metadata_value(metadata, "Artist") or _metadata_value(metadata, "Credit"),
-                        "date": _metadata_value(metadata, "DateTimeOriginal") or _metadata_value(metadata, "DateTime"),
-                        "license": license_text,
-                        "attribution_requirements": _metadata_value(metadata, "AttributionRequired") or _metadata_value(metadata, "Credit"),
-                        "usage_notes": _metadata_value(metadata, "UsageTerms"),
-                        "source_url": source_url,
-                        "preview_url": str(info.get("thumburl") or info.get("url") or ""),
-                        "description": _metadata_value(metadata, "ImageDescription"),
-                        "copyright_status": copyright_status(license_text, _metadata_value(metadata, "UsageTerms")),
-                        "provider_metadata": {"mime": info.get("mime", ""), "sha1": info.get("sha1", "")},
-                    }
-                )
-        return candidates
+        return self._candidates(pages) if isinstance(pages, dict) else []
+
+
+class WikimediaCategoryConnector(WikimediaCommonsConnector):
+    """Expand a topic-matched Commons category once and reuse it across shot searches."""
+
+    name = "wikimedia_commons_category"
+
+    def __init__(self) -> None:
+        self._cache: dict[str, list[dict[str, Any]]] = {}
+
+    def search(self, query: DiscoveryQuery) -> list[dict[str, Any]]:
+        topic_terms = _terms(query.topic, query.people, query.events)
+        cache_key = " ".join(sorted(topic_terms))
+        if cache_key in self._cache:
+            return self._cache[cache_key][: query.limit_per_source]
+        search_params = {"action": "query", "format": "json", "list": "search", "srsearch": query.topic, "srnamespace": "14", "srlimit": "5"}
+        categories = _get_json(f"{self.api_url}?{urlencode(search_params)}").get("query", {}).get("search", [])
+        ranked = sorted(
+            (item for item in categories if isinstance(item, dict)),
+            key=lambda item: len(topic_terms & _terms(str(item.get("title", "")))), reverse=True,
+        )
+        category = str(ranked[0].get("title", "")) if ranked and len(topic_terms & _terms(str(ranked[0].get("title", "")))) >= 2 else ""
+        if not category:
+            self._cache[cache_key] = []
+            return []
+        params = {
+            "action": "query", "format": "json", "generator": "categorymembers", "gcmtitle": category,
+            "gcmtype": "file", "gcmlimit": str(max(30, query.limit_per_source)), "prop": "imageinfo|videoinfo",
+            "iiprop": "url|extmetadata|mime|sha1|size", "iiurlwidth": "1280", "viprop": "url|derivatives",
+        }
+        pages = _get_json(f"{self.api_url}?{urlencode(params)}").get("query", {}).get("pages", {})
+        found = self._candidates(pages) if isinstance(pages, dict) else []
+        for item in found:
+            item["source"] = self.name
+            item["provider_metadata"] = {**item.get("provider_metadata", {}), "category": category}
+        self._cache[cache_key] = found
+        return found[: query.limit_per_source]
 
 
 class InternetArchiveConnector(ArchiveConnector):
@@ -207,8 +266,9 @@ class InternetArchiveConnector(ArchiveConnector):
 
     def search(self, query: DiscoveryQuery) -> list[dict[str, Any]]:
         search_query = " ".join(part for part in [query.topic, query.people, query.locations, query.dates, query.events] if part)
+        media_type = "movies" if query.desired_media_type == "video" else "image"
         params = {
-            "q": f'({search_query}) AND mediatype:(image)',
+            "q": f'({search_query}) AND mediatype:({media_type})',
             "fl[]": ["identifier", "title", "creator", "date", "licenseurl", "description"],
             "rows": str(query.limit_per_source),
             "page": "1",
@@ -232,6 +292,18 @@ class InternetArchiveConnector(ArchiveConnector):
                     continue
                 title = str(doc.get("title", identifier))
                 license_text = str(doc.get("licenseurl", ""))
+                download_url = ""
+                if query.desired_media_type == "video":
+                    try:
+                        metadata = _get_json(f"https://archive.org/metadata/{quote(identifier)}")
+                        files = [item for item in metadata.get("files", []) if isinstance(item, dict)]
+                        playable = [item for item in files if str(item.get("name", "")).lower().endswith((".mp4", ".webm"))]
+                        playable.sort(key=lambda item: int(item.get("size", 0) or 0))
+                        selected = next((item for item in playable if 0 < int(item.get("size", 0) or 0) <= 100_000_000), None)
+                        if selected:
+                            download_url = f"https://archive.org/download/{quote(identifier)}/{quote(str(selected['name']))}"
+                    except Exception:
+                        download_url = ""
                 candidates.append(
                     {
                         "source": self.name,
@@ -244,6 +316,8 @@ class InternetArchiveConnector(ArchiveConnector):
                         "usage_notes": "Internet Archive item metadata may be user-supplied; review rights before use.",
                         "source_url": f"https://archive.org/details/{quote(identifier)}",
                         "preview_url": f"https://archive.org/services/img/{quote(identifier)}",
+                        "download_url": download_url,
+                        "media_type": "video" if download_url else "image",
                         "description": _strip_html(str(doc.get("description", ""))),
                         "copyright_status": copyright_status(license_text, str(doc.get("description", ""))),
                         "provider_metadata": {},
@@ -300,7 +374,7 @@ class ResearchSourceImageConnector(ArchiveConnector):
 
 
 def default_connectors(project_root: Path | None = None) -> list[ArchiveConnector]:
-    connectors: list[ArchiveConnector] = [WikimediaCommonsConnector(), InternetArchiveConnector()]
+    connectors: list[ArchiveConnector] = [WikimediaCategoryConnector(), WikimediaCommonsConnector(), InternetArchiveConnector()]
     if project_root is not None:
         connectors.append(ResearchSourceImageConnector(project_root))
     return connectors
@@ -336,7 +410,9 @@ def discover_archival_media(
             continue
         for candidate in candidates:
             preview_url = str(candidate.get("preview_url", ""))
-            if not preview_url:
+            media_type = str(candidate.get("media_type", "image"))
+            download_url = str(candidate.get("download_url", "")) if media_type == "video" else preview_url
+            if not preview_url or not download_url:
                 continue
             scene_score, suggested_scenes = rank_candidate(candidate, query, scenes)
             relevance = topic_relevance(context, candidate)
@@ -354,15 +430,22 @@ def discover_archival_media(
                 filtered_count += 1
                 continue
             base_id = slugify(f"{candidate.get('source')}-{candidate.get('source_id') or candidate.get('title')}")
-            preview_path = previews_dir / f"{base_id}.jpg"
-            if not _download(preview_url, preview_path):
-                errors.append({"source": str(candidate.get("source", "")), "error": f"Could not download preview: {preview_url}"})
+            suffix = Path(download_url.split("?", 1)[0]).suffix.lower()
+            if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".webm", ".ogv", ".mov"}:
+                suffix = ".mp4" if media_type == "video" else ".jpg"
+            preview_path = previews_dir / f"{base_id}{suffix}"
+            downloaded = _download(download_url, preview_path)
+            original_url = str(candidate.get("download_url", ""))
+            if not downloaded and original_url and original_url != download_url:
+                downloaded = _download(original_url, preview_path)
+            if not downloaded:
+                errors.append({"source": str(candidate.get("source", "")), "error": f"Could not download media: {download_url}"})
                 continue
             sha = file_sha256(preview_path)
             fingerprint = byte_fingerprint(preview_path)
             duplicate_of = known_hashes.get(sha, "")
             duplicate_kind = "exact" if duplicate_of else ""
-            if not duplicate_of:
+            if not duplicate_of and media_type != "video":
                 for known_fingerprint, known_id in known_fingerprints.items():
                     if hamming_distance(fingerprint, known_fingerprint) <= 2:
                         duplicate_of = known_id
@@ -403,6 +486,13 @@ def discover_archival_media(
                 "scene_id": scene_id or (suggested_scenes[0] if len(suggested_scenes) == 1 else ""),
                 "content_reason": str(query.events or query.topic),
                 "provider_metadata": candidate.get("provider_metadata", {}),
+                "type": media_type,
+                "shot_ids": [query.shot_id] if query.shot_id else [],
+                "desired_media_type": query.desired_media_type,
+                "planned_composition": query.composition,
+                "shot_relevance_score": scene_score,
+                "shot_relevance_reason": f"Match voor {query.shot_id or scene_id}: {query.content_reason or query.events or query.topic}",
+                "content_reason": query.content_reason or str(query.events or query.topic),
             }
             asset = add_image_asset(
                 project_root,
@@ -420,8 +510,6 @@ def discover_archival_media(
             added.append(asset)
             known_hashes[sha] = str(asset.get("id", ""))
             known_fingerprints[fingerprint] = str(asset.get("id", ""))
-            if scene_id:
-                break
 
     added.sort(key=lambda item: float(item.get("relevance_score", 0)), reverse=True)
     discovery_manifest = {
@@ -459,7 +547,7 @@ def discover_project_scene_media(
     *,
     limit_per_source: int = 6,
 ) -> dict[str, Any]:
-    """Use real providers in order until every scene has a relevant review asset."""
+    """Search real providers per planned shot, preserving intent and failure evidence."""
     connectors = connectors or default_connectors(project_root)
     scenes_data = read_json(project_root / "manifests" / "scenes.json")
     scenes = [item for item in scenes_data.get("scenes", []) if isinstance(item, dict)]
@@ -469,53 +557,92 @@ def discover_project_scene_media(
     attempts: list[dict[str, Any]] = []
     uncovered: list[str] = []
     used_providers: set[str] = set()
+    target_per_shot = 3
     for scene in scenes:
         scene_id = str(scene.get("id", ""))
-        current_assets = [item for item in load_media_manifest(project_root).get("assets", []) if isinstance(item, dict)]
-        if any(scene_id in {str(value) for value in item.get("mapped_scenes", [])} and (project_root / str(item.get("path", ""))).is_file() for item in current_assets):
-            used_providers.update(str(item.get("discovery", {}).get("source", "")) for item in current_assets if scene_id in {str(value) for value in item.get("mapped_scenes", [])})
-            continue
         direction = directed.get(scene_id, {})
-        query_values = [str(value).strip() for value in (
-            direction.get("media_search_queries", [])
-            or scene.get("archival_media_queries", [])
-        ) if str(value).strip()]
-        query_values.extend(str(value).strip() for value in direction.get("alternative_media_queries", []) if str(value).strip())
-        fallback_query = compact_whitespace(" ".join([
-            str(scene.get("heading", "")), *map(str, scene.get("people", [])),
-            *map(str, scene.get("locations", [])), *map(str, scene.get("events", [])),
-        ]))
-        if fallback_query:
-            query_values.append(fallback_query)
-        query_values = list(dict.fromkeys(query_values))
-        found = False
-        for connector in connectors:
-            for topic in query_values:
-                result = discover_archival_media(
-                    project_root,
-                    DiscoveryQuery(topic=topic, limit_per_source=limit_per_source),
-                    [connector], scene_id=scene_id,
-                )
-                attempts.append({"scene_id": scene_id, "provider": connector.name, "query": topic, "added_count": result["added_count"], "errors": result["errors"]})
-                if result["added_count"]:
-                    used_providers.add(connector.name)
-                    found = True
+        shot_intents = [shot.get("media_intent", {}) for shot in direction.get("shots", []) if isinstance(shot, dict)]
+        if not shot_intents:
+            shot_intents = [{
+                "scene_id": scene_id, "shot_id": f"{scene_id}-shot-1", "subject": str(scene.get("heading", "")),
+                "people": scene.get("people", []), "locations": scene.get("locations", []), "time_period": scene.get("dates", []),
+                "event": scene.get("events", []), "desired_media_type": "image", "search_terms": scene.get("archival_media_queries", []),
+                "aliases": scene.get("alternative_media_queries", []), "composition": "single_frame",
+                "content_reason": str(scene.get("media_requirements", "Relevant scene evidence.")),
+            }]
+        for intent in shot_intents:
+            shot_id = str(intent.get("shot_id", ""))
+            current_manifest = load_media_manifest(project_root)
+            current_assets = [item for item in current_manifest.get("assets", []) if isinstance(item, dict)]
+            linked = [
+                item for item in current_assets
+                if shot_id in {str(value) for value in item.get("shot_ids", [])}
+                and item.get("review_status") != "rejected" and not item.get("duplicate_of")
+            ]
+            if len(linked) < target_per_shot:
+                desired = str(intent.get("desired_media_type", "image"))
+                assignable = [
+                    item for item in current_assets
+                    if item not in linked and item.get("review_status") == "approved" and not item.get("duplicate_of")
+                    and float(item.get("relevance_score", 0) or 0) >= media_threshold(project_root)
+                    and scene_id in {str(value) for value in item.get("suggested_scenes", [])}
+                    and len(item.get("shot_ids", [])) < int(intent.get("maximum_reuse", 1) or 1)
+                ]
+                assignable.sort(key=lambda item: (
+                    str(item.get("type", "image")) != desired,
+                    len(item.get("shot_ids", [])),
+                    -float(item.get("relevance_score", 0) or 0),
+                ))
+                for item in assignable[: target_per_shot - len(linked)]:
+                    item.setdefault("shot_ids", []).append(shot_id)
+                    if scene_id not in {str(value) for value in item.get("suggested_scenes", [])}:
+                        item.setdefault("suggested_scenes", []).append(scene_id)
+                    item["shot_relevance_score"] = max(float(item.get("shot_relevance_score", 0) or 0), float(item.get("relevance_score", 0) or 0))
+                    item["shot_relevance_reason"] = f"Allocated to {shot_id} from the topic-relevant project pool for {intent.get('content_reason', '')}"
+                    linked.append(item)
+                if linked:
+                    save_media_manifest(project_root, current_manifest)
+            if len(linked) >= target_per_shot:
+                used_providers.update(str(item.get("discovery", {}).get("source", "")) for item in linked)
+                continue
+            query_values = [str(value).strip() for value in intent.get("search_terms", []) if str(value).strip()]
+            query_values.extend(str(value).strip() for value in intent.get("aliases", []) if str(value).strip())
+            query_values.append(compact_whitespace(" ".join([
+                str(intent.get("subject", "")), *map(str, intent.get("people", [])), *map(str, intent.get("locations", [])),
+                *map(str, intent.get("time_period", [])), *map(str, intent.get("event", [])),
+            ])))
+            query_values = [item for item in dict.fromkeys(query_values) if item]
+            found_for_shot = len(linked)
+            for connector in connectors:
+                for topic in query_values:
+                    result = discover_archival_media(project_root, DiscoveryQuery(
+                        topic=topic, people=" ".join(map(str, intent.get("people", []))),
+                        locations=" ".join(map(str, intent.get("locations", []))), dates=" ".join(map(str, intent.get("time_period", []))),
+                        events=" ".join(map(str, intent.get("event", []))), desired_media_type=str(intent.get("desired_media_type", "image")),
+                        shot_id=shot_id, composition=str(intent.get("composition", "single_frame")),
+                        content_reason=str(intent.get("content_reason", "")), limit_per_source=limit_per_source,
+                    ), [connector], scene_id=scene_id)
+                    attempts.append({"scene_id": scene_id, "shot_id": shot_id, "provider": connector.name, "query": topic, "desired_media_type": intent.get("desired_media_type"), "added_count": result["added_count"], "filtered_count": result.get("filtered_count", 0), "duplicate_count": result.get("duplicate_count", 0), "errors": result["errors"]})
+                    found_for_shot += int(result["added_count"])
+                    if result["added_count"]:
+                        used_providers.add(connector.name)
+                    if found_for_shot >= target_per_shot:
+                        break
+                if found_for_shot >= target_per_shot:
                     break
-            if found:
-                break
-        if not found:
-            uncovered.append(scene_id)
+            if not found_for_shot:
+                uncovered.append(shot_id)
     manifest = load_media_manifest(project_root)
     assets = [item for item in manifest.get("assets", []) if isinstance(item, dict)]
     result = {
         "version": 2, "created_at": datetime.now(UTC).isoformat(),
         "provider_order": [item.name for item in connectors], "providers_used": sorted(used_providers),
-        "scene_count": len(scenes), "asset_count": len(assets), "uncovered_scenes": uncovered,
+        "scene_count": len(scenes), "asset_count": len(assets), "uncovered_shots": uncovered,
         "attempts": attempts,
     }
     write_json(project_root / "manifests" / DISCOVERY_MANIFEST_NAME, result)
     if uncovered:
         errors = [f"{item['provider']}: {error['error']}" for item in attempts for error in item.get("errors", [])]
         detail = "; ".join(errors[-6:]) or "no relevant result"
-        raise RuntimeError(f"All configured real media providers failed for scenes {', '.join(uncovered)}: {detail}")
+        raise RuntimeError(f"All configured real media providers failed for shots {', '.join(uncovered)}: {detail}")
     return result

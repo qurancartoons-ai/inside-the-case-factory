@@ -14,8 +14,10 @@ def rights_are_approved(asset: dict[str, Any]) -> bool:
         return False
     rights = str(asset.get("rights_status", asset.get("copyright_status", ""))).lower().replace("_", "-")
     license_text = str(asset.get("license", asset.get("license_notes", ""))).lower()
+    normalized_license = license_text.replace("_", "-").replace(" ", "-")
     return rights.replace("-", "_") in {value.replace("-", "_") for value in APPROVED_RIGHTS} or any(
-        marker in license_text for marker in ("public domain", "cc0", "cc-by", "creative commons", "owned", "permission", "licensed")
+        marker in license_text or marker.replace(" ", "-") in normalized_license
+        for marker in ("public domain", "cc0", "cc-by", "creative commons", "owned", "permission", "licensed")
     )
 
 
@@ -31,12 +33,20 @@ class VisualAssetCandidate:
     claim_ids: tuple[str, ...]
     mapped_scenes: tuple[str, ...]
     generated: bool = False
+    shot_ids: tuple[str, ...] = ()
+    relevance_score: float = 0.0
+    relevance_reason: str = ""
+    duplicate_confidence: float = 0.0
+    content_reason: str = ""
 
     def manifest(self) -> dict[str, Any]:
         return {
             "id": self.id, "kind": self.kind, "provider": self.provider, "path": self.path,
             "source_url": self.source_url, "license": self.license, "rights_status": self.rights_status,
             "claim_ids": list(self.claim_ids), "mapped_scenes": list(self.mapped_scenes), "generated": self.generated,
+            "shot_ids": list(self.shot_ids), "relevance_score": self.relevance_score,
+            "relevance_reason": self.relevance_reason, "duplicate_confidence": self.duplicate_confidence,
+            "content_reason": self.content_reason,
         }
 
 
@@ -72,6 +82,11 @@ class ApprovedArchiveProvider(VisualAssetProvider):
                 source_url=str(asset.get("source_url", "")), license=str(asset.get("license", asset.get("license_notes", ""))),
                 rights_status="approved", claim_ids=tuple(str(item) for item in asset.get("claim_ids", scene.get("claim_ids", []))),
                 mapped_scenes=mappings,
+                shot_ids=tuple(str(item) for item in asset.get("shot_ids", [])),
+                relevance_score=float(asset.get("shot_relevance_score", asset.get("relevance_score", 0)) or 0),
+                relevance_reason=str(asset.get("shot_relevance_reason", asset.get("relevance_reason", ""))),
+                duplicate_confidence=float(asset.get("duplicate_confidence", 0) or 0),
+                content_reason=str(asset.get("content_reason", "")),
             ))
         return result
 
@@ -94,6 +109,11 @@ class LocalMediaProvider(ApprovedArchiveProvider):
                 id=str(asset.get("id")), kind=str(asset.get("type", "image")), provider=self.name, path=path,
                 source_url="", license=str(asset.get("license", asset.get("license_notes", ""))), rights_status="approved",
                 claim_ids=tuple(str(item) for item in asset.get("claim_ids", scene.get("claim_ids", []))), mapped_scenes=mappings,
+                shot_ids=tuple(str(item) for item in asset.get("shot_ids", [])),
+                relevance_score=float(asset.get("shot_relevance_score", asset.get("relevance_score", 0)) or 0),
+                relevance_reason=str(asset.get("shot_relevance_reason", asset.get("relevance_reason", ""))),
+                duplicate_confidence=float(asset.get("duplicate_confidence", 0) or 0),
+                content_reason=str(asset.get("content_reason", "")),
             ))
         return result
 
@@ -146,3 +166,27 @@ def resolve_scene_assets(
     if not resolved:
         resolved.extend(OfflineGeneratedFallbackProvider().candidates(project_root, scene, assets))
     return [candidate.manifest() for candidate in resolved]
+
+
+def resolve_shot_assets(
+    project_root: Path,
+    scene: dict[str, Any],
+    shot_id: str,
+    assets: list[dict[str, Any]],
+    *,
+    desired_media_type: str = "",
+    providers: tuple[VisualAssetProvider, ...] = DEFAULT_VISUAL_PROVIDERS,
+) -> list[dict[str, Any]]:
+    """Resolve approved assets for one shot; relevance and rights remain separate."""
+    candidates = resolve_scene_assets(project_root, scene, assets, providers)
+    concrete = [item for item in candidates if not item.get("generated")]
+    linked = [item for item in concrete if shot_id in {str(value) for value in item.get("shot_ids", [])}]
+    pool = linked or concrete
+    if desired_media_type:
+        typed = [item for item in pool if str(item.get("kind")) == desired_media_type]
+        if typed:
+            pool = typed
+    pool = [item for item in pool if float(item.get("duplicate_confidence", 0) or 0) < 0.85]
+    pool.sort(key=lambda item: float(item.get("relevance_score", 0) or 0), reverse=True)
+    generated = [item for item in candidates if item.get("generated")]
+    return [*pool, *generated]

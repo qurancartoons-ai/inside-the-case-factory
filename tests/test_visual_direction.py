@@ -12,7 +12,7 @@ from inside_case_factory.core.visual_direction import (
     validate_cinematic_plan,
     write_cinematic_plan,
 )
-from inside_case_factory.pipeline.generator import _mix_sound_design
+from inside_case_factory.pipeline.generator import _mix_sound_design, _render_composite_video
 from inside_case_factory.providers.visual_assets import resolve_scene_assets, rights_are_approved
 from inside_case_factory.utils.files import read_json, write_json
 
@@ -49,6 +49,11 @@ class VisualDirectionTests(unittest.TestCase):
             self.assertIn("text_overlay", shot)
             self.assertIn("document_highlight", shot)
             self.assertLessEqual(max(item["duration_seconds"] for item in direction["shots"]), 9.0)
+            intent = shot["media_intent"]
+            self.assertEqual(intent["shot_id"], shot["id"])
+            self.assertEqual(intent["scene_id"], direction["scene_id"])
+            for field in ("subject", "people", "locations", "time_period", "event", "desired_media_type", "search_terms", "aliases", "composition", "minimum_resolution", "maximum_reuse", "rights_requirements", "content_reason"):
+                self.assertIn(field, intent)
 
     def test_motion_and_transition_patterns_vary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -169,6 +174,21 @@ class VisualDirectionTests(unittest.TestCase):
             self.assertIn("adelay=2000|2000", command)
             self.assertIn("sidechaincompress", command)
             self.assertIn("alimiter=limit=0.89", command)
+
+    def test_picture_in_picture_is_composited_when_two_assets_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch("inside_case_factory.pipeline.generator._render_asset_video"), patch("inside_case_factory.pipeline.generator._run") as run:
+                _render_composite_video(
+                    root / "one.jpg", root / "two.jpg", root / "out.mp4", 5.0, 24, 1,
+                    composition="picture_in_picture", motion="slow_zoom_in", style=default_visual_style_profile(), width=1920, height=1080,
+                )
+            command = " ".join(run.call_args.args[0])
+            self.assertIn("overlay=W-w-60:H-h-60", command)
+            self.assertIn("out.mp4", command)
+
+    def test_commons_cc_by_sa_license_is_approved_after_media_review(self) -> None:
+        self.assertTrue(rights_are_approved({"review_status": "approved", "license": "CC BY-SA 4.0"}))
 
     def test_style_profile_is_persistent_and_plan_generation_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

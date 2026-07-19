@@ -72,7 +72,7 @@ class DirectorEngine:
             scene["alternative_media_queries"] = [str(item) for item in source_scene.get("alternative_media_queries", []) if str(item).strip()]
             scene["asset_requirements"] = {
                 "scene_id": str(source_scene.get("id", scene.get("scene_id", ""))),
-                "required_count": 1,
+                "required_count": 2,
                 "subjects": [*map(str, source_scene.get("people", [])), *map(str, source_scene.get("locations", []))],
                 "events": [str(item) for item in source_scene.get("events", [])],
                 "content_reason": str(source_scene.get("media_requirements", "Relevant archival evidence for this scene.")),
@@ -115,6 +115,23 @@ class DirectorEngine:
             "provider_selection": self._provider_selection(provider_router, "director_plan"),
         }
         plan["director"] = director_report
+        media_path = project_root / "manifests" / "media_sources.json"
+        media_assets = read_json(media_path).get("assets", []) if media_path.exists() else []
+        selection_rows = []
+        for planned_scene in plan["scenes"]:
+            for shot in planned_scene["shots"]:
+                shot_id = str(shot["id"])
+                alternatives = [
+                    {"id": item.get("id"), "type": item.get("type", "image"), "provider": item.get("discovery", {}).get("source", ""), "relevance_score": item.get("shot_relevance_score", item.get("relevance_score")), "rights_status": item.get("rights_status", item.get("copyright_status")), "review_status": item.get("review_status")}
+                    for item in media_assets if isinstance(item, dict) and shot_id in {str(value) for value in item.get("shot_ids", [])} and str(item.get("id")) != str(shot["asset"].get("id"))
+                ]
+                selection_rows.append({
+                    "scene_id": planned_scene["scene_id"], "shot_id": shot_id, "media_intent": shot["media_intent"],
+                    "chosen_asset": shot["asset"], "secondary_asset": shot.get("secondary_asset"), "alternatives": alternatives,
+                    "duration_seconds": shot["duration_seconds"], "motion": shot["motion"], "composition": shot["composition"],
+                    "narrative_reason": shot["narrative_reason"],
+                })
+        write_json(project_root / "manifests" / "shot_media_manifest.json", {"version": 1, "project_slug": project_root.name, "shots": selection_rows})
         write_json(project_root / "manifests" / "director_plan.json", plan)
         write_json(project_root / "manifests" / "director_report.json", director_report)
         write_json(project_root / "manifests" / "visual_direction.json", plan)

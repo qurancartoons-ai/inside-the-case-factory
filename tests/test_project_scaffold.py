@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from inside_case_factory.core.project import available_project_slug, create_project
 from inside_case_factory.core.production import ProductionRequest, start_production
-from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media
+from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media, discover_project_scene_media
+from inside_case_factory.core.autonomous_direction import DirectorEngine
 from inside_case_factory.core.media import add_image_asset, image_for_scene, load_media_manifest
 from inside_case_factory.core.media import update_image_review
 from inside_case_factory.core.research import (
@@ -332,6 +333,38 @@ class ProjectScaffoldTests(unittest.TestCase):
 
             self.assertIsNotNone(selected)
             self.assertEqual(selected["id"], assets[0]["id"])
+
+    def test_project_discovery_searches_per_shot_and_persists_intent(self) -> None:
+        class ShotConnector:
+            name = "shot_archive"
+
+            def search(self, query):
+                return [{
+                    "source": self.name, "source_id": f"{query.shot_id}-{index}",
+                    "title": f"Example Jane documented event {index}", "creator": "Archive", "date": "2001",
+                    "license": "CC-BY", "source_url": f"https://example.test/{query.shot_id}/{index}",
+                    "preview_url": f"https://example.test/{query.shot_id}/{index}.jpg", "description": "Example Jane documented event evidence",
+                    "copyright_status": "likely_open", "provider_metadata": {},
+                } for index in range(2)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = create_project(Path(tmp), "Example Jane")
+            scene = {"id": "s01", "heading": "Documented event", "narration": "Example Jane documented event.", "duration_seconds": 6.0, "claim_ids": ["c1"], "people": ["Example Jane"], "events": ["documented event"], "archival_media_queries": ["Example Jane documented event"]}
+            write_json(project.root / "manifests/scenes.json", {"scenes": [scene]})
+            DirectorEngine().plan(project.root, [scene], width=1920, height=1080)
+
+            def download(url: str, path: Path) -> bool:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((b"\x00" * 1024) if "/0.jpg" in url else (b"\x00" * 512 + b"\xff" * 512))
+                return True
+
+            with patch("inside_case_factory.core.discovery._download", side_effect=download):
+                result = discover_project_scene_media(project.root, connectors=[ShotConnector()], limit_per_source=2)
+            assets = load_media_manifest(project.root)["assets"]
+            self.assertEqual(result["uncovered_shots"], [])
+            self.assertEqual(len(assets), 2)
+            self.assertTrue(all(item["shot_ids"] == ["s01-shot-1"] for item in assets))
+            self.assertTrue(all(item["shot_relevance_reason"] for item in assets))
 
     def test_research_script_scene_workflow_is_approval_gated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

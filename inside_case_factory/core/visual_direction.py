@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from inside_case_factory.providers.visual_assets import resolve_scene_assets
+from inside_case_factory.providers.visual_assets import resolve_shot_assets
 from inside_case_factory.utils.files import read_json, write_json
 
 
@@ -36,6 +36,44 @@ def _shot_type(scene: dict[str, Any]) -> str:
     return "document_detail"
 
 
+def _shot_media_intent(scene: dict[str, Any], scene_id: str, shot_id: str, shot_index: int) -> dict[str, Any]:
+    media_sequence = ("video", "image", "document", "image", "video", "map")
+    desired = media_sequence[shot_index % len(media_sequence)]
+    people = [str(item) for item in scene.get("people", [])]
+    locations = [str(item) for item in scene.get("locations", [])]
+    dates = [str(item) for item in scene.get("dates", [])]
+    events = [str(item) for item in scene.get("events", [])]
+    subject = str(scene.get("visual_summary") or scene.get("heading") or "Documentary evidence")
+    base_queries = [str(item) for item in scene.get("archival_media_queries", []) if str(item).strip()]
+    aliases = [str(item) for item in scene.get("alternative_media_queries", []) if str(item).strip()]
+    detail = " ".join([*people, *locations, *dates, *events]).strip()
+    qualifier = {
+        "video": "archival footage news film",
+        "image": "archive photograph",
+        "document": "police document newspaper clipping court record",
+        "map": "historical map location",
+    }.get(desired, desired)
+    search_terms = list(dict.fromkeys([*base_queries, f"{detail} {qualifier}".strip(), f"{subject} {qualifier}".strip()]))
+    composition = "picture_in_picture" if shot_index == 1 else "single_frame"
+    return {
+        "scene_id": scene_id,
+        "shot_id": shot_id,
+        "subject": subject,
+        "people": people,
+        "locations": locations,
+        "time_period": dates,
+        "event": events,
+        "desired_media_type": desired,
+        "search_terms": search_terms,
+        "aliases": aliases,
+        "composition": composition,
+        "minimum_resolution": {"width": 1280, "height": 720},
+        "maximum_reuse": 1,
+        "rights_requirements": ["approved", "public_domain", "licensed", "cc0", "cc-by", "cc-by-sa"],
+        "content_reason": str(scene.get("media_requirements") or f"Concrete visual evidence supporting {subject}."),
+    }
+
+
 def _sound_cues(scene: dict[str, Any], start: float, duration: float) -> list[dict[str, Any]]:
     events = " ".join(str(item).lower() for item in scene.get("events", []))
     locations = " ".join(str(item).lower() for item in scene.get("locations", []))
@@ -60,6 +98,9 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
     style_profile = style or default_visual_style_profile()
     media = read_json(project_root / "manifests" / "media_sources.json")
     assets = media.get("assets", []) if isinstance(media, dict) else []
+    discovery_path = project_root / "manifests" / "media_discovery.json"
+    discovery = read_json(discovery_path) if discovery_path.exists() else {}
+    discovery_attempts = [item for item in discovery.get("attempts", []) if isinstance(item, dict)]
     plans = []
     used_assets: set[str] = set()
     previous_motion = ""
@@ -68,25 +109,48 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
     for scene_index, scene in enumerate(scenes):
         scene_id = str(scene.get("id", f"s{scene_index + 1:02}"))
         duration = max(2.5, float(scene.get("duration_seconds", scene.get("estimated_duration_seconds", 8.0))))
-        candidates = resolve_scene_assets(project_root, scene, assets)
         shot_count = max(1, min(5, int((duration + 5.9) // 6.0)))
         base_duration = duration / shot_count
         shots = []
         for shot_index in range(shot_count):
+            shot_id = f"{scene_id}-shot-{shot_index + 1}"
+            media_intent = _shot_media_intent(scene, scene_id, shot_id, shot_index)
+            candidates = resolve_shot_assets(
+                project_root, scene, shot_id, assets,
+                desired_media_type=str(media_intent["desired_media_type"]),
+            )
             available = [item for item in candidates if str(item["id"]) not in used_assets]
-            reusable = [item for item in candidates if item.get("generated")]
-            pool = available or reusable or candidates
-            asset = pool[shot_index % len(pool)].copy()
+            concrete_available = [item for item in available if not item.get("generated")]
+            pool = concrete_available or available or candidates
+            asset = pool[0].copy()
+            if asset.get("generated"):
+                attempts = [item for item in discovery_attempts if str(item.get("shot_id", "")) == shot_id]
+                asset["fallback_evidence"] = {
+                    "queries_tried": list(dict.fromkeys(str(item.get("query", "")) for item in attempts if item.get("query"))),
+                    "providers_tried": list(dict.fromkeys(str(item.get("provider", "")) for item in attempts if item.get("provider"))),
+                    "rejected_results": sum(int(item.get("filtered_count", 0) or 0) + int(item.get("duplicate_count", 0) or 0) for item in attempts),
+                    "errors": [error for item in attempts for error in item.get("errors", [])],
+                    "reason": "No approved, relevant, non-duplicate concrete asset remained for this shot after the recorded provider attempts.",
+                    "content_fit": str(media_intent["content_reason"]),
+                }
             if str(asset["id"]) in used_assets and asset.get("generated"):
                 asset["id"] = f"{asset['id']}-shot-{shot_index + 1}"
             used_assets.add(str(asset["id"]))
+            secondary_asset = None
+            desired_composition = str(media_intent["composition"])
+            if desired_composition in {"picture_in_picture", "split_screen"} and not asset.get("generated"):
+                secondary_asset = next((item.copy() for item in candidates if not item.get("generated") and str(item["id"]) != str(asset["id"]) and str(item["id"]) not in used_assets), None)
+                if secondary_asset:
+                    used_assets.add(str(secondary_asset["id"]))
             motion = MOTIONS[(scene_index + shot_index) % len(MOTIONS)]
             if motion == previous_motion:
                 motion = MOTIONS[(MOTIONS.index(motion) + 1) % len(MOTIONS)]
             previous_motion = motion
             shots.append({
-                "id": f"{scene_id}-shot-{shot_index + 1}",
+                "id": shot_id,
                 "asset": asset,
+                "secondary_asset": secondary_asset,
+                "media_intent": media_intent,
                 "shot_type": _shot_type(scene) if shot_index == 0 else "supporting_detail",
                 "duration_seconds": round(base_duration, 3),
                 "motion": motion,
@@ -97,11 +161,9 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
                 "document_highlight": bool(asset.get("kind") == "document"),
                 "map_animation": "route_reveal" if asset.get("kind") == "map" else "none",
                 "timeline_animation": "progressive_markers" if asset.get("kind") == "timeline" else "none",
-                "composition": "split_screen" if shot_index == 1 and len(candidates) > 2 else (
-                    "picture_in_picture" if asset.get("kind") == "document" and shot_index > 0 else "single_frame"
-                ),
+                "composition": desired_composition if secondary_asset else "single_frame",
                 "effects": ["vignette", "depth"] if motion in {"parallax", "rack_focus"} else ["vignette"],
-                "narrative_reason": "Emphasize the approved claim without inventing visual facts.",
+                "narrative_reason": str(asset.get("content_reason") or media_intent["content_reason"]),
                 "claim_ids": [str(item) for item in scene.get("claim_ids", [])],
             })
         transition = TRANSITIONS[scene_index % len(TRANSITIONS)]
@@ -120,6 +182,7 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
             "emotional_intensity": min(5, 2 + (1 if scene_index == 0 else 0) + (1 if scene.get("events") else 0)),
             "claim_ids": [str(item) for item in scene.get("claim_ids", [])],
             "source_links": sorted({str(shot["asset"].get("source_url", "")) for shot in shots if shot["asset"].get("source_url")}),
+            "shot_media_intents": [shot["media_intent"] for shot in shots],
         })
     return {
         "version": 1,
@@ -156,6 +219,12 @@ def validate_cinematic_plan(plan: dict[str, Any], *, width: int = 1920, height: 
                 errors.append(f"{shot.get('id')}: media rights are not approved")
             if not asset.get("claim_ids") and scene.get("claim_ids"):
                 errors.append(f"{shot.get('id')}: missing claim provenance")
+            intent = shot.get("media_intent", {})
+            required_intent = {"scene_id", "shot_id", "subject", "people", "locations", "time_period", "event", "desired_media_type", "search_terms", "aliases", "composition", "minimum_resolution", "maximum_reuse", "rights_requirements", "content_reason"}
+            if not isinstance(intent, dict) or not required_intent.issubset(intent):
+                errors.append(f"{shot.get('id')}: incomplete shot media intent")
+            if shot.get("composition") in {"picture_in_picture", "split_screen"} and not shot.get("secondary_asset"):
+                errors.append(f"{shot.get('id')}: composition requires two available assets")
             overlay = str(shot.get("text_overlay", ""))
             if len(overlay) > 80:
                 errors.append(f"{shot.get('id')}: text overlay is unreadably long")

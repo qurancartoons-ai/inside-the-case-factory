@@ -15,7 +15,7 @@ from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
 from inside_case_factory import __version__
-from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media
+from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media, discover_project_scene_media
 from inside_case_factory.config.settings import Settings, load_settings
 from inside_case_factory.core.media import add_image_asset, ensure_media_manifest, load_media_manifest, update_image_review
 from inside_case_factory.core.production import ProductionRequest, _persist_candidate, _promote_candidate, run_production, start_production
@@ -188,7 +188,7 @@ class DashboardApp:
                 return self.approve_draft_scene(parts[1], parts[3])
             if len(parts) == 3 and parts[2] == "discover":
                 return self.discover_media(parts[1], environ)
-            if len(parts) == 5 and parts[2] == "media" and parts[4] in {"approve", "reject"}:
+            if len(parts) == 5 and parts[2] == "media" and parts[4] in {"approve", "reject", "replace", "search"}:
                 return self.review_media(parts[1], parts[3], parts[4])
             if len(parts) == 5 and parts[2] == "critic-feedback" and parts[4] in {"approve", "reject"}:
                 return self.review_critic_feedback(parts[1], parts[3], parts[4])
@@ -1166,12 +1166,16 @@ class DashboardApp:
         before = next((item for item in load_media_manifest(project_root).get("assets", []) if isinstance(item, dict) and str(item.get("id")) == media_id), None)
         if not before:
             return self.html(self.page("Ongeldige beoordeling", '<section class="panel"><h2>Media-asset niet gevonden</h2><p>Er is niets gewijzigd.</p></section>'), "404 Not Found")
-        changed = before.get("review_status") != status
-        update_image_review(project_root, media_id, status)
+        changed = action != "search" and before.get("review_status") != status
+        if action != "search":
+            update_image_review(project_root, media_id, status)
+        if action in {"replace", "search"}:
+            discover_project_scene_media(project_root, limit_per_source=4)
         if changed:
             write_progress_event(project_root, "completed", "media_review", f"Media {'goedgekeurd' if status == 'approved' else 'afgewezen'}", item_id=media_id, review_status=status)
             self.resume_managed_production(project_root)
-        return self.redirect(f"/projects/{quote(slug)}/advanced?notice={quote('Media goedgekeurd' if status == 'approved' else 'Media afgewezen')}#media-{quote(media_id)}")
+        notice = "Verder gezocht" if action == "search" else "Vervanging gezocht" if action == "replace" else "Media goedgekeurd" if status == "approved" else "Media afgewezen"
+        return self.redirect(f"/projects/{quote(slug)}/advanced?notice={quote(notice)}#media-{quote(media_id)}")
 
     def add_media(self, slug: str, environ: dict[str, Any]) -> Response:
         project_root = self.project_root(slug)
@@ -1260,9 +1264,13 @@ class DashboardApp:
                 if isinstance(asset, dict) and str(asset.get("id")) == media_id:
                     path = project_root / str(asset.get("path", ""))
                     if path.is_file() and path.resolve().is_relative_to(project_root.resolve()):
+                        content_type = {
+                            ".png": "image/png", ".webp": "image/webp", ".mp4": "video/mp4",
+                            ".webm": "video/webm", ".mov": "video/quicktime",
+                        }.get(path.suffix.lower(), "image/jpeg")
                         return (
                             "200 OK",
-                            [("Content-Type", "image/jpeg"), ("Content-Length", str(path.stat().st_size))],
+                            [("Content-Type", content_type), ("Content-Length", str(path.stat().st_size))],
                             path.read_bytes(),
                         )
         return self.html(self.page("Not Found", "<section class=\"panel\"><p>Preview not found.</p></section>"), "404 Not Found")
@@ -1616,7 +1624,8 @@ class DashboardApp:
                 if not isinstance(asset, dict) or asset.get("review_status") not in {"pending_review", "rejected"} or asset.get("review_eligible") is not True:
                     continue
                 media_id = str(asset.get("id", ""))
-                image = f"<img src=\"/projects/{escape(slug)}/media/{escape(media_id)}/preview\" alt=\"\" loading=\"lazy\">"
+                media_type = str(asset.get("type", "image"))
+                image = (f"<video src=\"/projects/{escape(slug)}/media/{escape(media_id)}/preview\" controls preload=\"metadata\"></video>" if media_type == "video" else f"<img src=\"/projects/{escape(slug)}/media/{escape(media_id)}/preview\" alt=\"\" loading=\"lazy\">")
                 copyright_status = str(asset.get("copyright_status", "unknown"))
                 rights_label = {"likely_open": "Waarschijnlijk vrij te gebruiken", "restrictive_or_unknown": "Beperkt of onbekend", "unknown": "Onbekend"}.get(copyright_status, copyright_status)
                 flag = "flag warn" if copyright_status != "likely_open" else "flag"
@@ -1634,6 +1643,9 @@ class DashboardApp:
                         <p><strong>Gematcht:</strong> {escape(', '.join(str(item) for item in asset.get('relevance_matches', [])) or 'Geen')} · <strong>Ontbreekt:</strong> {escape(', '.join(str(item) for item in asset.get('relevance_missing', [])) or 'Niets')}</p>
                         <p><strong>Betrouwbaarheid herkomst:</strong> {float(asset.get('source_reliability', {}).get('score', 0)):.0%} — {escape(str(asset.get('source_reliability', {}).get('reason', '')))}</p>
                         <p><strong>Duplicaatzekerheid:</strong> {float(asset.get('duplicate_confidence', 0)):.0%} · <strong>Rechtenstatus:</strong> {escape(rights_label)}</p>
+                        <p><strong>Shot:</strong> {escape(', '.join(str(item) for item in asset.get('shot_ids', [])) or 'Niet gekoppeld')} · <strong>Mediatype:</strong> {escape(media_type)}</p>
+                        <p><strong>Shotrelevantie:</strong> {float(asset.get('shot_relevance_score', asset.get('relevance_score', 0)) or 0):.0%} — {escape(str(asset.get('shot_relevance_reason', asset.get('relevance_reason', ''))))}</p>
+                        <p><strong>Geplande duur:</strong> {escape(str(asset.get('planned_duration_seconds', 'volgens shotplan')))} · <strong>Beweging:</strong> {escape(str(asset.get('planned_motion', 'volgens shotplan')))} · <strong>Compositie:</strong> {escape(str(asset.get('planned_composition', 'single_frame')))}</p>
                         <p>{escape(str(asset.get('creator', '')))}</p>
                         <p>{escape(str(asset.get('license', '')))}</p>
                         <p>Voorgestelde scène: {escape(', '.join(str(item) for item in asset.get('suggested_scenes', [])))}</p>
@@ -1642,6 +1654,8 @@ class DashboardApp:
                         <div class="actions">
                           <form method="post" action="/projects/{escape(slug)}/media/{escape(media_id)}/approve"><button type="submit">Goedkeuren</button></form>
                           <form method="post" action="/projects/{escape(slug)}/media/{escape(media_id)}/reject"><button type="submit" class="secondary">Afwijzen</button></form>
+                          <form method="post" action="/projects/{escape(slug)}/media/{escape(media_id)}/replace"><button type="submit" class="secondary">Vervangen</button></form>
+                          <form method="post" action="/projects/{escape(slug)}/media/{escape(media_id)}/search"><button type="submit" class="secondary">Verder zoeken</button></form>
                         </div>
                       </div>
                     </article>
