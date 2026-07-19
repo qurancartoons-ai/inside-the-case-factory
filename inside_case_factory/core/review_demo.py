@@ -22,8 +22,8 @@ def create_offline_review_demo(projects_dir: Path, *, slug: str = DEMO_SLUG, top
     project = create_project(projects_dir, topic, slug)
     root = project.root
     sources = [
-        {"id": "src01", "title": "Gemeentelijk vervoersrapport 2019", "url": "https://example.invalid/transport-report", "publisher": "Demo Archief", "review_status": "approved"},
-        {"id": "src02", "title": "Getuigeninterview — lokale omroep", "url": "https://example.invalid/interview", "publisher": "Demo Nieuws", "review_status": "approved"},
+        {"id": "src01", "title": "De Verdwenen Nachtbus — Offline Reviewdemo — gemeentelijk vervoersrapport 2019", "url": "https://example.invalid/transport-report", "publisher": "Demo Archief", "review_status": "approved"},
+        {"id": "src02", "title": "De Verdwenen Nachtbus — Offline Reviewdemo — getuigeninterview", "url": "https://example.invalid/interview", "publisher": "Demo Nieuws", "review_status": "approved"},
     ]
     claims = [
         {"id": "c01", "text": "De laatste nachtbus vertrok volgens het dienstlogboek om 00:42.", "source_ids": ["src01"], "review_status": "approved"},

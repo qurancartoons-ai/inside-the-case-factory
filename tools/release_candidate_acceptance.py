@@ -4,6 +4,7 @@ import argparse
 import json
 import shutil
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,13 +31,23 @@ def prepare(repo: Path, runtime: Path) -> Path:
         "claims": ["De dienstregeling en de getuigenverklaring beter vergelijken."],
     })
     write_json(root / "manifests/cost_estimate.json", {
-        "maximum_total_cost_usd": 0.04,
+        "maximum_total_cost_usd": 0.04, "project_budget_usd": 1.0,
         "stages": [{"stage": "research_plan", "provider": "offline-mock", "estimated_maximum_cost_usd": 0.04}],
     })
     write_json(root / "manifests/provider_config.json", {
         "version": 1, "profile": "offline", "budget_usd": 1.0,
-        "external_calls_enabled": False, "cache_enabled": True, "retries": 0, "tasks": {},
+        "external_calls_enabled": True, "cache_enabled": True, "retries": 0, "tasks": {},
     })
+    old = (datetime.now(UTC) - timedelta(minutes=20)).isoformat()
+    write_json(root / "manifests/task_queue.json", {"version": 1, "tasks": [{
+        "id": "task-recovery", "kind": "render", "label": "Onderbroken lokale render",
+        "heavy": True, "status": "possibly_stalled", "created_at": old,
+        "started_at": old, "updated_at": old, "retries": 0, "progress": 30,
+        "status_writes": 5, "reason": "Geen nieuwe voortgang of gewijzigde resultaten",
+    }]})
+    baseline = runtime / "baseline" / SLUG
+    baseline.parent.mkdir(parents=True)
+    shutil.copytree(root, baseline)
     return root
 
 

@@ -1691,6 +1691,7 @@ class DashboardApp:
   <style>
     :root {{ color-scheme: light; --ink:#172026; --muted:#697782; --line:#dde4e8; --panel:#ffffff; --page:#f6f8f9; --soft:#eef4f1; --accent:#176b5b; --accent-dark:#0f5044; --warn:#b65f15; --ok:#237447; }}
     * {{ box-sizing: border-box; }}
+    [hidden] {{ display:none !important; }}
     body {{ margin:0; font-family: Arial, sans-serif; background:var(--page); color:var(--ink); }}
     header {{ background:rgba(255,255,255,.96); color:var(--ink); padding:16px 32px; display:flex; align-items:center; justify-content:space-between; gap:24px; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:10; backdrop-filter:blur(12px); }}
     header h1 {{ margin:0; font-size:22px; letter-spacing:0; }}
@@ -1789,16 +1790,19 @@ class DashboardApp:
     .loading-state {{ display:flex;align-items:center;gap:14px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px; }} .loading-state h2,.loading-state p {{ margin:3px 0; }} .pulse {{ width:14px;height:14px;border-radius:50%;background:var(--accent);animation:pulse 1.2s infinite; }} @keyframes pulse {{ 50% {{ opacity:.35;transform:scale(.8); }} }}
     .task-queue {{ display:grid;gap:8px; }} .queue-item {{ display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:11px;padding:13px; }} .queue-item small {{ display:block;color:var(--muted);margin-top:4px; }} .queue-item.possibly_stalled,.queue-item.blocked,.queue-item.failed {{ border-color:#e8c8ab;background:#fffaf5; }} .task-actions {{ grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px; }} button.danger {{ background:#a8473d; }} .link-grid {{ display:flex;flex-wrap:wrap;gap:16px;padding:16px 0; }}
     .review-player {{ display:grid; grid-template-columns:minmax(0,3fr) minmax(220px,1fr); gap:16px; margin-bottom:18px; }}
-    .review-player > div, .review-player aside {{ background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px; }}
+    .review-player > div, .review-player aside {{ background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px; min-width:0; }}
     .review-player video {{ width:100%; background:#111; border-radius:6px; }}
-    .review-timeline {{ display:flex; gap:8px; overflow-x:auto; padding-top:10px; }}
-    .review-timeline a {{ flex:0 0 130px; text-decoration:none; font-size:12px; }}
+    .review-timeline {{ display:flex; gap:8px; overflow-x:auto; padding-top:10px; position:relative; z-index:1; }}
+    .review-timeline a {{ display:block; flex:0 0 130px; min-width:130px; text-decoration:none; font-size:12px; }}
     .review-timeline img, .scene-thumb {{ width:100%; aspect-ratio:16/9; object-fit:cover; border-radius:6px; }}
     .scene-thumb {{ max-width:360px; }}
+    .scene-review, .scene-review details, .scene-review pre {{ min-width:0; max-width:100%; }}
+    .scene-review pre {{ overflow:auto; }}
     .revision-compare {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; border:1px solid var(--line); border-radius:8px; padding:10px; margin:10px 0; }}
     .revision-compare > p {{ grid-column:1/-1; color:var(--muted); }}
     @media (max-width: 900px) {{ .pipeline {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .workflow {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .start-grid, .summary-grid {{ grid-template-columns:1fr 1fr; }} .review-card, .project-card {{ align-items:flex-start; flex-direction:column; }} .actions {{ justify-content:flex-start; }} }}
     @media (max-width: 620px) {{ header {{ display:block; padding:14px; }} .main-nav {{ margin-top:12px;display:grid;grid-template-columns:1fr 1fr; }} .project-head,.project-summary {{ align-items:flex-start;flex-direction:column; }} .approval-card {{ grid-template-columns:1fr;padding:20px; }} .approval-actions {{ min-width:0;width:100%; }} .progress-number {{ justify-items:start; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .workflow, .pipeline, .start-grid, .summary-grid, .review-player, .revision-compare {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} table {{ display:block; overflow-x:auto; }} button,.button {{ min-height:44px; }} }}
+    @media (max-width: 620px) {{ header {{ position:static; }} }}
   </style>
 </head>
 <body>
@@ -1807,6 +1811,15 @@ class DashboardApp:
     <nav class="main-nav" aria-label="Hoofdnavigatie"><a href="/">Projecten</a><a href="/projects/new">Nieuwe documentaire</a><a href="/">Voortgang</a><a href="/">Review</a><a href="/#settings">Instellingen</a></nav>
   </header>
   <main>{body}</main>
+  <script>
+    document.addEventListener('submit', event => {{
+      const form = event.target;
+      if (!(form instanceof HTMLFormElement)) return;
+      if (form.dataset.submitting === 'true') {{ event.preventDefault(); return; }}
+      form.dataset.submitting = 'true';
+      requestAnimationFrame(() => form.querySelectorAll('button[type="submit"],button:not([type]),input[type="submit"]').forEach(button => button.disabled = true));
+    }});
+  </script>
 </body>
 </html>"""
 
