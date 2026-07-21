@@ -25,6 +25,7 @@ from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
 from inside_case_factory.core.project import available_project_slug, create_project
 from inside_case_factory.core.progress import TaskQueue, write_progress_event
+from inside_case_factory.core.recycle import create_reference_documentary, prepare_recycle_documentary
 from inside_case_factory.core.draft_review import approve_scene, create_review_draft, revise_draft
 from inside_case_factory.core.user_experience import apply_dossier_instruction, production_progress, revision_change_plan, supported_script_map, youtube_draft
 from inside_case_factory.core.reference_intake import create_reference_intake, select_reference_match
@@ -93,6 +94,8 @@ class DashboardApp:
             self._manifest_cache.clear()
 
         if method == "GET" and path == "/":
+            return self.redirect("/projects")
+        if method == "GET" and path == "/projects":
             return self.html(self.index())
         if method == "GET" and path == "/projects/new":
             return self.html(self.new_project_wizard())
@@ -136,6 +139,8 @@ class DashboardApp:
                 return self.media_preview(parts[1], parts[3])
         if method == "POST" and path.startswith("/projects/"):
             parts = [part for part in path.split("/") if part]
+            if len(parts) == 3 and parts[2] == "back":
+                return self.navigate_back(parts[1])
             if len(parts) == 3 and parts[2] == "generate":
                 return self.generate(parts[1])
             if len(parts) == 4 and parts[2] == "research" and parts[3] == "source":
@@ -250,68 +255,28 @@ class DashboardApp:
         return str(value)
 
     def index(self) -> str:
-        projects = self.projects()
-        rows = "\n".join(self.project_card(project) for project in projects[:6])
-        if not rows:
-            rows = "<p class=\"muted\">Nog geen projecten.</p>"
-        return self.page(
-            "Dashboard",
-            f"""
-            <section class="hero-panel">
-              <div class="eyebrow">Nieuwe video maken</div>
-              <h2>Beschrijf je documentaire. De productie volgt daarna stap voor stap.</h2>
-              <p><a class="button" href="/projects/new">Open de volledige projectwizard</a></p>
-              <form method="post" action="/production/start" class="production-form">
-                <label class="wide prompt-label">Beschrijf de video die je wilt maken
-                  <textarea name="prompt" rows="8" required placeholder="Bijvoorbeeld: Maak een feitelijke documentaire over een onopgeloste zaak. Focus op de tijdlijn, betrokken personen, belangrijke vragen en betrouwbare bronnen."></textarea>
-                </label>
-                <div class="start-grid">
-                  <label>Videotaal
-                    <select name="language">
-                      <option value="Nederlands">Nederlands</option>
-                      <option value="English">Engels</option>
-                      <option value="Arabic">Arabic</option>
-                      <option value="French">French</option>
-                      <option value="German">German</option>
-                      <option value="Spanish">Spanish</option>
-                    </select>
-                  </label>
-                  <label>Gewenste lengte
-                    <select name="target_duration_minutes">
-                      <option value="5">5 minuten</option>
-                      <option value="8">8 minuten</option>
-                      <option value="12" selected>12 minuten</option>
-                      <option value="20">20 minuten</option>
-                      <option value="30">30 minuten</option>
-                    </select>
-                  </label>
-                  <label>Werkwijze
-                    <select name="autonomy_mode">
-                      <option value="review">Begeleide modus</option>
-                      <option value="automatic">Automatische modus</option>
-                    </select>
-                  </label>
-                  <label>Type documentaire
-                    <select name="content_mode">
-                      <option value="factual_documentary">Feitelijke documentaire</option>
-                      <option value="investigative_documentary">Onderzoeksdocumentaire</option>
-                      <option value="theory_conspiracy">Theorie / complot</option>
-                    </select>
-                    <small>Feitelijke documentaire: gecontroleerde feiten en onzekerheid. Onderzoeksdocumentaire: controverses en concurrerende verklaringen. Theorie / complot: theorieën én tegenargumenten met bronattributie.</small>
-                  </label>
-                </div>
-                <button type="submit" class="primary-action">Productie starten</button>
-              </form>
-            </section>
-            <section class="section-head">
-              <div>
-                <h2>Projecten</h2>
-                <p class="muted">Open een project om de productie voortgang en controles te bekijken.</p>
-              </div>
-            </section>
-            <section class="project-list">{rows}</section>
-            """,
-        )
+                projects = self.projects()
+                rows = "\n".join(self.project_card(project) for project in projects)
+                if not rows:
+                        rows = "<p class=\"muted\">Nog geen projecten.</p>"
+                return self.page(
+                        "Projecten",
+                        f"""
+                        <section class="hero-panel compact">
+                            <div class="eyebrow">AI Documentaire Studio</div>
+                            <h2>Al je documentaires op één plek</h2>
+                            <p class="muted">Ook onvoltooide projecten blijven zichtbaar. Je kunt altijd veilig verdergaan vanaf je laatste checkpoint.</p>
+                            <p><a class="button" href="/projects/new">Nieuwe documentaire starten</a></p>
+                        </section>
+                        <section class="section-head">
+                            <div>
+                                <h2>Projecten</h2>
+                                <p class="muted">Open of hervat elk project zonder werk te verliezen.</p>
+                            </div>
+                        </section>
+                        <section class="project-list">{rows}</section>
+                        """,
+                )
 
     def start_production(self, environ: dict[str, Any]) -> Response:
         form = self.read_form(environ)
@@ -330,29 +295,91 @@ class DashboardApp:
             content_mode=normalize_content_mode(self.form_value(form, "content_mode", "factual_documentary")),
         )
         result = start_production(self.settings, request)
+        self.persist_project_checkpoint(
+            self.project_root(result["project_slug"]),
+            current_stage="Onderwerp",
+            latest_user_input=prompt,
+        )
         return self.redirect(f"/projects/{result['project_slug']}")
 
     def project_card(self, project_root: Path) -> str:
         manifest = self.read_manifest(project_root / "manifests" / "project.json")
         slug = project_root.name
         topic = str(manifest.get("topic", slug)) if isinstance(manifest, dict) else slug
-        final_video = project_root / "exports" / "final_video.mp4"
-        status = "Klaar" if final_video.exists() else self.current_dutch_stage(project_root)
         progress = production_progress(project_root)
-        current = next((phase["name"] for phase in progress["phases"] if phase["status"] == "active"), "Afgerond")
+        status = self.project_status_label(progress)
+        stage = self.dashboard_stage_name(progress)
+        created_at = str(manifest.get("created_at", "Onbekend"))
+        modified_at = self.project_modified_at(project_root)
+        approval_required = "Ja" if progress.get("paid_gate", {}).get("required") else "Nee"
+        checkpoint = self.read_manifest(project_root / "manifests" / "dashboard_state.json")
+        latest_input = str(checkpoint.get("latest_user_input", ""))
+        latest_html = f"<p class=\"muted\">Laatste invoer: {escape(latest_input[:120])}</p>" if latest_input else ""
         return f"""
         <article class="project-card">
-          <div>
+          <div class="project-card-main">
             <h3>{escape(topic)}</h3>
-            <p>Huidige stap: <strong>{escape(current)}</strong></p>
-            <p class="muted">{progress['percentage']}% afgerond · laatste update {escape(str(progress['last_update']))}</p>
+            <p><strong>Onderwerp:</strong> {escape(topic)}</p>
+            <p><strong>Aangemaakt:</strong> {escape(created_at)}</p>
+            <p><strong>Laatst gewijzigd:</strong> {escape(modified_at)}</p>
+            <p><strong>Workflowfase:</strong> {escape(stage)}</p>
+            <p><strong>Voortgang:</strong> {int(progress.get('percentage', 0))}%</p>
+            <p><strong>Status:</strong> {escape(status)}</p>
+            <p><strong>Goedkeuring nodig:</strong> {approval_required}</p>
+            {latest_html}
           </div>
           <div class="project-card-actions">
             <span class="status-pill">{escape(status)}</span>
             <a class="button ghost" href="/projects/{escape(slug)}">Openen</a>
+            <a class="button" href="/projects/{escape(slug)}/production">Doorgaan</a>
           </div>
         </article>
         """
+
+    def dashboard_stage_name(self, progress: dict[str, Any]) -> str:
+        mapping = {
+            "Intake": "Onderwerp",
+            "Onderzoek": "Onderzoek",
+            "Claims": "Feitencontrole",
+            "Script": "Script",
+            "Producer": "Beelden",
+            "Director": "Beelden",
+            "Media": "Beelden",
+            "Voice-over": "Montage",
+            "Montage": "Montage",
+            "Review": "Eindcontrole",
+        }
+        phase = str(progress.get("current_phase", ""))
+        return mapping.get(phase, phase or "Onderwerp")
+
+    def project_status_label(self, progress: dict[str, Any]) -> str:
+        if int(progress.get("percentage", 0)) >= 100:
+            return "Voltooid"
+        if progress.get("paid_gate", {}).get("required"):
+            return "Wacht op goedkeuring"
+        if progress.get("blockers"):
+            return "Mislukt"
+        queue = progress.get("queue", {})
+        tasks = queue.get("tasks", []) if isinstance(queue, dict) else []
+        if any(task.get("status") == "blocked" for task in tasks if isinstance(task, dict)):
+            return "Geblokkeerd"
+        if any(task.get("status") == "active" for task in tasks if isinstance(task, dict)):
+            return "Bezig"
+        if any(task.get("status") == "waiting" for task in tasks if isinstance(task, dict)):
+            return "Bezig"
+        if any(task.get("status") == "completed" for task in tasks if isinstance(task, dict)):
+            return "Renderen"
+        return "Concept"
+
+    def project_modified_at(self, project_root: Path) -> str:
+        manifests = project_root / "manifests"
+        latest: datetime | None = None
+        if manifests.exists():
+            for item in manifests.glob("*.json"):
+                moment = datetime.fromtimestamp(item.stat().st_mtime, UTC)
+                if latest is None or moment > latest:
+                    latest = moment
+        return latest.isoformat() if latest else "Onbekend"
 
     def create_project(self, environ: dict[str, Any]) -> Response:
         form = self.read_form(environ)
@@ -363,6 +390,11 @@ class DashboardApp:
         settings = self.settings
         project = create_project(settings.projects_dir, topic, slug)
         ensure_media_manifest(project.root)
+        self.persist_project_checkpoint(
+            project.root,
+            current_stage="Onderwerp",
+            latest_user_input=topic,
+        )
         return self.redirect(f"/projects/{project.slug}")
 
     def new_project_wizard(self) -> str:
@@ -370,6 +402,7 @@ class DashboardApp:
         <nav class="crumb"><a href="/">Dashboard</a><span>/</span><strong>Nieuw project</strong></nav>
         <section class="hero-panel"><p class="eyebrow">Projectwizard</p><h2>Van onderwerp naar reviewbare documentaire</h2>
           <form method="post" action="/projects/new" enctype="multipart/form-data" class="production-form">
+                        <label>Workflow<select name="workflow_type"><option value="create_documentary" selected>Create Documentary</option><option value="recycle_documentary">Recycle Documentary</option></select></label>
             <label class="wide">Onderwerp of productieprompt<textarea name="prompt" rows="6" required></textarea></label>
             <div class="start-grid">
               <label>Duur<select name="duration"><option>5</option><option selected>12</option><option>20</option><option>30</option></select></label>
@@ -380,6 +413,8 @@ class DashboardApp:
               <label>Maximumbudget USD<input name="budget" type="number" min="0" step="0.01" value="0"></label>
               <label>Modus<select name="mode"><option value="review">Reviewmodus</option><option value="automatic">Automatisch</option></select></label>
             </div>
+            <label class="wide">Reference documentary URL<input type="url" name="reference_documentary_url" placeholder="https://www.youtube.com/watch?v=... of https://vimeo.com/..." ></label>
+            <label>Reference documentary MP4<input type="file" name="reference_documentary_file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska"></label>
             <label>Screenshots<input type="file" name="screenshot" accept="image/*" multiple></label>
             <label>Lokale clips<input type="file" name="clip" accept="video/*,audio/*" multiple></label>
             <label class="wide">YouTube-links<textarea name="youtube_urls" rows="3" placeholder="Eén URL per regel"></textarea></label>
@@ -398,6 +433,7 @@ class DashboardApp:
     def create_project_wizard(self, environ: dict[str, Any]) -> Response:
         form = self.read_form(environ)
         prompt = self.form_value(form, "prompt").strip()
+        workflow_type = self.form_value(form, "workflow_type", "create_documentary")
         if not prompt:
             return self.html(self.page("Prompt ontbreekt", '<section class="panel"><p>Voer een onderwerp of prompt in.</p></section>'), "400 Bad Request")
         project = create_project(self.settings.projects_dir, prompt[:100], available_project_slug(self.settings.projects_dir, prompt[:100]))
@@ -407,11 +443,28 @@ class DashboardApp:
         except ValueError:
             duration, budget = 12, 0.0
         workflow = self.read_manifest(project.root / "manifests/workflow.json")
-        workflow.update({"target_duration_minutes": duration, "language": self.form_value(form, "language", "Nederlands"), "autonomy_mode": self.form_value(form, "mode", "review"), "content_mode": normalize_content_mode(self.form_value(form, "style", "factual_documentary")), "audience": self.form_value(form, "audience")})
+        workflow.update({"target_duration_minutes": duration, "language": self.form_value(form, "language", "Nederlands"), "autonomy_mode": self.form_value(form, "mode", "review"), "content_mode": normalize_content_mode(self.form_value(form, "style", "factual_documentary")), "audience": self.form_value(form, "audience"), "workflow_type": workflow_type})
         write_json(project.root / "manifests/workflow.json", workflow)
-        write_json(project.root / "manifests/production_request.json", {"prompt": prompt, "target_duration_minutes": duration, "language": workflow["language"], "autonomy_mode": workflow["autonomy_mode"], "style": self.form_value(form, "style"), "audience": workflow["audience"]})
+        reference_url = self.form_value(form, "reference_documentary_url").strip()
+        write_json(project.root / "manifests/production_request.json", {"prompt": prompt, "target_duration_minutes": duration, "language": workflow["language"], "autonomy_mode": workflow["autonomy_mode"], "style": self.form_value(form, "style"), "audience": workflow["audience"], "workflow_type": workflow_type, "reference_documentary_url": reference_url})
         profile = self.form_value(form, "provider_profile", "offline")
         write_json(project.root / "manifests/provider_config.json", {"version": 1, "profile": profile, "budget_usd": budget, "external_calls_enabled": profile != "offline" and budget > 0, "cache_enabled": True, "retries": 2, "tasks": {}})
+        reference_uploads = self._uploads(form, "reference_documentary_file")
+        if workflow_type == "recycle_documentary":
+            if not reference_url and not reference_uploads:
+                return self.html(self.page("Reference documentary ontbreekt", '<section class="panel"><p>Voeg een YouTube-, Vimeo- of lokale MP4-referentie toe voor de recycle-workflow.</p></section>'), "400 Bad Request")
+            if reference_uploads:
+                field = reference_uploads[0]
+                suffix = Path(str(field.filename)).suffix
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+                    temp = Path(handle.name); handle.write(field.file.read())
+                try:
+                    create_reference_documentary(project.root, local_path=temp, original_filename=Path(str(field.filename)).name)
+                    prepare_recycle_documentary(project.root)
+                finally:
+                    temp.unlink(missing_ok=True)
+            elif reference_url:
+                create_reference_documentary(project.root, source_url=reference_url)
         for field in self._uploads(form, "screenshot") + self._uploads(form, "clip"):
             suffix = Path(str(field.filename)).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
@@ -429,11 +482,62 @@ class DashboardApp:
             destination = project.root / "research" / name
             destination.write_bytes(field.file.read()); dossier_files.append(str(destination.relative_to(project.root)))
         write_json(project.root / "manifests/intake_files.json", {"dossier_files": dossier_files})
+        self.persist_project_checkpoint(
+            project.root,
+            current_stage="Onderwerp",
+            latest_user_input=prompt,
+        )
         return self.redirect(f"/projects/{project.slug}/production")
+
+    def persist_project_checkpoint(self, project_root: Path, *, current_stage: str, latest_user_input: str) -> None:
+        project_manifest = self.read_manifest(project_root / "manifests" / "project.json")
+        current = self.read_manifest(project_root / "manifests" / "dashboard_state.json")
+        now = datetime.now(UTC).isoformat()
+        payload = {
+            "version": 1,
+            "project_id": str(current.get("project_id") or project_root.name),
+            "title": str(current.get("title") or project_manifest.get("topic", project_root.name)),
+            "topic": str(project_manifest.get("topic", project_root.name)),
+            "current_workflow_stage": current_stage,
+            "latest_user_input": latest_user_input,
+            "status": str(current.get("status") or "Concept"),
+            "created_at": str(current.get("created_at") or project_manifest.get("created_at") or now),
+            "updated_at": now,
+        }
+        write_json(project_root / "manifests" / "dashboard_state.json", payload)
+
+    def back_button(self, slug: str) -> str:
+        return f'<form method="post" action="/projects/{escape(slug)}/back" class="safe-back-form"><button type="submit" class="button ghost">Terug</button></form>'
+
+    def navigate_back(self, slug: str) -> Response:
+        root = self.project_root(slug)
+        if not root.exists():
+            return self.redirect("/projects")
+        self.persist_project_checkpoint(root, current_stage=self.current_dutch_stage(root), latest_user_input="Navigatie terug naar projecten")
+        queue = TaskQueue(root).snapshot()
+        tasks = queue.get("tasks", []) if isinstance(queue, dict) else []
+        running = any(isinstance(task, dict) and task.get("status") in {"active", "waiting"} for task in tasks)
+        if not running:
+            return self.redirect("/projects")
+        body = self.page(
+            "Taak draait nog",
+            """
+            <section class="panel">
+              <h2>This task is still running.</h2>
+              <p>Your progress has been saved.</p>
+              <div class="actions" style="justify-content:flex-start;">
+                <a class="button" href="/projects">Terug naar projecten</a>
+                <a class="button ghost" href="/projects/" onclick="history.back(); return false;">Hier blijven</a>
+              </div>
+            </section>
+            """,
+        )
+        body = body.replace('/projects/" onclick="history.back(); return false;"', f'/projects/{escape(slug)}/production"')
+        return self.html(body)
 
     def production_overview_page(self, slug: str) -> str:
         # Deliberately return a light shell; stalled workers can never block this route.
-        return self.page("Voortgang", f"""<section class="progress-shell" data-project="{escape(slug)}"><div class="loading-state"><span class="pulse"></span><div><h2>Voortgang wordt geladen</h2><p>Je dashboard is direct beschikbaar.</p></div></div><div id="progress-content"></div></section><script>{self.progress_script(slug)}</script>""")
+        return self.page("Voortgang", f"""{self.back_button(slug)}<section class="progress-shell" data-project="{escape(slug)}"><div class="loading-state"><span class="pulse"></span><div><h2>Voortgang wordt geladen</h2><p>Je dashboard is direct beschikbaar.</p></div></div><div id="progress-content"></div></section><script>{self.progress_script(slug)}</script>""")
 
     def progress_data(self, slug: str) -> Response:
         return self.json_response(production_progress(self.project_root(slug)))
@@ -482,12 +586,45 @@ class DashboardApp:
         return self.redirect(f"/projects/{slug}/production")
 
     def progress_script(self, slug: str) -> str:
-        return f"""(() => {{ const slug={json.dumps(slug)}, esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}}[c]));
-        const labels={{active:'Actief',waiting:'Wachtend',completed:'Afgerond',blocked:'Geblokkeerd',failed:'Fout',possibly_stalled:'Mogelijk vastgelopen',stopped:'Gestopt'}};
-        const task=t=>`<article class="queue-item ${{esc(t.status)}}"><div><strong>${{esc(t.label)}}</strong><small>Start: ${{esc(t.started_at||'Nog niet gestart')}} · duur: ${{t.duration_seconds||0}} sec · pogingen: ${{t.retries||0}}</small>${{t.reason?`<p>${{esc(t.reason)}}</p>`:''}}</div><span class="status-pill">${{labels[t.status]||esc(t.status)}}</span>${{['possibly_stalled','blocked','failed'].includes(t.status)?`<div class="task-actions"><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/resume"><button>Hervatten</button></form><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/retry"><button class="secondary">Opnieuw proberen</button></form><a class="button ghost" href="#events">Log bekijken</a><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/stop"><button class="danger">Taak stoppen</button></form></div>`:''}}</article>`;
-        async function refresh() {{ try {{ const response=await fetch(`/projects/${{slug}}/progress-data`,{{cache:'no-store'}}); if(!response.ok)throw new Error(`HTTP ${{response.status}}`); const d=await response.json(), phases=d.phases.map((p,i)=>`<li class="${{esc(p.status)}}"><span>${{i+1}}</span><div><strong>${{esc(p.name)}}</strong><small>${{esc(p.status)}}</small></div></li>`).join(''), q=d.queue.tasks.map(task).join('')||'<p class="muted">Er staan geen taken in de wachtrij.</p>', r=d.research;
-        const list=items=>`<ul>${{(items||[]).map(x=>`<li>${{esc(x)}}</li>`).join('')}}</ul>`, g=d.paid_gate, gateTitle=g.title||'Onderzoek wacht op jouw toestemming', gate=g.required?`<section class="approval-card" role="alert" aria-labelledby="approval-title"><div><p class="eyebrow">Toestemming nodig</p><h1 id="approval-title">${{esc(gateTitle)}}</h1><p><strong>Waarom:</strong> ${{esc(g.purpose)}}</p><div class="approval-facts"><span><small>Geschatte kosten</small><strong>$${{Number(g.maximum_cost_usd).toFixed(4)}}</strong></span><span><small>Extra bronnen</small><strong>${{Number(g.extra_sources||0)}}</strong></span><span><small>Landen</small><strong>${{esc((g.countries||[]).join(', '))}}</strong></span><span><small>Talen</small><strong>${{esc((g.languages||[]).join(', '))}}</strong></span></div><div class="approval-claims"><strong>Claims die hierdoor verbeterd worden</strong>${{list(g.claims)}}</div>${{g.within_budget?'':'<p class="error">Deze zoekactie overschrijdt de ingestelde projectlimiet; pas eerst het budget aan.</p>'}}</div><div class="approval-actions"><form method="post" action="/projects/${{slug}}/paid-research/approve"><button ${{g.within_budget?'':'disabled'}}>Goedkeuren en doorgaan</button></form><form method="post" action="/projects/${{slug}}/paid-research/cancel"><button class="ghost-button">Annuleren</button></form><form method="post" action="/projects/${{slug}}/paid-research/fallback"><button class="secondary" ${{g.local_fallback_available?'':'disabled'}}>Alleen lokaal doorgaan</button></form></div></section>`:'';
-        document.querySelector('#progress-content').innerHTML=`${{gate}}<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase)}}</h1><p>${{esc(d.last_activity)}}</p></div><div class="progress-number"><strong>${{d.percentage}}%</strong><span>${{d.remaining_steps}} stappen resterend${{d.estimated_remaining?' · '+esc(d.estimated_remaining):''}}</span></div></section><ol class="pipeline">${{phases}}</ol>${{g.required?'':`<section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task)}}</h2><div class="research-metrics"><span><strong>${{r.sources_found}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed}}</strong> verwerkt</span><span><strong>${{r.draft_claims}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining)}}</strong> resterend</span></div><p>Laatst afgerond: ${{esc(r.last_completed)}} · Laatste voortgang: ${{esc(r.waiting_since||'Nog geen')}} · Actieve dienst: ${{esc(r.provider)}}</p>${{r.last_error?`<p class="error">${{esc(r.last_error)}}</p>`:''}}</section>`}}<section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Geavanceerd: logs en technische details</summary><div class="event-list">${{d.events.map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`; document.querySelector('.loading-state').hidden=true; }} catch(error) {{ document.querySelector('.loading-state').hidden=true; document.querySelector('#progress-content').innerHTML='<section class="panel error"><h2>Status tijdelijk niet beschikbaar</h2><p>Controleer de verbinding en probeer opnieuw.</p><button type="button" id="retry-progress">Opnieuw proberen</button></section>'; document.querySelector('#retry-progress').onclick=refresh; }} }} refresh(); setInterval(refresh,3000); }})();"""
+                return f"""(() => {{
+                    const slug={json.dumps(slug)};
+                    const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[c]));
+                    const taskLabel=s=>({{active:'Bezig',waiting:'Wachtend',completed:'Voltooid',blocked:'Geblokkeerd',failed:'Mislukt',possibly_stalled:'Mogelijk vastgelopen',stopped:'Gestopt'}}[s]||s);
+                    const stageMap=n=>({{Intake:'Onderwerp',Onderzoek:'Onderzoek',Claims:'Feitencontrole',Script:'Script',Producer:'Beelden',Director:'Beelden',Media:'Beelden','Voice-over':'Montage',Montage:'Montage',Review:'Eindcontrole'}}[n]||n);
+                    const order=['Onderwerp','Onderzoek','Feitencontrole','Script','Beelden','Montage','Eindcontrole','Voltooid'];
+                    const statusMap=s=>({{afgerond:'completed',actief:'current',wachtend:'waiting',approval_required:'waiting',blocked:'blocked',fout:'blocked'}}[s]||'not_started');
+                    const statusText=s=>({{completed:'Voltooid',current:'Huidig',waiting:'Wachtend',blocked:'Geblokkeerd',not_started:'Nog niet gestart'}}[s]||'Nog niet gestart');
+                    const build=d=>{{
+                        const seen=Object.fromEntries((d.phases||[]).map(p=>[stageMap(p.name),statusMap(p.status)]));
+                        return order.map((name,i)=>({{index:i+1,name,status:name==='Voltooid'?(Number(d.percentage||0)===100?'completed':'not_started'):(seen[name]||'not_started')}}));
+                    }};
+                    const queueCard=t=>`<article class="queue-item ${{esc(t.status)}}"><div><strong>${{esc(t.label)}}</strong><small>Start: ${{esc(t.started_at||'Nog niet gestart')}} · duur: ${{t.duration_seconds||0}} sec · pogingen: ${{t.retries||0}}</small>${{t.reason?`<p>${{esc(t.reason)}}</p>`:''}}</div><span class="status-pill">${{esc(taskLabel(t.status))}}</span>${{['possibly_stalled','blocked','failed'].includes(t.status)?`<div class="task-actions"><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/resume"><button>Hervatten</button></form><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/retry"><button class="secondary">Opnieuw proberen</button></form><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/stop"><button class="danger" onclick="return confirm('Weet je zeker dat je deze taak wilt stoppen?')">Taak stoppen</button></form></div>`:''}}</article>`;
+                    const list=items=>`<ul>${{(items||[]).map(x=>`<li>${{esc(x)}}</li>`).join('')}}</ul>`;
+                    async function refresh() {{
+                        try {{
+                            const res=await fetch(`/projects/${{slug}}/progress-data`,{{cache:'no-store'}});
+                            if(!res.ok) throw new Error();
+                            const d=await res.json();
+                            const stages=build(d).map(s=>`<li class="${{esc(s.status)}}"><span>${{s.index}}</span><div><strong>${{esc(s.name)}}</strong><small>${{statusText(s.status)}}</small></div></li>`).join('');
+                            const q=(d.queue?.tasks||[]).map(queueCard).join('')||'<p class="muted">Er staan geen taken in de wachtrij.</p>';
+                            const g=d.paid_gate||{{}};
+                            const gate=g.required?`<section class="approval-card" role="alert"><div><p class="eyebrow">Toestemming nodig</p><h1>${{esc(g.title||'Onderzoek wacht op jouw toestemming')}}</h1><p><strong>Waarom:</strong> ${{esc(g.purpose||'')}}</p><div class="approval-facts"><span><small>Geschatte kosten</small><strong>$${{Number(g.maximum_cost_usd||0).toFixed(4)}}</strong></span><span><small>Extra bronnen</small><strong>${{Number(g.extra_sources||0)}}</strong></span><span><small>Landen</small><strong>${{esc((g.countries||[]).join(', '))}}</strong></span><span><small>Talen</small><strong>${{esc((g.languages||[]).join(', '))}}</strong></span></div><div class="approval-claims"><strong>Claims die hierdoor verbeterd worden</strong>${{list(g.claims)}}</div></div><div class="approval-actions"><form method="post" action="/projects/${{slug}}/paid-research/approve"><button ${{g.within_budget?'':'disabled'}}>Goedkeuren en doorgaan</button></form><form method="post" action="/projects/${{slug}}/paid-research/cancel"><button class="ghost-button" onclick="return confirm('Weet je zeker dat je deze taak wilt stoppen?')">Taak stoppen</button></form><form method="post" action="/projects/${{slug}}/paid-research/fallback"><button class="secondary" ${{g.local_fallback_available?'':'disabled'}}>Alleen lokaal doorgaan</button></form></div></section>`:'';
+                            const r=d.research||{{}};
+                            const focus=`<section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task||'Wacht op volgende stap')}}</h2><div class="research-metrics"><span><strong>${{r.sources_found||0}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed||0}}</strong> verwerkt</span><span><strong>${{r.draft_claims||0}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining||'Nog te bepalen')}}</strong> resterend</span></div></section>`;
+                            document.querySelector('#progress-content').innerHTML=`${{gate}}<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase||'Onderwerp')}}</h1><p>${{esc(d.last_activity||'')}}</p></div><div class="progress-number"><strong>${{d.percentage||0}}%</strong><span>${{d.remaining_steps||0}} stappen resterend${{d.estimated_remaining?' · '+esc(d.estimated_remaining):''}}</span></div></section><ol class="pipeline">${{stages}}</ol>${{(d.blockers||[]).length?'<section class="panel error"><h2>Het zoeken naar beelden is niet volledig gelukt. Je project is opgeslagen en je kunt later verdergaan.</h2><button type="button" id="retry-progress">Opnieuw proberen</button></section>':''}}${{g.required?'':focus}}<section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Technische details</summary><div class="event-list">${{(d.events||[]).map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`;
+                            document.querySelector('.loading-state').hidden=true;
+                            const retry=document.querySelector('#retry-progress');
+                            if(retry) retry.onclick=refresh;
+                        }} catch {{
+                            document.querySelector('.loading-state').hidden=true;
+                            document.querySelector('#progress-content').innerHTML='<section class="panel error"><h2>Status tijdelijk niet beschikbaar</h2><p>Controleer de verbinding en probeer opnieuw.</p><button type="button" id="retry-progress">Opnieuw proberen</button></section>';
+                            document.querySelector('#retry-progress').onclick=refresh;
+                        }}
+                    }}
+                    refresh();
+                    setInterval(refresh,3000);
+                }})();"""
+
 
     def dossier_review_page(self, slug: str) -> str:
         root = self.project_root(slug); rebuild_relevance_cache(root); sources = self.read_manifest(root / "manifests/sources.json").get("sources", []); claims = self.read_manifest(root / "manifests/claims.json").get("claims", [])
@@ -507,7 +644,7 @@ class DashboardApp:
         recovery = '' if claims else f'<section class="panel recovery-card"><h2>Er zijn nog geen controleerbare feiten opgesteld</h2><form method="post" action="/projects/{escape(slug)}/dossier-review/extract-claims"><button>Claims uit relevante bronnen opstellen</button></form><form method="post" action="/projects/{escape(slug)}/dossier-review/research-further"><button class="secondary">Onderzoek verder</button></form></section>'
         approval = f'<section class="panel"><form method="post" action="/projects/{escape(slug)}/research/approve"><button {"disabled" if missing else ""}>Goedkeuren en doorgaan</button></form><p>{escape("Nog nodig: " + "; ".join(missing) if missing else "Klaar om goed te keuren.")}</p></section>'
         mappings = "".join(f'<article class="subpanel"><strong>{escape(str(item["scene_id"]))}</strong><p>{escape(str(item["script"]))}</p><p>Ondersteund door: {escape(", ".join(str(c.get("id")) for c in item["claims"]) or "geen claim")}</p></article>' for item in supported_script_map(root))
-        return self.page("Dossier & bronnen", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Dossier</strong></nav><div id="review-feedback" class="success" hidden></div><script>(()=>{{const n=new URLSearchParams(location.search).get('notice'),e=document.querySelector('#review-feedback');if(n){{e.textContent=n;e.hidden=false;}}}})();</script>{recovery}{f'<section class="panel coverage-analyzer"><h2>Internationale dekking</h2>{coverage_rows}</section>' if coverage_rows else ''}<section class="panel"><h2>Bronnen beoordelen</h2>{source_rows}<h2>Claims beoordelen en aanpassen</h2>{claim_rows or '<p>Geen conceptclaims.</p>'}</section>{approval}<section class="panel"><h2>Claim → scriptdekking</h2>{mappings}</section>""")
+        return self.page("Dossier & bronnen", f"""{self.back_button(slug)}<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Dossier</strong></nav><div id="review-feedback" class="success" hidden></div><script>(()=>{{const n=new URLSearchParams(location.search).get('notice'),e=document.querySelector('#review-feedback');if(n){{e.textContent=n;e.hidden=false;}}}})();</script>{recovery}{f'<section class="panel coverage-analyzer"><h2>Internationale dekking</h2>{coverage_rows}</section>' if coverage_rows else ''}<section class="panel"><h2>Bronnen beoordelen</h2>{source_rows}<h2>Claims beoordelen en aanpassen</h2>{claim_rows or '<p>Geen conceptclaims.</p>'}</section>{approval}<section class="panel"><h2>Claim → scriptdekking</h2>{mappings}</section>""")
 
     def repair_research_review(self, slug: str, action: str) -> Response:
         root = self.project_root(slug)
@@ -577,6 +714,7 @@ class DashboardApp:
         return self.page(
             topic,
             f"""
+                        {self.back_button(slug)}
             <section class="project-summary">
               <div>
                 <p class="eyebrow">{escape(progress['current_phase'])}</p>
@@ -589,7 +727,7 @@ class DashboardApp:
             </section>
             {self.review_action_card(project_root, slug)}
             <details class="panel"><summary>Meer projectonderdelen</summary><div class="link-grid"><a href="/projects/{escape(slug)}/research-panel">Onderzoek</a><a href="/projects/{escape(slug)}/dossier-review">Bronnen en claims</a><a href="/projects/{escape(slug)}/draft-review">Script, Scènes en Beelden beoordelen</a><a href="/projects/{escape(slug)}/youtube-draft">Publicatieconcept</a>{final_link}</div></details>
-            <details class="panel"><summary>Geavanceerd</summary><a href="/projects/{escape(slug)}/advanced">Geavanceerde instellingen, kosten en bestanden</a></details>
+            <details class="panel"><summary>Technische details</summary><a href="/projects/{escape(slug)}/advanced">Developer mode openen</a></details>
             """,
         )
 
@@ -629,7 +767,7 @@ class DashboardApp:
               <details open><summary>Script en voice-over</summary><p>{escape(str(scene.get('script', '')))}</p><p><strong>Voice-over:</strong> {escape(str(scene.get('voice_over_text', '')))}</p><p><strong>Vertolking:</strong> {escape(str(scene.get('voice_over_delivery', '')))}</p></details>
               <details><summary>Claims en bronnen</summary><h3>Claims</h3><ul>{claim_rows}</ul><h3>Bronnen</h3><ul>{source_rows}</ul></details>
               <details><summary>Screenshots en videofragmenten</summary><h3>Beelden</h3><ul>{media_rows}</ul><h3>Clips</h3><ul>{clip_rows}</ul></details>
-              <details><summary>Camerarichting en montageplan</summary><pre>{escape(json.dumps(scene.get('edit_plan', {}), indent=2))}</pre></details>
+              <details><summary>Technische details</summary><pre>{escape(json.dumps(scene.get('edit_plan', {}), indent=2))}</pre></details>
               <p><strong>Geschatte duur:</strong> {escape(str(scene.get('estimated_duration_seconds', 0)))} seconden</p>
               {'<p class="success">Deze scène is goedgekeurd en vergrendeld.</p>' if locked else f'<form method="post" action="/projects/{escape(slug)}/draft-review/{escape(str(scene["id"]))}/approve"><button type="submit">Scène goedkeuren</button></form>'}
             </article>
@@ -644,8 +782,9 @@ class DashboardApp:
             plan_panel = f"""<section class="review-card"><div><p class="eyebrow">Wijzigingsplan</p><h2>Controleer vóór uitvoering</h2><p>Scènes: {escape(', '.join(pending.get('scene_ids', [])))} · Componenten: {escape(', '.join(pending.get('components', [])))} · Geschatte kosten: ${escape(str(pending.get('estimated_cost_usd', 0)))}</p></div><form method="post" action="/projects/{escape(slug)}/draft-review/execute-revision"><button>Plan bevestigen en uitvoeren</button></form></section>"""
         timeline = "".join(f'<a href="#scene-{escape(str(scene["id"]))}"><img src="/projects/{escape(slug)}/preview/thumbnail/{escape(str(scene["id"]))}" alt=""><span>{escape(str(scene.get("heading", scene["id"])))}</span></a>' for scene in draft.get("scenes", []))
         return self.page("Draft Review", f"""
+        {self.back_button(slug)}
         <nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Draft Review</strong></nav>
-        <section class="review-player"><div><video controls preload="metadata" src="/projects/{escape(slug)}/preview/video"></video><div class="review-timeline">{timeline}</div></div><aside><h2>Reviewscore</h2><p>Director: <strong>{escape(str(director.get('critic_score', '—')))}</strong></p><p>Critic: <strong>{escape(str(critic.get('overall_score', '—')))}</strong></p><p>Ondertitels: <code>manifests/subtitles.srt</code></p></aside></section>
+        <section class="review-player"><div><video controls preload="metadata" src="/projects/{escape(slug)}/preview/video"></video><div class="review-timeline">{timeline}</div></div><aside><h2>Reviewscore</h2><p>Director: <strong>{escape(str(director.get('critic_score', '—')))}</strong></p><p>Critic: <strong>{escape(str(critic.get('overall_score', '—')))}</strong></p><p>Ondertitels zijn beschikbaar in de exportfase.</p></aside></section>
         {plan_panel}
         <section class="panel"><h2>Revisiechat</h2><p class="muted">Beschrijf natuurlijk wat je wilt wijzigen. Alleen de geselecteerde of genoemde scène wordt opnieuw beoordeeld.</p>
           <form method="post" action="/projects/{escape(slug)}/draft-review/revise" class="grid-form">
@@ -733,6 +872,7 @@ class DashboardApp:
             </section>
             """
         return self.page("Clip-intake", f"""
+        {self.back_button(slug)}
         <nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Clip-intake</strong></nav>
         <section class="panel">
           <h2>Screenshot, YouTube of lokaal fragment</h2>
@@ -877,6 +1017,7 @@ class DashboardApp:
         return self.page(
             "Geavanceerde instellingen",
             f"""
+            {self.back_button(slug)}
             <nav class="crumb"><a href="/">Dashboard</a><span>/</span><a href="/projects/{escape(slug)}">{escape(topic)}</a><span>/</span><strong>Geavanceerde instellingen</strong></nav>
             <div id="review-feedback" class="success" hidden></div><script>(()=>{{const n=new URLSearchParams(location.search).get('notice'),e=document.querySelector('#review-feedback');if(n){{e.textContent=n;e.hidden=false;}}}})();</script>
             <section class="panel project-head">
@@ -1241,7 +1382,7 @@ class DashboardApp:
 
     def youtube_draft_page(self, slug: str) -> str:
         draft = youtube_draft(self.project_root(slug)); chapters = "\n".join(f"{item['start_seconds']} — {item['title']}" for item in draft.get("chapters", []))
-        return self.page("YouTube draft", f"""<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>YouTube draft</strong></nav><section class="panel"><h2>Veilige export</h2><form method="post" action="/projects/{escape(slug)}/youtube-draft/save" class="grid-form"><label class="wide">Titel<input name="title" value="{escape(str(draft.get('title', '')))}"></label><label class="wide">Beschrijving<textarea name="description" rows="8">{escape(str(draft.get('description', '')))}</textarea></label><label class="wide">Hoofdstukken<textarea rows="8" readonly>{escape(chapters)}</textarea></label><label>Tags<input name="tags" value="{escape(', '.join(draft.get('tags', [])))}"></label><label>Privacy<select name="privacy_status"><option value="private">Private</option><option value="draft">Draft</option></select></label><p>Thumbnail: <code>{escape(str(draft.get('thumbnail')))}</code><br>Ondertitels: <code>{escape(str(draft.get('subtitles')))}</code><br>Video: <code>{escape(str(draft.get('video')))}</code></p><button>Draft opslaan</button></form></section><section class="review-card"><div><h2>Upload naar YouTube</h2><p>Publicatie gebeurt nooit automatisch. Alleen private/draft upload kan na expliciete bevestiging worden klaargezet.</p></div><form method="post" action="/projects/{escape(slug)}/youtube-draft/confirm-upload"><label><input type="checkbox" name="confirm" value="yes" required> Ik bevestig private/draft upload</label><button>Upload expliciet bevestigen</button></form></section>""")
+        return self.page("YouTube draft", f"""{self.back_button(slug)}<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>YouTube draft</strong></nav><section class="panel"><h2>Veilige export</h2><form method="post" action="/projects/{escape(slug)}/youtube-draft/save" class="grid-form"><label class="wide">Titel<input name="title" value="{escape(str(draft.get('title', '')))}"></label><label class="wide">Beschrijving<textarea name="description" rows="8">{escape(str(draft.get('description', '')))}</textarea></label><label class="wide">Hoofdstukken<textarea rows="8" readonly>{escape(chapters)}</textarea></label><label>Tags<input name="tags" value="{escape(', '.join(draft.get('tags', [])))}"></label><label>Privacy<select name="privacy_status"><option value="private">Private</option><option value="draft">Draft</option></select></label><p class="muted">Thumbnail, ondertitels en videobestand worden automatisch gekoppeld vanuit je project.</p><button>Draft opslaan</button></form></section><section class="review-card"><div><h2>Upload naar YouTube</h2><p>Publicatie gebeurt nooit automatisch. Alleen private/draft upload kan na expliciete bevestiging worden klaargezet.</p></div><form method="post" action="/projects/{escape(slug)}/youtube-draft/confirm-upload"><label><input type="checkbox" name="confirm" value="yes" required> Ik bevestig private/draft upload</label><button>Upload expliciet bevestigen</button></form></section>""")
 
     def save_youtube_draft(self, slug: str, environ: dict[str, Any]) -> Response:
         form = self.read_form(environ); root = self.project_root(slug); draft = youtube_draft(root)
@@ -1459,6 +1600,9 @@ class DashboardApp:
         stage = str(activity.get("current_stage", ""))
         mapping = {
             "create_project": "Project aangemaakt",
+            "reference_documentary": "Referentiedocumentaire laden",
+            "analysis": "Referentie analyseren",
+            "verification": "Claims voorbereiden voor verificatie",
             "research_plan": "Onderzoeksplan maken",
             "research": "Onderzoek uitvoeren",
             "analyze_sources": "Bronnen analyseren",
@@ -1526,7 +1670,7 @@ class DashboardApp:
         """
 
     def research_panel_page(self, slug: str) -> str:
-        return self.page("Research Panel", f'<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Research Panel</strong></nav>{self.research_panel(self.project_root(slug), slug)}')
+        return self.page("Research Panel", f'{self.back_button(slug)}<nav class="crumb"><a href="/projects/{escape(slug)}">Project</a><span>/</span><strong>Research Panel</strong></nav>{self.research_panel(self.project_root(slug), slug)}')
 
     def research_data(self, slug: str, environ: dict[str, Any]) -> Response:
         query = parse_qs(str(environ.get("QUERY_STRING", "")))
@@ -1760,9 +1904,11 @@ class DashboardApp:
     .section-head h2 {{ margin-bottom:4px; }}
     .project-list {{ display:grid; gap:12px; }}
     .project-card {{ padding:18px; display:flex; justify-content:space-between; align-items:center; gap:16px; }}
+    .project-card-main {{ display:grid; gap:6px; }}
     .project-card h3 {{ margin:0 0 4px; font-size:18px; }}
     .project-card p {{ margin:0; }}
-    .project-card-actions {{ display:flex; align-items:center; gap:10px; }}
+    .project-card-actions {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; }}
+    .safe-back-form {{ margin-bottom:14px; }}
     .status-pill {{ display:inline-flex; align-items:center; min-height:34px; border-radius:999px; padding:6px 12px; background:var(--soft); color:#1d5f50; font-weight:700; font-size:13px; white-space:nowrap; }}
     .summary-grid {{ display:grid; grid-template-columns:repeat(4, minmax(140px, 1fr)); gap:12px; }}
     .summary-grid div {{ border:1px solid var(--line); border-radius:8px; padding:14px; background:#fbfcfc; }}
@@ -1806,10 +1952,11 @@ class DashboardApp:
     .project-summary {{ display:flex; justify-content:space-between; gap:28px; align-items:center; background:#fff; border:1px solid var(--line); border-radius:16px; padding:28px; margin-bottom:18px; box-shadow:0 12px 34px rgba(23,32,38,.05); }}
     .project-summary h1,.project-summary h2 {{ margin:5px 0 8px; font-size:30px; }}
     .progress-number {{ display:grid; justify-items:end; gap:6px; min-width:190px; }} .progress-number strong {{ font-size:36px; color:var(--accent); }} .progress-number span {{ color:var(--muted); font-size:13px; }}
-    .pipeline {{ list-style:none; padding:8px 0; margin:0 0 18px; display:grid; grid-template-columns:repeat(10,1fr); gap:6px; }}
+    .pipeline {{ list-style:none; padding:8px 0; margin:0 0 18px; display:grid; grid-template-columns:repeat(8,1fr); gap:6px; }}
     .pipeline li {{ display:flex; gap:8px; align-items:center; min-width:0; padding:10px 7px; border-radius:10px; color:var(--muted); }} .pipeline li span {{ display:grid; place-items:center; width:25px; height:25px; flex:0 0 25px; border-radius:50%; background:#e7ecef; font-size:12px; }} .pipeline li strong,.pipeline li small {{ display:block; font-size:12px; }}
-    .pipeline li.afgerond span {{ background:#dcefe4;color:var(--ok); }} .pipeline li.actief {{ background:#eaf5f2;color:var(--accent-dark); }} .pipeline li.actief span {{ background:var(--accent);color:#fff; }}
-    .pipeline li.approval_required,.pipeline li.blocked {{ background:#fff5e9;color:#8a5200; }} .pipeline li.approval_required span,.pipeline li.blocked span {{ background:var(--warn);color:#fff; }}
+    .pipeline li.completed span {{ background:#dcefe4;color:var(--ok); }} .pipeline li.current {{ background:#eaf5f2;color:var(--accent-dark); }} .pipeline li.current span {{ background:var(--accent);color:#fff; }}
+    .pipeline li.waiting {{ background:#f8fafb;color:var(--muted); }} .pipeline li.blocked {{ background:#fff5e9;color:#8a5200; }} .pipeline li.blocked span {{ background:var(--warn);color:#fff; }}
+    .pipeline li.not_started {{ opacity:.88; }}
     .approval-card {{ display:grid;grid-template-columns:1fr auto;gap:28px;align-items:center;background:#fff;border:1px solid #e8c89f;border-radius:16px;padding:28px;margin-bottom:18px;box-shadow:0 12px 34px rgba(89,55,20,.08); }} .approval-card h1 {{ margin:5px 0 8px;font-size:28px; }} .approval-facts {{ display:flex;gap:10px;flex-wrap:wrap;margin-top:16px; }} .approval-facts span {{ display:grid;gap:3px;background:#fff8ef;border-radius:10px;padding:10px 14px; }} .approval-facts small {{ color:var(--muted); }} .approval-actions {{ display:grid;gap:8px;min-width:260px; }} .approval-actions form,.approval-actions button {{ width:100%; }} .ghost-button {{ background:#eef1f3;color:var(--ink); }}
     .focus-card {{ padding:24px; margin-bottom:18px; border-color:#cfe3dc; }} .research-metrics {{ display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }} .research-metrics span {{ background:var(--page);border-radius:10px;padding:10px 12px;font-size:13px; }}
     .loading-state {{ display:flex;align-items:center;gap:14px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px; }} .loading-state h2,.loading-state p {{ margin:3px 0; }} .pulse {{ width:14px;height:14px;border-radius:50%;background:var(--accent);animation:pulse 1.2s infinite; }} @keyframes pulse {{ 50% {{ opacity:.35;transform:scale(.8); }} }}
@@ -1833,7 +1980,7 @@ class DashboardApp:
 <body>
   <header>
     <div><h1>Documentaire Studio</h1><p>Van idee tot gecontroleerde film</p></div>
-    <nav class="main-nav" aria-label="Hoofdnavigatie"><a href="/">Projecten</a><a href="/projects/new">Nieuwe documentaire</a><a href="/">Voortgang</a><a href="/">Review</a><a href="/#settings">Instellingen</a></nav>
+        <nav class="main-nav" aria-label="Hoofdnavigatie"><a href="/projects">Projecten</a><a href="/projects/new">Nieuwe documentaire</a></nav>
   </header>
   <main>{body}</main>
   <script>

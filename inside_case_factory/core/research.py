@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import hashlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -856,6 +857,25 @@ def split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _canonicalize_script_content(value: Any) -> Any:
+    if isinstance(value, dict):
+        excluded = {"status", "approved_at", "edited_at", "generated_at", "approval_fingerprint", "accepted_candidate_id"}
+        return {
+            str(key): _canonicalize_script_content(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in excluded
+        }
+    if isinstance(value, list):
+        return [_canonicalize_script_content(item) for item in value]
+    return value
+
+
+def script_content_hash(script: dict[str, Any]) -> str:
+    canonical = _canonicalize_script_content(script if isinstance(script, dict) else {})
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def review_item(project_root: Path, manifest_name: str, collection: str, item_id: str, status: str) -> tuple[bool, bool]:
     manifest = load_manifest(project_root, manifest_name)
     items = manifest.get(collection, [])
@@ -1038,11 +1058,20 @@ def approve_script(project_root: Path) -> bool:
     script = load_manifest(project_root, "script.json")
     if not script.get("narration"):
         return False
+    approved_at = datetime.now(UTC).isoformat()
+    fingerprint = {
+        "script_hash": script_content_hash(script),
+        "approved_at": approved_at,
+        "approval_source": "manual_review",
+        "approval_valid": True,
+    }
     script["status"] = "approved"
-    script["approved_at"] = datetime.now(UTC).isoformat()
+    script["approved_at"] = approved_at
+    script["approval_fingerprint"] = fingerprint
     save_manifest(project_root, "script.json", script)
     workflow = load_manifest(project_root, "workflow.json")
     workflow["script_approved"] = True
+    workflow["script_approval_fingerprint"] = fingerprint
     workflow["stage"] = "generate_scenes"
     save_manifest(project_root, "workflow.json", workflow)
     return True

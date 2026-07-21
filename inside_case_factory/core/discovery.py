@@ -7,6 +7,7 @@ from html import unescape
 import json
 from pathlib import Path
 import re
+import tomllib
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -16,6 +17,7 @@ from urllib.request import Request, urlopen
 from inside_case_factory.core.media import add_image_asset, load_media_manifest, save_media_manifest
 from inside_case_factory.core.project import slugify
 from inside_case_factory.core.relevance import media_threshold, project_context, rights_status, topic_relevance
+from inside_case_factory.providers.runtime_media import PexelsStockMediaProvider
 from inside_case_factory.utils.files import read_json, write_json
 from inside_case_factory.utils.text import compact_whitespace
 
@@ -81,6 +83,87 @@ def _metadata_value(metadata: dict[str, Any], key: str) -> str:
 def _terms(*values: str) -> set[str]:
     joined = " ".join(values).lower()
     return {token for token in re.findall(r"[a-z0-9]{3,}", joined)}
+
+
+def _short_narration_fragment(narration: str, *, max_words: int = 16) -> str:
+    tokens = re.findall(r"[a-z0-9]+", narration.lower())
+    if not tokens:
+        return ""
+    return " ".join(tokens[:max_words])
+
+
+def _scene_specific_queries(scene: dict[str, Any], intent: dict[str, Any]) -> list[str]:
+    subject = compact_whitespace(str(intent.get("subject", "")))
+    people = [compact_whitespace(str(item)) for item in intent.get("people", []) if str(item).strip()]
+    locations = [compact_whitespace(str(item)) for item in intent.get("locations", []) if str(item).strip()]
+    periods = [compact_whitespace(str(item)) for item in intent.get("time_period", []) if str(item).strip()]
+    events = [compact_whitespace(str(item)) for item in intent.get("event", []) if str(item).strip()]
+    visual_requirements = compact_whitespace(str(scene.get("media_requirements", "")))
+    content_reason = compact_whitespace(str(intent.get("content_reason", "")))
+    narration_fragment = _short_narration_fragment(str(scene.get("narration", "")))
+
+    queries: list[str] = []
+    queries.extend(compact_whitespace(str(value)) for value in intent.get("search_terms", []) if str(value).strip())
+    queries.extend(compact_whitespace(str(value)) for value in intent.get("aliases", []) if str(value).strip())
+
+    if subject and events:
+        queries.append(compact_whitespace(f"{subject} {events[0]}"))
+    if subject and locations:
+        queries.append(compact_whitespace(f"{subject} {locations[0]}"))
+    if events and periods:
+        queries.append(compact_whitespace(f"{events[0]} {periods[0]} archival"))
+    if people and events:
+        queries.append(compact_whitespace(f"{' '.join(people[:2])} {events[0]}"))
+    if visual_requirements:
+        queries.append(visual_requirements)
+    if content_reason:
+        queries.append(content_reason)
+    if narration_fragment:
+        queries.append(compact_whitespace(f"{subject} {narration_fragment}" if subject else narration_fragment))
+
+    aggregate = compact_whitespace(" ".join([
+        subject,
+        " ".join(people),
+        " ".join(locations),
+        " ".join(periods),
+        " ".join(events),
+        visual_requirements,
+    ]))
+    if aggregate:
+        queries.append(aggregate)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in queries:
+        cleaned = compact_whitespace(value)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(cleaned[:180])
+    return deduped
+
+
+def _repo_root_for_project(project_root: Path) -> Path:
+    for candidate in [project_root, *project_root.parents]:
+        config_path = candidate / "config" / "providers.toml"
+        if config_path.exists():
+            return candidate
+    return Path.cwd()
+
+
+def _media_provider_settings(project_root: Path, provider_name: str) -> dict[str, Any]:
+    config_path = _repo_root_for_project(project_root) / "config" / "providers.toml"
+    if not config_path.exists():
+        return {}
+    with config_path.open("rb") as handle:
+        config = tomllib.load(handle)
+    media = config.get("media", {}) if isinstance(config, dict) else {}
+    providers = media.get("providers", {}) if isinstance(media, dict) else {}
+    provider_config = providers.get(provider_name, {}) if isinstance(providers, dict) else {}
+    return dict(provider_config) if isinstance(provider_config, dict) else {}
 
 
 def copyright_status(license_text: str, usage_notes: str = "") -> str:
@@ -377,6 +460,15 @@ def default_connectors(project_root: Path | None = None) -> list[ArchiveConnecto
     connectors: list[ArchiveConnector] = [WikimediaCategoryConnector(), WikimediaCommonsConnector(), InternetArchiveConnector()]
     if project_root is not None:
         connectors.append(ResearchSourceImageConnector(project_root))
+        pexels_settings = _media_provider_settings(project_root, "pexels")
+        connectors.append(
+            PexelsStockMediaProvider(
+                enabled=bool(pexels_settings.get("enabled", False)),
+                api_key_env=str(pexels_settings.get("api_key_env", "PEXELS_API_KEY")),
+                timeout_seconds=int(pexels_settings.get("timeout_seconds", 20)),
+                per_query_limit=int(pexels_settings.get("per_query_limit", 6)),
+            )
+        )
     return connectors
 
 
@@ -468,6 +560,14 @@ def discover_archival_media(
                 "attribution_requirements": candidate.get("attribution_requirements", ""),
                 "copyright_status": candidate.get("copyright_status", "unknown"),
                 "preview_url": preview_url,
+                "provider": candidate.get("provider", candidate.get("source", "")),
+                "source_type": candidate.get("source_type", ""),
+                "source_category": candidate.get("source_category", ""),
+                "dimensions": candidate.get("dimensions", {}),
+                "duration_seconds": candidate.get("duration_seconds"),
+                "attribution": candidate.get("attribution", {}),
+                "license_metadata": candidate.get("license_metadata", {}),
+                "scene_linkage": candidate.get("scene_linkage", {"scene_id": scene_id, "shot_id": query.shot_id}),
                 "sha256": sha,
                 "fingerprint": fingerprint,
                 "duplicate_of": "",
@@ -557,8 +657,37 @@ def discover_project_scene_media(
     attempts: list[dict[str, Any]] = []
     uncovered: list[str] = []
     used_providers: set[str] = set()
-    target_per_shot = 3
+    started_at = time.monotonic()
+    budget_seconds = 60.0
+    budget_exhausted = False
+    availability: dict[str, dict[str, Any]] = {}
+    for connector in connectors:
+        defaults = {
+            "configured": True,
+            "key_available": True,
+            "attempted": False,
+            "candidates_returned": 0,
+            "skipped_reason": "",
+            "error_reason": "",
+        }
+        details = connector.availability() if hasattr(connector, "availability") and callable(getattr(connector, "availability")) else {}
+        if isinstance(details, dict):
+            defaults.update({
+                "configured": bool(details.get("configured", defaults["configured"])),
+                "key_available": bool(details.get("key_available", defaults["key_available"])),
+                "attempted": bool(details.get("attempted", defaults["attempted"])),
+                "candidates_returned": int(details.get("candidates_returned", defaults["candidates_returned"])),
+                "skipped_reason": str(details.get("skipped_reason", defaults["skipped_reason"])),
+                "error_reason": str(details.get("error_reason", defaults["error_reason"])),
+            })
+        availability[connector.name] = defaults
+    # One eligible candidate per shot is enough to advance into review; the
+    # render pipeline already has offline-safe fallbacks for uncovered scenes.
+    target_per_shot = 1
     for scene in scenes:
+        if time.monotonic() - started_at >= budget_seconds:
+            budget_exhausted = True
+            break
         scene_id = str(scene.get("id", ""))
         direction = directed.get(scene_id, {})
         shot_intents = [shot.get("media_intent", {}) for shot in direction.get("shots", []) if isinstance(shot, dict)]
@@ -571,6 +700,10 @@ def discover_project_scene_media(
                 "content_reason": str(scene.get("media_requirements", "Relevant scene evidence.")),
             }]
         for intent in shot_intents:
+            if time.monotonic() - started_at >= budget_seconds:
+                uncovered.append(str(intent.get("shot_id", "")))
+                budget_exhausted = True
+                break
             shot_id = str(intent.get("shot_id", ""))
             current_manifest = load_media_manifest(project_root)
             current_assets = [item for item in current_manifest.get("assets", []) if isinstance(item, dict)]
@@ -605,15 +738,24 @@ def discover_project_scene_media(
             if len(linked) >= target_per_shot:
                 used_providers.update(str(item.get("discovery", {}).get("source", "")) for item in linked)
                 continue
-            query_values = [str(value).strip() for value in intent.get("search_terms", []) if str(value).strip()]
-            query_values.extend(str(value).strip() for value in intent.get("aliases", []) if str(value).strip())
-            query_values.append(compact_whitespace(" ".join([
-                str(intent.get("subject", "")), *map(str, intent.get("people", [])), *map(str, intent.get("locations", [])),
-                *map(str, intent.get("time_period", [])), *map(str, intent.get("event", [])),
-            ])))
-            query_values = [item for item in dict.fromkeys(query_values) if item]
+            query_values = _scene_specific_queries(scene, intent)
             found_for_shot = len(linked)
             for connector in connectors:
+                report = availability.setdefault(connector.name, {
+                    "configured": True,
+                    "key_available": True,
+                    "attempted": False,
+                    "candidates_returned": 0,
+                    "skipped_reason": "",
+                    "error_reason": "",
+                })
+                if not report["configured"] or not report["key_available"]:
+                    if not report["skipped_reason"]:
+                        if not report["configured"]:
+                            report["skipped_reason"] = "provider disabled by configuration"
+                        elif not report["key_available"]:
+                            report["skipped_reason"] = "required API key is missing"
+                    continue
                 for topic in query_values:
                     result = discover_archival_media(project_root, DiscoveryQuery(
                         topic=topic, people=" ".join(map(str, intent.get("people", []))),
@@ -622,6 +764,12 @@ def discover_project_scene_media(
                         shot_id=shot_id, composition=str(intent.get("composition", "single_frame")),
                         content_reason=str(intent.get("content_reason", "")), limit_per_source=limit_per_source,
                     ), [connector], scene_id=scene_id)
+                    report["attempted"] = True
+                    report["candidates_returned"] = int(report.get("candidates_returned", 0)) + int(result.get("added_count", 0) or 0)
+                    if result.get("errors") and not report.get("error_reason"):
+                        first_error = next((item for item in result["errors"] if isinstance(item, dict) and item.get("error")), None)
+                        if first_error:
+                            report["error_reason"] = str(first_error.get("error", ""))
                     attempts.append({"scene_id": scene_id, "shot_id": shot_id, "provider": connector.name, "query": topic, "desired_media_type": intent.get("desired_media_type"), "added_count": result["added_count"], "filtered_count": result.get("filtered_count", 0), "duplicate_count": result.get("duplicate_count", 0), "errors": result["errors"]})
                     found_for_shot += int(result["added_count"])
                     if result["added_count"]:
@@ -632,16 +780,28 @@ def discover_project_scene_media(
                     break
             if not found_for_shot:
                 uncovered.append(shot_id)
+        if budget_exhausted:
+            break
     manifest = load_media_manifest(project_root)
     assets = [item for item in manifest.get("assets", []) if isinstance(item, dict)]
     result = {
         "version": 2, "created_at": datetime.now(UTC).isoformat(),
         "provider_order": [item.name for item in connectors], "providers_used": sorted(used_providers),
+        "provider_availability": availability,
         "scene_count": len(scenes), "asset_count": len(assets), "uncovered_shots": uncovered,
+        "timed_out": budget_exhausted,
+        "budget_seconds": budget_seconds,
         "attempts": attempts,
     }
     write_json(project_root / "manifests" / DISCOVERY_MANIFEST_NAME, result)
     if uncovered:
+        workflow_path = project_root / "manifests" / "workflow.json"
+        workflow = read_json(workflow_path) if workflow_path.exists() else {}
+        run_quality_mode = str(workflow.get("run_quality_mode", "sample_or_demo"))
+        if run_quality_mode == "sample_or_demo":
+            result["fallback_mode_used"] = True
+            write_json(project_root / "manifests" / DISCOVERY_MANIFEST_NAME, result)
+            return result
         errors = [f"{item['provider']}: {error['error']}" for item in attempts for error in item.get("errors", [])]
         detail = "; ".join(errors[-6:]) or "no relevant result"
         raise RuntimeError(f"All configured real media providers failed for shots {', '.join(uncovered)}: {detail}")

@@ -60,6 +60,7 @@ def write_project_manifest(project: ProductionProject) -> None:
         "topic": project.topic,
         "status": project.status.value,
         "created_at": project.created_at,
+        "workflow_type": "create_documentary",
         "paths": {
             "research": "research",
             "manifests": "manifests",
@@ -104,6 +105,7 @@ def write_research_manifests_if_missing(project: ProductionProject) -> None:
         "claims.json": {"version": 1, "claims": []},
         "workflow.json": {
             "version": 1,
+            "workflow_type": "create_documentary",
             "stage": "research",
             "target_duration_minutes": 10,
             "research_approved": False,
@@ -111,6 +113,10 @@ def write_research_manifests_if_missing(project: ProductionProject) -> None:
             "scenes_generated": False,
             "voiceover_generated": False,
             "video_rendered": False,
+            "reference_documentary_loaded": False,
+            "recycle_analysis_ready": False,
+            "recycle_verification_ready": False,
+            "recycle_reconstruction_ready": False,
         },
     }
     for filename, payload in manifests.items():

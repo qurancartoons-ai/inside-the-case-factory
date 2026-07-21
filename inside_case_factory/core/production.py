@@ -14,6 +14,7 @@ from inside_case_factory.core.autonomous_direction import DirectorEngine
 from inside_case_factory.core.producer import ProducerEngine
 from inside_case_factory.core.project import create_project, slugify
 from inside_case_factory.core.progress import write_progress_event
+from inside_case_factory.core.recycle import create_reference_documentary, prepare_recycle_documentary
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.research import (
     approved_claims,
@@ -130,6 +131,15 @@ PRODUCTION_STAGES = [
     "render_video",
 ]
 
+RUN_QUALITY_EVIDENCE_GRADE = "evidence_grade"
+RUN_QUALITY_SAMPLE_OR_DEMO = "sample_or_demo"
+RUN_QUALITY_MODES = {RUN_QUALITY_EVIDENCE_GRADE, RUN_QUALITY_SAMPLE_OR_DEMO}
+
+
+def normalize_run_quality_mode(value: Any) -> str:
+    mode = str(value or "").strip().casefold()
+    return mode if mode in RUN_QUALITY_MODES else RUN_QUALITY_SAMPLE_OR_DEMO
+
 
 @dataclass(frozen=True)
 class ProductionRequest:
@@ -138,6 +148,10 @@ class ProductionRequest:
     language: str = "English"
     autonomy_mode: str = "review"
     content_mode: str = "factual_documentary"
+    run_quality_mode: str = RUN_QUALITY_SAMPLE_OR_DEMO
+    workflow_type: str = "create_documentary"
+    reference_documentary_url: str = ""
+    reference_documentary_path: str = ""
 
 
 def infer_topic(prompt: str) -> str:
@@ -174,6 +188,9 @@ def append_activity(project_root: Path, message: str, *, stage: str = "") -> Non
 
 
 def write_plan(project_root: Path, request: ProductionRequest, topic: str) -> None:
+    stages = list(PRODUCTION_STAGES)
+    if request.workflow_type == "recycle_documentary":
+        stages = ["reference_documentary", "analysis", "verification", *stages]
     write_json(
         production_manifest_path(project_root, "production_plan.json"),
         {
@@ -184,6 +201,7 @@ def write_plan(project_root: Path, request: ProductionRequest, topic: str) -> No
             "language": request.language,
             "autonomy_mode": request.autonomy_mode,
             "content_mode": normalize_content_mode(request.content_mode),
+            "workflow_type": request.workflow_type,
             "publishing": "disabled",
             "stages": [
                 {
@@ -192,7 +210,7 @@ def write_plan(project_root: Path, request: ProductionRequest, topic: str) -> No
                     "requires_human_review": stage
                     in {"review_sources_claims", "approve_research", "review_edit_script", "approve_script", "review_media"},
                 }
-                for stage in PRODUCTION_STAGES
+                for stage in stages
             ],
         },
     )
@@ -225,8 +243,23 @@ def start_production(settings: Settings, request: ProductionRequest) -> dict[str
     workflow["language"] = request.language
     workflow["autonomy_mode"] = request.autonomy_mode
     workflow["content_mode"] = normalize_content_mode(request.content_mode)
+    workflow["run_quality_mode"] = normalize_run_quality_mode(request.run_quality_mode)
+    workflow["workflow_type"] = request.workflow_type
     save_manifest(project.root, "workflow.json", workflow)
-    write_json(production_manifest_path(project.root, "production_request.json"), request.__dict__ | {"topic": topic})
+    write_json(
+        production_manifest_path(project.root, "production_request.json"),
+        request.__dict__ | {"topic": topic, "run_quality_mode": normalize_run_quality_mode(request.run_quality_mode)},
+    )
+    if request.workflow_type == "recycle_documentary":
+        local_reference_path = Path(request.reference_documentary_path) if request.reference_documentary_path else None
+        if request.reference_documentary_url or local_reference_path is not None:
+            create_reference_documentary(
+                project.root,
+                source_url=request.reference_documentary_url,
+                local_path=local_reference_path,
+                original_filename=local_reference_path.name if local_reference_path is not None else "",
+            )
+            prepare_recycle_documentary(project.root)
     write_plan(project.root, request, topic)
     cost_estimate = estimate_reasoning_cost(reasoning_config_from_settings(settings.providers.get("reasoning", {})))
     write_json(production_manifest_path(project.root, "cost_estimate.json"), cost_estimate)
@@ -261,6 +294,67 @@ def _wait_for_approval(project_root: Path, state: dict[str, Any], gate: str) -> 
     _save_orchestration(project_root, state, status="waiting_for_approval", current_stage=gate, waiting_for=gate)
 
 
+def _gate_result(
+    *,
+    stage: str,
+    passed: bool,
+    run_quality_mode: str,
+    blocking_code: str = "",
+    blocking_reason: str = "",
+    missing_requirements: list[str] | None = None,
+    next_action: str = "",
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "passed": bool(passed),
+        "blocking_code": blocking_code,
+        "blocking_reason": blocking_reason,
+        "missing_requirements": list(missing_requirements or []),
+        "run_quality_mode": run_quality_mode,
+        "next_action": next_action,
+        "evaluated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _persist_gate_result(project_root: Path, gate: dict[str, Any]) -> None:
+    path = production_manifest_path(project_root, "quality_cycle.json")
+    existing = read_json(path) if path.exists() else {"version": 1, "attempts": []}
+    existing.setdefault("attempts", [])
+    gates = existing.setdefault("foundation_gates", [])
+    if isinstance(gates, list):
+        gates.append(gate)
+    existing["latest_foundation_gate"] = gate
+    write_json(path, existing)
+
+
+def _set_run_outcome(workflow: dict[str, Any], status: str, run_quality_mode: str) -> None:
+    workflow["run_quality_mode"] = run_quality_mode
+    workflow["run_outcome_status"] = status
+    workflow["is_evidence_grade"] = run_quality_mode == RUN_QUALITY_EVIDENCE_GRADE
+
+
+def _block_for_gate(
+    project_root: Path,
+    state: dict[str, Any],
+    *,
+    stage: str,
+    gate: dict[str, Any],
+    orchestration_status: str,
+    plan_stage: str,
+) -> None:
+    _persist_gate_result(project_root, gate)
+    update_plan_stage(project_root, plan_stage, "blocked", gate.get("blocking_reason", ""))
+    append_activity(project_root, gate.get("blocking_reason", "Blocking gate failed."), stage=stage)
+    _save_orchestration(
+        project_root,
+        state,
+        status=orchestration_status,
+        current_stage=stage,
+        last_error=gate.get("blocking_reason", ""),
+        latest_foundation_gate=gate,
+    )
+
+
 def run_production(settings: Settings, project_root: Path) -> None:
     """Resume a production idempotently until the next approval gate or completion."""
     lock_path = production_manifest_path(project_root, ".orchestration.lock")
@@ -293,11 +387,33 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
     workflow = load_manifest(project_root, "workflow.json")
     plan = read_json(production_manifest_path(project_root, "production_plan.json"))
     request = read_json(production_manifest_path(project_root, "production_request.json"))
+    run_quality_mode = normalize_run_quality_mode(
+        request.get("run_quality_mode")
+        or workflow.get("run_quality_mode")
+        or settings.pipeline.get("run_quality_mode")
+    )
+    workflow["run_quality_mode"] = run_quality_mode
+    save_manifest(project_root, "workflow.json", workflow)
     topic = str(plan.get("topic", project_root.name))
     reasoning_provider = reasoning_provider_from_settings(settings.providers.get("reasoning", {}))
     state = _orchestration_state(project_root)
     state["run_count"] = int(state.get("run_count", 0)) + 1
     _save_orchestration(project_root, state, status="running", waiting_for="", last_error="")
+
+    if workflow.get("workflow_type") == "recycle_documentary" and not workflow.get("recycle_analysis_ready"):
+        try:
+            append_activity(project_root, "Preparing reference documentary blueprint.", stage="analysis")
+            update_plan_stage(project_root, "reference_documentary", "completed")
+            prepare_recycle_documentary(project_root)
+            workflow = load_manifest(project_root, "workflow.json")
+            update_plan_stage(project_root, "analysis", "completed")
+            update_plan_stage(project_root, "verification", "completed")
+            _complete_stage(project_root, state, "analysis")
+        except RuntimeError as error:
+            append_activity(project_root, f"Recycle engine blocked: {error}", stage="analysis")
+            _save_orchestration(project_root, state, status="blocked", current_stage="analysis", last_error=str(error))
+            update_plan_stage(project_root, "analysis", "blocked", str(error))
+            return
 
     research_plan_path = project_root / "manifests" / "research_plan.json"
     if not research_plan_path.exists():
@@ -340,11 +456,98 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
                     )
                     _save_orchestration(project_root, state, status="blocked", current_stage="research", last_error=str(result.get("message", "")))
                     return
+        if run_quality_mode == RUN_QUALITY_EVIDENCE_GRADE:
+            gate = _gate_result(
+                stage="research",
+                passed=False,
+                run_quality_mode=run_quality_mode,
+                blocking_code="missing_research_approval",
+                blocking_reason="Evidence-grade run blocked: research approval is required.",
+                missing_requirements=["Approved research package"],
+                next_action="Approve research with at least one usable source and linked approved claim.",
+            )
+            workflow = load_manifest(project_root, "workflow.json")
+            _set_run_outcome(workflow, "blocked_missing_research", run_quality_mode)
+            save_manifest(project_root, "workflow.json", workflow)
+            _block_for_gate(
+                project_root,
+                state,
+                stage="research",
+                gate=gate,
+                orchestration_status="blocked_missing_research",
+                plan_stage="approve_research",
+            )
+            return
         append_activity(project_root, "Research complete. Waiting for definitive research approval.", stage="approve_research")
         update_plan_stage(project_root, "approve_research", "waiting_for_review")
         _wait_for_approval(project_root, state, "research_approval")
         return
     _complete_stage(project_root, state, "research_approval")
+
+    if run_quality_mode == RUN_QUALITY_EVIDENCE_GRADE:
+        research = load_manifest(project_root, "research.json")
+        approved_source_rows = approved_sources(project_root)
+        usable_sources = [
+            source for source in approved_source_rows
+            if isinstance(source, dict)
+            and str(source.get("relevance_status", "relevant")) != "irrelevant"
+            and bool(source.get("url") or source.get("publisher") or source.get("title"))
+        ]
+        research_missing: list[str] = []
+        if str(research.get("status", "")).casefold() not in {"completed", "approved"}:
+            research_missing.append("Research status must be completed")
+        if not usable_sources:
+            research_missing.append("At least one usable approved source")
+        if research_missing:
+            gate = _gate_result(
+                stage="research",
+                passed=False,
+                run_quality_mode=run_quality_mode,
+                blocking_code="missing_research_foundation",
+                blocking_reason="Evidence-grade run blocked: research foundation is incomplete.",
+                missing_requirements=research_missing,
+                next_action="Complete research and approve at least one relevant usable source.",
+            )
+            workflow = load_manifest(project_root, "workflow.json")
+            _set_run_outcome(workflow, "blocked_missing_research", run_quality_mode)
+            save_manifest(project_root, "workflow.json", workflow)
+            _block_for_gate(
+                project_root,
+                state,
+                stage="research",
+                gate=gate,
+                orchestration_status="blocked_missing_research",
+                plan_stage="research",
+            )
+            return
+
+        usable_source_ids = {str(source.get("id")) for source in usable_sources if str(source.get("id", "")).strip()}
+        linked_claims = [
+            claim for claim in approved_claims(project_root)
+            if isinstance(claim, dict) and any(str(source_id) in usable_source_ids for source_id in claim.get("source_ids", []))
+        ]
+        if not linked_claims:
+            gate = _gate_result(
+                stage="claims",
+                passed=False,
+                run_quality_mode=run_quality_mode,
+                blocking_code="missing_approved_claims",
+                blocking_reason="Evidence-grade run blocked: no approved source-linked claims were found.",
+                missing_requirements=["At least one approved claim linked to usable approved sources"],
+                next_action="Approve supported claims that reference approved relevant sources.",
+            )
+            workflow = load_manifest(project_root, "workflow.json")
+            _set_run_outcome(workflow, "blocked_missing_claims", run_quality_mode)
+            save_manifest(project_root, "workflow.json", workflow)
+            _block_for_gate(
+                project_root,
+                state,
+                stage="claims",
+                gate=gate,
+                orchestration_status="blocked_missing_claims",
+                plan_stage="generate_script",
+            )
+            return
 
     script_path = project_root / "manifests" / "script.json"
     if not script_path.exists() or not read_json(script_path).get("narration"):
@@ -413,9 +616,6 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
     if not (project_root / "manifests" / "producer_blueprint.json").exists():
         ProducerEngine().plan(project_root, scenes)
         update_plan_stage(project_root, "producer", "completed")
-    if not (project_root / "manifests" / "director_plan.json").exists():
-        DirectorEngine().plan(project_root, scenes, width=1920, height=1080)
-        update_plan_stage(project_root, "director", "completed")
 
     if "discover_media" not in state.get("completed_stages", []):
         _save_orchestration(project_root, state, status="running", current_stage="discover_media")
@@ -430,13 +630,45 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
 
     media = read_json(project_root / "manifests" / "media_sources.json")
     assets = media.get("assets", []) if isinstance(media, dict) else []
+    eligible_assets = [item for item in assets if isinstance(item, dict) and bool(item.get("review_eligible"))]
+    if run_quality_mode == RUN_QUALITY_EVIDENCE_GRADE and not eligible_assets:
+        gate = _gate_result(
+            stage="media",
+            passed=False,
+            run_quality_mode=run_quality_mode,
+            blocking_code="missing_eligible_media",
+            blocking_reason="Evidence-grade run blocked: no eligible media assets are available.",
+            missing_requirements=["At least one eligible media asset before director finalization"],
+            next_action="Discover and approve real media assets that pass relevance and eligibility checks.",
+        )
+        workflow = load_manifest(project_root, "workflow.json")
+        _set_run_outcome(workflow, "blocked_missing_media", run_quality_mode)
+        save_manifest(project_root, "workflow.json", workflow)
+        _block_for_gate(
+            project_root,
+            state,
+            stage="media",
+            gate=gate,
+            orchestration_status="blocked_missing_media",
+            plan_stage="discover_media",
+        )
+        return
+
+    if not (project_root / "manifests" / "director_plan.json").exists():
+        DirectorEngine().plan(project_root, scenes, width=1920, height=1080)
+        update_plan_stage(project_root, "director", "completed")
+
     statuses = [str(asset.get("review_status", "pending_review")) for asset in assets if isinstance(asset, dict)]
-    if not statuses or "pending_review" in statuses or "approved" not in statuses:
+    if run_quality_mode == RUN_QUALITY_SAMPLE_OR_DEMO and not statuses:
+        append_activity(project_root, "Demo mode: media review skipped because no candidate assets were discovered.", stage="review_media")
+        _complete_stage(project_root, state, "media_approval")
+    elif not statuses or "pending_review" in statuses or "approved" not in statuses:
         update_plan_stage(project_root, "review_media", "waiting_for_review")
         append_activity(project_root, "Media discovery complete. Waiting for definitive media review.", stage="review_media")
         _wait_for_approval(project_root, state, "media_approval")
         return
-    _complete_stage(project_root, state, "media_approval")
+    else:
+        _complete_stage(project_root, state, "media_approval")
 
     final_video = project_root / "exports" / "final_video.mp4"
     if not final_video.exists():
@@ -448,7 +680,11 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
     update_plan_stage(project_root, "generate_voiceover", "completed")
     update_plan_stage(project_root, "render_video", "completed")
     _complete_stage(project_root, state, "render_video")
-    _save_orchestration(project_root, state, status="completed", current_stage="completed", waiting_for="", last_error="")
+    completion_status = "evidence_grade_completed" if run_quality_mode == RUN_QUALITY_EVIDENCE_GRADE else "demo_completed"
+    _save_orchestration(project_root, state, status=completion_status, current_stage="completed", waiting_for="", last_error="")
+    workflow = load_manifest(project_root, "workflow.json")
+    _set_run_outcome(workflow, completion_status, run_quality_mode)
+    save_manifest(project_root, "workflow.json", workflow)
     append_activity(project_root, "Production completed end to end.", stage="render_video")
 
 

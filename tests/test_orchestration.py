@@ -26,7 +26,7 @@ def _settings(root: Path) -> Settings:
 def _production_project(root: Path) -> Path:
     project = create_project(root / "projects", "Resumable Case")
     write_json(project.root / "manifests" / "production_request.json", {
-        "prompt": "A factual case", "target_duration_minutes": 5, "language": "English"
+        "prompt": "A factual case", "target_duration_minutes": 5, "language": "English", "run_quality_mode": "sample_or_demo"
     })
     write_json(project.root / "manifests" / "production_plan.json", {
         "topic": "Resumable Case", "autonomy_mode": "automatic", "stages": []
@@ -79,7 +79,15 @@ class OrchestrationTests(unittest.TestCase):
                 "version": 1, "scenes": [{"id": "s01", "narration": "Approved narration."}]
             })
             write_json(project_root / "manifests" / "media_sources.json", {
-                "version": 1, "assets": [{"id": "m1", "review_status": "approved"}]
+                "version": 1,
+                "assets": [{
+                    "id": "m1",
+                    "review_status": "approved",
+                    "review_eligible": True,
+                    "relevance_score": 0.9,
+                    "source_url": "https://example.com/m1",
+                    "project_slug": project_root.name,
+                }],
             })
             write_json(project_root / "manifests" / "orchestration.json", {
                 "version": 1,
@@ -97,7 +105,9 @@ class OrchestrationTests(unittest.TestCase):
                 output.parent.mkdir(parents=True, exist_ok=True)
                 output.write_bytes(b"video")
 
-            with patch("inside_case_factory.core.production.generate_video_project", side_effect=RuntimeError("crash")):
+            with patch("inside_case_factory.core.production.DirectorEngine.plan", return_value={"scenes": [], "director": {"status": "ready"}}), patch(
+                "inside_case_factory.core.production.generate_video_project", side_effect=RuntimeError("crash")
+            ):
                 with self.assertRaisesRegex(RuntimeError, "crash"):
                     run_production(_settings(root), project_root)
             interrupted = read_json(project_root / "manifests" / "orchestration.json")
@@ -106,7 +116,9 @@ class OrchestrationTests(unittest.TestCase):
 
             with patch("inside_case_factory.core.production.generate_video_project", side_effect=successful_render) as render, patch(
                 "inside_case_factory.core.production.generate_scenes"
-            ) as scenes, patch("inside_case_factory.core.production.discover_archival_media") as discovery:
+            ) as scenes, patch("inside_case_factory.core.production.discover_archival_media") as discovery, patch(
+                "inside_case_factory.core.production.DirectorEngine.plan", return_value={"scenes": [], "director": {"status": "ready"}}
+            ):
                 run_production(_settings(root), project_root)
                 run_production(_settings(root), project_root)
 
@@ -114,8 +126,150 @@ class OrchestrationTests(unittest.TestCase):
             self.assertEqual(render.call_count, 1)
             scenes.assert_not_called()
             discovery.assert_not_called()
-            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["status"], "demo_completed")
             self.assertIn("render_video", completed["completed_stages"])
+
+    def test_evidence_grade_blocks_when_research_foundation_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = _production_project(root)
+            request = read_json(project_root / "manifests" / "production_request.json")
+            request["run_quality_mode"] = "evidence_grade"
+            write_json(project_root / "manifests" / "production_request.json", request)
+            workflow = read_json(project_root / "manifests" / "workflow.json")
+            workflow["research_approved"] = True
+            write_json(project_root / "manifests" / "workflow.json", workflow)
+            write_json(project_root / "manifests" / "research.json", {"status": "not_started"})
+            write_json(project_root / "manifests" / "sources.json", {"sources": []})
+            write_json(project_root / "manifests" / "claims.json", {"claims": []})
+
+            run_production(_settings(root), project_root)
+
+            state = read_json(project_root / "manifests" / "orchestration.json")
+            quality = read_json(project_root / "manifests" / "quality_cycle.json")
+            self.assertEqual(state["status"], "blocked_missing_research")
+            self.assertEqual(quality["latest_foundation_gate"]["stage"], "research")
+            self.assertFalse(quality["latest_foundation_gate"]["passed"])
+
+    def test_evidence_grade_blocks_when_no_approved_source_linked_claims_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = _production_project(root)
+            request = read_json(project_root / "manifests" / "production_request.json")
+            request["run_quality_mode"] = "evidence_grade"
+            write_json(project_root / "manifests" / "production_request.json", request)
+            workflow = read_json(project_root / "manifests" / "workflow.json")
+            workflow["research_approved"] = True
+            write_json(project_root / "manifests" / "workflow.json", workflow)
+            write_json(project_root / "manifests" / "research.json", {"status": "completed"})
+            write_json(project_root / "manifests" / "sources.json", {
+                "sources": [{"id": "s1", "review_status": "approved", "relevance_status": "relevant", "url": "https://example.com/source"}]
+            })
+            write_json(project_root / "manifests" / "claims.json", {
+                "claims": [{"id": "c1", "review_status": "approved", "source_ids": ["missing-source"]}]
+            })
+
+            run_production(_settings(root), project_root)
+
+            state = read_json(project_root / "manifests" / "orchestration.json")
+            quality = read_json(project_root / "manifests" / "quality_cycle.json")
+            self.assertEqual(state["status"], "blocked_missing_claims")
+            self.assertEqual(quality["latest_foundation_gate"]["stage"], "claims")
+            self.assertEqual(quality["latest_foundation_gate"]["blocking_code"], "missing_approved_claims")
+
+    def test_evidence_grade_blocks_when_no_eligible_media_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = _production_project(root)
+            request = read_json(project_root / "manifests" / "production_request.json")
+            request["run_quality_mode"] = "evidence_grade"
+            write_json(project_root / "manifests" / "production_request.json", request)
+            workflow = read_json(project_root / "manifests" / "workflow.json")
+            workflow.update({"research_approved": True, "script_approved": True, "scenes_generated": True})
+            write_json(project_root / "manifests" / "workflow.json", workflow)
+            write_json(project_root / "manifests" / "research.json", {"status": "completed"})
+            write_json(project_root / "manifests" / "sources.json", {
+                "sources": [{"id": "s1", "review_status": "approved", "relevance_status": "relevant", "url": "https://example.com/source"}]
+            })
+            write_json(project_root / "manifests" / "claims.json", {
+                "claims": [{"id": "c1", "review_status": "approved", "source_ids": ["s1"]}]
+            })
+            write_json(project_root / "manifests" / "research_plan.json", {"version": 1})
+            write_json(project_root / "manifests" / "script.json", {"version": 1, "status": "approved", "narration": "Approved"})
+            write_json(project_root / "manifests" / "scenes.json", {"version": 1, "scenes": [{"id": "s01", "narration": "Approved"}]})
+            write_json(project_root / "manifests" / "media_sources.json", {"version": 1, "assets": []})
+
+            with patch("inside_case_factory.core.production.discover_project_scene_media"):
+                run_production(_settings(root), project_root)
+
+            state = read_json(project_root / "manifests" / "orchestration.json")
+            quality = read_json(project_root / "manifests" / "quality_cycle.json")
+            self.assertEqual(state["status"], "blocked_missing_media")
+            self.assertEqual(quality["latest_foundation_gate"]["stage"], "media")
+
+    def test_sample_mode_allows_demo_completion_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = _production_project(root)
+            workflow = read_json(project_root / "manifests" / "workflow.json")
+            workflow.update({"research_approved": True, "script_approved": True, "scenes_generated": True})
+            write_json(project_root / "manifests" / "workflow.json", workflow)
+            write_json(project_root / "manifests" / "research_plan.json", {"version": 1})
+            write_json(project_root / "manifests" / "research.json", {"status": "completed"})
+            write_json(project_root / "manifests" / "sources.json", {"sources": [{"id": "s1", "review_status": "approved", "relevance_status": "relevant", "url": "https://example.com/source"}]})
+            write_json(project_root / "manifests" / "claims.json", {"claims": [{"id": "c1", "review_status": "approved", "source_ids": ["s1"]}]})
+            write_json(project_root / "manifests" / "script.json", {"version": 1, "title": "Demo", "status": "approved", "narration": "Approved narration."})
+            write_json(project_root / "manifests" / "scenes.json", {"version": 1, "scenes": [{"id": "s01", "narration": "Approved narration."}]})
+            write_json(project_root / "manifests" / "media_sources.json", {"version": 1, "assets": []})
+
+            def successful_render(*args: object, **kwargs: object) -> None:
+                output = project_root / "exports" / "final_video.mp4"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"video")
+
+            with patch("inside_case_factory.core.production.discover_project_scene_media"), patch(
+                "inside_case_factory.core.production.generate_video_project", side_effect=successful_render
+            ):
+                run_production(_settings(root), project_root)
+
+            state = read_json(project_root / "manifests" / "orchestration.json")
+            workflow = read_json(project_root / "manifests" / "workflow.json")
+            self.assertEqual(state["status"], "demo_completed")
+            self.assertEqual(workflow["run_outcome_status"], "demo_completed")
+            self.assertNotEqual(workflow["run_outcome_status"], "evidence_grade_completed")
+
+    def test_evidence_grade_valid_foundation_advances_to_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_root = _production_project(root)
+            request = read_json(project_root / "manifests" / "production_request.json")
+            request["run_quality_mode"] = "evidence_grade"
+            write_json(project_root / "manifests" / "production_request.json", request)
+            workflow = read_json(project_root / "manifests" / "workflow.json")
+            workflow.update({"research_approved": True, "script_approved": True, "scenes_generated": True})
+            write_json(project_root / "manifests" / "workflow.json", workflow)
+            write_json(project_root / "manifests" / "research_plan.json", {"version": 1})
+            write_json(project_root / "manifests" / "research.json", {"status": "completed"})
+            write_json(project_root / "manifests" / "sources.json", {"sources": [{"id": "s1", "review_status": "approved", "relevance_status": "relevant", "url": "https://example.com/source"}]})
+            write_json(project_root / "manifests" / "claims.json", {"claims": [{"id": "c1", "review_status": "approved", "source_ids": ["s1"]}]})
+            write_json(project_root / "manifests" / "script.json", {"version": 1, "title": "Evidence", "status": "approved", "narration": "Approved narration."})
+            write_json(project_root / "manifests" / "scenes.json", {"version": 1, "scenes": [{"id": "s01", "narration": "Approved narration."}]})
+            write_json(project_root / "manifests" / "media_sources.json", {"version": 1, "assets": [{"id": "m1", "review_status": "approved", "review_eligible": True}]})
+
+            def successful_render(*args: object, **kwargs: object) -> None:
+                output = project_root / "exports" / "final_video.mp4"
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"video")
+
+            with patch("inside_case_factory.core.production.discover_project_scene_media"), patch(
+                "inside_case_factory.core.production.generate_video_project", side_effect=successful_render
+            ), patch("inside_case_factory.core.production.DirectorEngine.plan", return_value={"scenes": [], "director": {"status": "ready"}}):
+                run_production(_settings(root), project_root)
+
+            state = read_json(project_root / "manifests" / "orchestration.json")
+            workflow = read_json(project_root / "manifests" / "workflow.json")
+            self.assertEqual(state["status"], "evidence_grade_completed")
+            self.assertEqual(workflow["run_outcome_status"], "evidence_grade_completed")
 
 
 if __name__ == "__main__":

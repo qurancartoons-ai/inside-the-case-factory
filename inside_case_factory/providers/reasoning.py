@@ -242,6 +242,8 @@ class OpenAIReasoningProvider(ReasoningProvider):
                     "Detect every materially involved country and plan research in that country's most relevant language before considering the user's language.",
                     "Prioritize official records, courts, police, government and parliamentary reports; then national quality media; then international media; local media; and Dutch sources only as supplementary context.",
                     "Return specific research questions that must be answered before scripting.",
+                    "If workflow_type is recycle_documentary, treat the reference documentary as a narrative blueprint only, never as a factual source.",
+                    "If recycle_blueprint is present, independently verify each major event, correct unsupported claims, and fill missing context before scripting.",
                     "Do not invent facts.",
                 ],
             },
@@ -819,6 +821,7 @@ class StructuredTextReasoningProvider(OpenAIReasoningProvider):
 
 def fallback_research_plan(request: dict[str, Any], message: str = "") -> dict[str, Any]:
     prompt = compact_whitespace(str(request.get("prompt") or request.get("topic") or ""))
+    blueprint = request.get("recycle_blueprint", {}) if isinstance(request.get("recycle_blueprint"), dict) else {}
     return {
         "version": 1,
         "provider": "local_fallback",
@@ -829,12 +832,12 @@ def fallback_research_plan(request: dict[str, Any], message: str = "") -> dict[s
         "requested_focus": prompt,
         "target_duration_minutes": int(request.get("target_duration_minutes", 10) or 10),
         "video_language": str(request.get("language", "English")),
-        "people": [],
-        "locations": [],
-        "dates": [],
-        "events": [],
+        "people": [str(item) for item in blueprint.get("people", []) if str(item).strip()],
+        "locations": [str(item) for item in blueprint.get("places", []) if str(item).strip()],
+        "dates": [str(item.get("date", "")) for item in blueprint.get("timeline", []) if isinstance(item, dict) and str(item.get("date", "")).strip()],
+        "events": [str(item) for item in blueprint.get("historical_events", []) if str(item).strip()],
         "exclusions": [],
-        "factual_questions": [],
+        "factual_questions": [str(item) for item in blueprint.get("verification_queries", []) if str(item).strip()],
         "involved_countries": [],
         "relevant_languages": [],
         "source_priorities": [],

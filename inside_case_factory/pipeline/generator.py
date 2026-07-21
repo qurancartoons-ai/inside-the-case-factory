@@ -17,6 +17,7 @@ from inside_case_factory.core.producer import ProducerEngine
 from inside_case_factory.core.media import ensure_media_manifest
 from inside_case_factory.core.models import ProductionProject, ReviewStatus
 from inside_case_factory.core.project import create_project
+from inside_case_factory.core.research import script_content_hash
 from inside_case_factory.pipeline.sample_content import build_sample_script, build_visual_prompt
 from inside_case_factory.providers.elevenlabs import (
     ElevenLabsVoiceOverProvider,
@@ -488,8 +489,56 @@ def _approved_project(project_root: Path) -> tuple[ProductionProject, dict[str, 
     script = read_json(manifests / "script.json")
     scene_manifest = read_json(manifests / "scenes.json")
     media = read_json(manifests / "media_sources.json")
-    if not workflow.get("script_approved") or script.get("status") != "approved":
+    current_script_hash = script_content_hash(script if isinstance(script, dict) else {})
+    script_fingerprint = script.get("approval_fingerprint") if isinstance(script.get("approval_fingerprint"), dict) else {}
+    workflow_fingerprint = workflow.get("script_approval_fingerprint") if isinstance(workflow.get("script_approval_fingerprint"), dict) else {}
+    fingerprint = script_fingerprint or workflow_fingerprint
+
+    has_explicit_approval = bool(workflow.get("script_approved")) and str(script.get("status", "")) == "approved"
+    approved_hash = str(fingerprint.get("script_hash", ""))
+    approved_at = str(fingerprint.get("approved_at", ""))
+    approval_source = str(fingerprint.get("approval_source", ""))
+    approval_valid = bool(fingerprint.get("approval_valid", False))
+    reusable_approval = bool(
+        approved_hash
+        and approved_hash == current_script_hash
+        and approved_at
+        and approval_source
+        and approval_valid
+    )
+
+    if has_explicit_approval and not fingerprint:
+        synthesized = {
+            "script_hash": current_script_hash,
+            "approved_at": str(script.get("approved_at") or workflow.get("script_approved_at") or ""),
+            "approval_source": "legacy_existing_approval",
+            "approval_valid": True,
+        }
+        script["approval_fingerprint"] = synthesized
+        workflow["script_approval_fingerprint"] = synthesized
+        write_json(manifests / "script.json", script)
+        write_json(manifests / "workflow.json", workflow)
+        fingerprint = synthesized
+        reusable_approval = True
+
+    if has_explicit_approval and approved_hash and approved_hash != current_script_hash:
+        updated = {**(fingerprint or {}), "approval_valid": False}
+        script["approval_fingerprint"] = updated
+        workflow["script_approval_fingerprint"] = updated
+        write_json(manifests / "script.json", script)
+        write_json(manifests / "workflow.json", workflow)
         raise RuntimeError("The factual script must be explicitly approved before rendering.")
+
+    if not has_explicit_approval:
+        if reusable_approval:
+            workflow["script_approved"] = True
+            script["status"] = "approved"
+            script["approval_fingerprint"] = fingerprint
+            workflow["script_approval_fingerprint"] = fingerprint
+            write_json(manifests / "script.json", script)
+            write_json(manifests / "workflow.json", workflow)
+        else:
+            raise RuntimeError("The factual script must be explicitly approved before rendering.")
     raw_scenes = scene_manifest.get("scenes", [])
     if not workflow.get("scenes_generated") or not isinstance(raw_scenes, list) or not raw_scenes:
         raise RuntimeError("Approved factual scenes are required before rendering.")
@@ -509,6 +558,31 @@ def _approved_project(project_root: Path) -> tuple[ProductionProject, dict[str, 
     return project, script, [scene for scene in raw_scenes if isinstance(scene, dict)]
 
 
+def _append_rerender_history(
+    manifests_dir: Path,
+    *,
+    iteration: int,
+    reason: str,
+    changed_artifacts: list[str],
+    quality_delta: float | None,
+) -> None:
+    cycle_path = manifests_dir / "quality_cycle.json"
+    cycle = read_json(cycle_path) if cycle_path.exists() else {"version": 1, "attempts": []}
+    history = cycle.setdefault("rerender_history", [])
+    if not isinstance(history, list):
+        history = []
+        cycle["rerender_history"] = history
+    history.append(
+        {
+            "iteration": int(iteration),
+            "reason": str(reason),
+            "changed_artifacts": [str(item) for item in changed_artifacts],
+            "quality_delta": None if quality_delta is None else round(float(quality_delta), 2),
+        }
+    )
+    write_json(cycle_path, cycle)
+
+
 def generate_video_project(
     settings: Settings,
     topic: str,
@@ -517,11 +591,14 @@ def generate_video_project(
     existing_project_root: Path | None = None,
     _quality_render_number: int | None = None,
     _previous_criticism: dict[str, object] | None = None,
+    _require_approved_entry: bool | None = None,
 ) -> GeneratedVideo:
     width = int(settings.video.get("width", 1920))
     height = int(settings.video.get("height", 1080))
     fps = int(settings.video.get("fps", 24))
     transition = 0.75
+
+    require_approved_entry = (existing_project_root is not None) if _require_approved_entry is None else bool(_require_approved_entry)
 
     if existing_project_root is None:
         _progress("creating project workspace")
@@ -529,8 +606,24 @@ def generate_video_project(
         script = build_sample_script(topic)
         source_scenes: list[dict[str, object]] | None = None
     else:
-        _progress("loading approved factual project")
-        project, script, source_scenes = _approved_project(existing_project_root)
+        if require_approved_entry:
+            _progress("loading approved factual project")
+            project, script, source_scenes = _approved_project(existing_project_root)
+        else:
+            _progress("loading existing sample/demo project")
+            project_data = read_json((existing_project_root / "manifests" / "project.json"))
+            project = ProductionProject(
+                slug=str(project_data.get("slug", existing_project_root.name)),
+                topic=str(project_data.get("topic", topic)),
+                root=existing_project_root,
+                status=ReviewStatus.DRAFT,
+            )
+            script = read_json(existing_project_root / "manifests" / "script.json")
+            scene_manifest = read_json(existing_project_root / "manifests" / "scenes.json")
+            raw_scenes = scene_manifest.get("scenes", [])
+            source_scenes = [scene for scene in raw_scenes if isinstance(scene, dict)]
+            if not source_scenes:
+                source_scenes = None
     manifests_dir = project.root / "manifests"
     provider_router = ProductionProviderRouter.from_settings(project.root, settings.providers)
     provider_router.selection_manifest([
@@ -794,10 +887,31 @@ def generate_video_project(
     director_report["rerender_reason"] = decision["reason"]
     write_json(manifests_dir / "director_report.json", director_report)
     if decision["rerender_required"]:
+        cycle = read_json(manifests_dir / "quality_cycle.json")
+        attempts = cycle.get("attempts", []) if isinstance(cycle, dict) else []
+        current_score = float(combined_report.get("overall_score", 0.0))
+        previous_score = float(attempts[-2].get("overall_score", 0.0)) if isinstance(attempts, list) and len(attempts) >= 2 else None
+        quality_delta = None if previous_score is None else current_score - previous_score
+        _append_rerender_history(
+            manifests_dir,
+            iteration=_quality_render_number + 1,
+            reason=str(decision.get("reason", "")),
+            changed_artifacts=[
+                "manifests/producer_blueprint.json",
+                "manifests/director_plan.json",
+                "manifests/director_report.json",
+                "manifests/render_plan.json",
+                "manifests/critic_report.json",
+                "manifests/producer_report.json",
+                "exports/final_video.mp4",
+            ],
+            quality_delta=quality_delta,
+        )
         _progress(decision["reason"])
         return generate_video_project(
             settings, topic, slug, existing_project_root=existing_project_root or project.root,
             _quality_render_number=_quality_render_number + 1, _previous_criticism=combined_report,
+            _require_approved_entry=require_approved_entry,
         )
     if existing_project_root is not None:
         workflow = read_json(manifests_dir / "workflow.json")

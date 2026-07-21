@@ -86,6 +86,12 @@ require_approved_rights = true
 preserve_claim_provenance = true
 paid_generation_enabled = false
 
+[media.providers.pexels]
+enabled = false
+api_key_env = "PEXELS_API_KEY"
+timeout_seconds = 20
+per_query_limit = 6
+
 [sound_design]
 enabled = true
 optional = true
