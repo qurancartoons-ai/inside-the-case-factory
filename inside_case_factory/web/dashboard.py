@@ -703,6 +703,9 @@ class DashboardApp:
             current_stage="Onderwerp",
             latest_user_input=prompt,
         )
+        if workflow_type == "recycle_documentary":
+            write_progress_event(project.root, "started", "recycle", "Recycle-documentaire staat klaar voor productie")
+            Thread(target=self.resume_managed_production, args=(project.root,), daemon=True).start()
         return self.redirect(f"/projects/{project.slug}/production")
 
     def persist_project_checkpoint(self, project_root: Path, *, current_stage: str, latest_user_input: str) -> None:

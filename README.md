@@ -201,6 +201,8 @@ Provider behavior:
 
 The project page shows the production plan, current activity, recent activity log, and stage status. Manual source, claim, script, scene, and media controls are still available under `Advanced`.
 
+The **Recycle Documentary** workflow accepts a YouTube/Vimeo link or local reference file, analyzes the complete timeline in bounded windows, and reuses only its narrative structure. It records measurable transcript, temporal, and visual coverage and requires independent sources for factual claims. See [docs/RECYCLE_DOCUMENTARY.md](docs/RECYCLE_DOCUMENTARY.md) for prerequisites, safety rules, and generated manifests.
+
 ### Factual Research and Script Workflow
 
 Real documentary projects use an approval-gated factual workflow. Do not use the legacy one-step sample generator for factual cases.

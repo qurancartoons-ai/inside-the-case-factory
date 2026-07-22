@@ -407,7 +407,7 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
             prepare_recycle_documentary(project_root)
             workflow = load_manifest(project_root, "workflow.json")
             update_plan_stage(project_root, "analysis", "completed")
-            update_plan_stage(project_root, "verification", "completed")
+            update_plan_stage(project_root, "verification", "pending", "Independent source verification is required before reconstruction.")
             _complete_stage(project_root, state, "analysis")
         except RuntimeError as error:
             append_activity(project_root, f"Recycle engine blocked: {error}", stage="analysis")

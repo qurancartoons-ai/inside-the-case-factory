@@ -238,6 +238,94 @@ def _download_caption_track(base_url: str) -> list[dict[str, Any]]:
     return transcript
 
 
+def _parse_vtt_timestamp(value: str) -> float | None:
+    cleaned = value.strip().replace(",", ".")
+    parts = cleaned.split(":")
+    if len(parts) not in {2, 3}:
+        return None
+    try:
+        seconds = float(parts[-1])
+        minutes = int(parts[-2])
+        hours = int(parts[-3]) if len(parts) == 3 else 0
+    except ValueError:
+        return None
+    return hours * 3600.0 + minutes * 60.0 + seconds
+
+
+def _parse_vtt(text: str) -> list[dict[str, Any]]:
+    transcript: list[dict[str, Any]] = []
+    timing: tuple[float, float] | None = None
+    lines: list[str] = []
+
+    def flush() -> None:
+        nonlocal timing, lines
+        if timing is None:
+            lines = []
+            return
+        content = compact_whitespace(
+            unescape(re.sub(r"<[^>]+>", " ", " ".join(lines)))
+        )
+        if content and (not transcript or transcript[-1]["text"] != content):
+            start, end = timing
+            transcript.append(
+                {
+                    "id": f"seg{len(transcript) + 1:03}",
+                    "start": round(start, 3),
+                    "duration": round(max(0.2, end - start), 3),
+                    "end": round(max(start + 0.2, end), 3),
+                    "text": content,
+                    "speaker": "",
+                }
+            )
+        timing = None
+        lines = []
+
+    for raw_line in [*text.splitlines(), ""]:
+        line = raw_line.strip()
+        if "-->" in line:
+            flush()
+            start_text, end_text = [part.strip().split()[0] for part in line.split("-->", 1)]
+            start = _parse_vtt_timestamp(start_text)
+            end = _parse_vtt_timestamp(end_text)
+            timing = (start, end) if start is not None and end is not None and end > start else None
+        elif not line:
+            flush()
+        elif timing is not None and not line.startswith(("WEBVTT", "NOTE", "Kind:", "Language:")):
+            lines.append(line)
+    return transcript
+
+
+def _download_youtube_transcript(source_url: str, storage_dir: Path) -> tuple[list[dict[str, Any]], str]:
+    yt_dlp = shutil.which("yt-dlp")
+    if yt_dlp is None:
+        return [], ""
+    output_template = storage_dir / "captions"
+    command = [
+        yt_dlp,
+        "--no-playlist",
+        "--skip-download",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs",
+        "nl.*,en.*",
+        "--sub-format",
+        "vtt",
+        "-o",
+        str(output_template),
+        source_url,
+    ]
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        return [], ""
+    candidates = sorted(storage_dir.glob("captions*.vtt"), key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    for candidate in candidates:
+        transcript = _parse_vtt(candidate.read_text(encoding="utf-8", errors="replace"))
+        if transcript:
+            language = candidate.stem.removeprefix("captions.")
+            return transcript, language
+    return [], ""
+
+
 def _fetch_youtube_metadata(source_url: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], float]:
     video_id = youtube_video_id(source_url)
     if not video_id:
@@ -378,25 +466,57 @@ def _normalize_transcript(raw: Any) -> list[dict[str, Any]]:
 
 
 def _normalize_chapters(raw: Any, duration_seconds: float, transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    source_chapters: list[dict[str, Any]] = []
     if isinstance(raw, list):
-        chapters: list[dict[str, Any]] = []
         for index, item in enumerate(raw):
             if not isinstance(item, dict):
                 continue
-            start = float(item.get("start", 0.0) or 0.0)
+            start = max(0.0, float(item.get("start", 0.0) or 0.0))
             end = float(item.get("end", 0.0) or 0.0)
             if end <= start:
                 end = min(duration_seconds, start + SCENE_WINDOW_SECONDS)
-            chapters.append(
+            source_chapters.append(
                 {
-                    "id": str(item.get("id", f"ch{index + 1:02}")),
                     "title": compact_whitespace(str(item.get("title", f"Chapter {index + 1}"))),
-                    "start": round(start, 3),
-                    "end": round(max(start + 1.0, end), 3),
+                    "start": start,
+                    "end": min(duration_seconds, end) if duration_seconds > 0 else end,
                 }
             )
-        if chapters:
-            return chapters
+    source_chapters.sort(key=lambda item: float(item["start"]))
+    if source_chapters:
+        covered: list[dict[str, Any]] = []
+        cursor = 0.0
+        for item in source_chapters:
+            start = float(item["start"])
+            end = float(item["end"])
+            if start > cursor:
+                covered.append({"title": "Unchaptered reference", "start": cursor, "end": start})
+            if end > start:
+                covered.append({**item, "start": max(cursor, start)})
+                cursor = max(cursor, end)
+        if duration_seconds > cursor:
+            covered.append({"title": "Unchaptered reference", "start": cursor, "end": duration_seconds})
+
+        windows: list[dict[str, Any]] = []
+        for item in covered:
+            start = float(item["start"])
+            end = float(item["end"])
+            part = 1
+            while start < end:
+                window_end = min(end, start + SCENE_WINDOW_SECONDS)
+                windows.append(
+                    {
+                        "id": f"ch{len(windows) + 1:03}",
+                        "source_title": str(item["title"]),
+                        "title": str(item["title"]) if end - float(item["start"]) <= SCENE_WINDOW_SECONDS else f"{item['title']} — deel {part}",
+                        "start": round(start, 3),
+                        "end": round(max(start + 1.0, window_end), 3),
+                    }
+                )
+                start = window_end
+                part += 1
+        if windows:
+            return windows
     if not transcript:
         return [{"id": "ch01", "title": "Reference documentary", "start": 0.0, "end": max(1.0, duration_seconds)}]
     chapters = []
@@ -468,7 +588,16 @@ def create_reference_documentary(
     stored_path = ""
 
     if kind == "youtube":
-        fetched_metadata, fetched_transcript, fetched_chapters, fetched_duration = _fetch_youtube_metadata(source_url)
+        try:
+            fetched_metadata, fetched_transcript, fetched_chapters, fetched_duration = _fetch_youtube_metadata(source_url)
+        except (HTTPError, URLError, ValueError):
+            fetched_metadata = {
+                "title": "YouTube documentary",
+                "video_id": youtube_video_id(source_url) or "",
+                "duration_seconds": 0.0,
+                "metadata_source": "youtube_url_fallback",
+            }
+            fetched_transcript, fetched_chapters, fetched_duration = [], [], 0.0
         payload_metadata = {**fetched_metadata, **payload_metadata}
         if not transcript:
             transcript = _normalize_transcript(fetched_transcript)
@@ -480,6 +609,11 @@ def create_reference_documentary(
         downloaded = _download_youtube_reference(source_url, storage_dir)
         if downloaded is not None:
             stored_path = str(downloaded.relative_to(project_root))
+        if not transcript:
+            transcript, transcript_language = _download_youtube_transcript(source_url, storage_dir)
+            if transcript_language:
+                payload_metadata["transcript_language"] = transcript_language
+                payload_metadata["transcript_source"] = "yt_dlp_subtitles"
     elif kind == "vimeo":
         payload_metadata = {**_fetch_vimeo_metadata(source_url), **payload_metadata}
     else:
@@ -537,8 +671,9 @@ def load_reference_documentary(project_root: Path) -> dict[str, Any]:
 
 def _fallback_duration(project_root: Path, reference: dict[str, Any], transcript: list[dict[str, Any]]) -> float:
     explicit = float(reference.get("duration_seconds", 0.0) or 0.0)
+    transcript_end = max((float(item.get("end", 0.0) or 0.0) for item in transcript), default=0.0)
     if explicit > 0:
-        return explicit
+        return max(explicit, transcript_end)
     stored_path = str(reference.get("stored_path", ""))
     if stored_path:
         absolute = project_root / stored_path
@@ -548,7 +683,7 @@ def _fallback_duration(project_root: Path, reference: dict[str, Any], transcript
             except Exception:
                 pass
     if transcript:
-        return round(max(float(item.get("end", 0.0) or 0.0) for item in transcript), 3)
+        return round(transcript_end, 3)
     return 0.0
 
 
@@ -893,11 +1028,16 @@ def _claim_candidates(scene: dict[str, Any]) -> list[dict[str, Any]]:
     for sentence in _sentence_split(str(scene.get("narration", ""))):
         if len(sentence) < 35 or len(sentence) > 240 or "?" in sentence:
             continue
-        if not re.search(
-            r"\b(is|was|were|had|did|announced|released|landed|departed|died|won|started|began|ended|burned|founded|launched|returned|trial|arrested|opened|closed)\b",
+        predicate = re.search(
+            r"\b(is|was|were|had|did|announced|released|landed|departed|died|won|started|began|ended|burned|founded|launched|returned|trial|arrested|opened|closed|"
+            r"is|was|waren|werd|werden|had|hadden|deed|deden|begon|begonnen|eindigde|overleed|stierf|landde|vertrok|keerde|arresteerde|opende|sloot|"
+            r"est|était|avait|annonça|commença|termina|mourut|atterrit|partit|revint|arrêta|ouvrit|ferma|"
+            r"ist|war|hatte|kündigte|begann|endete|starb|landete|kehrte|verhaftete|öffnete|schloss)\b",
             sentence,
             re.I,
-        ):
+        )
+        factual_anchor = re.search(r"\b(?:1[0-9]{3}|20[0-9]{2}|\d+(?:[.,]\d+)?)\b", sentence) or len(_extract_capitalized_phrases(sentence)) >= 1
+        if not predicate or not factual_anchor:
             continue
         dates = _extract_dates(sentence) or list(scene.get("entities", {}).get("dates", []))[:1]
         statements.append(
@@ -914,6 +1054,60 @@ def _claim_candidates(scene: dict[str, Any]) -> list[dict[str, Any]]:
         if len(statements) >= 6:
             break
     return statements
+
+
+def _coverage_report(
+    duration_seconds: float,
+    transcript: list[dict[str, Any]],
+    chapters: list[dict[str, Any]],
+    visual: dict[str, Any],
+) -> dict[str, Any]:
+    assigned_segments = 0
+    unassigned_ids: list[str] = []
+    for segment in transcript:
+        start = float(segment.get("start", 0.0) or 0.0)
+        end = float(segment.get("end", start) or start)
+        matched = any(
+            float(chapter.get("start", 0.0) or 0.0) < end
+            and float(chapter.get("end", 0.0) or 0.0) > start
+            for chapter in chapters
+        )
+        if matched:
+            assigned_segments += 1
+        else:
+            unassigned_ids.append(str(segment.get("id", "")))
+    transcript_coverage = assigned_segments / len(transcript) if transcript else 0.0
+    transcript_start = min((float(item.get("start", 0.0) or 0.0) for item in transcript), default=0.0)
+    transcript_end = max((float(item.get("end", 0.0) or 0.0) for item in transcript), default=0.0)
+    transcript_timeline_ratio = min(1.0, transcript_end / duration_seconds) if duration_seconds > 0 else 0.0
+    temporal_seconds = sum(
+        max(0.0, float(chapter.get("end", 0.0) or 0.0) - float(chapter.get("start", 0.0) or 0.0))
+        for chapter in chapters
+    )
+    temporal_coverage = min(1.0, temporal_seconds / duration_seconds) if duration_seconds > 0 else 0.0
+    observations = visual.get("scene_observations", {}) if isinstance(visual, dict) else {}
+    visually_sampled = sum(bool(observations.get(str(chapter.get("id", "")), [])) for chapter in chapters) if isinstance(observations, dict) else 0
+    visual_coverage = visually_sampled / len(chapters) if chapters else 0.0
+    return {
+        "duration_seconds": round(duration_seconds, 3),
+        "analysis_window_seconds": SCENE_WINDOW_SECONDS,
+        "window_count": len(chapters),
+        "maximum_window_seconds": round(max((float(item["end"]) - float(item["start"]) for item in chapters), default=0.0), 3),
+        "transcript_segment_count": len(transcript),
+        "assigned_transcript_segments": assigned_segments,
+        "unassigned_transcript_segment_ids": unassigned_ids,
+        "transcript_coverage_ratio": round(transcript_coverage, 4),
+        "transcript_start_seconds": round(transcript_start, 3),
+        "transcript_end_seconds": round(transcript_end, 3),
+        "transcript_timeline_ratio": round(transcript_timeline_ratio, 4),
+        "temporal_coverage_ratio": round(temporal_coverage, 4),
+        "visually_sampled_windows": visually_sampled,
+        "visual_coverage_ratio": round(visual_coverage, 4),
+        "complete_transcript_coverage": bool(transcript) and not unassigned_ids and transcript_timeline_ratio >= 0.75,
+        "complete_temporal_coverage": temporal_coverage >= 0.999,
+        "complete_visual_coverage": bool(chapters) and visually_sampled == len(chapters),
+        "analysis_grade": "full_audiovisual" if chapters and visually_sampled == len(chapters) else "transcript_and_timeline",
+    }
 
 
 def _event_query_expansions(person: str, event_focus: str, location: str, date: str) -> list[str]:
@@ -1100,7 +1294,87 @@ def seed_recycle_research(project_root: Path, blueprint: dict[str, Any]) -> dict
     return request
 
 
+def _verification_tokens(value: str) -> set[str]:
+    ignored = {
+        "the", "and", "that", "this", "with", "from", "were", "was", "voor", "van", "een", "het", "de", "dat", "die",
+        "met", "werd", "zijn", "haar", "dans", "avec", "des", "les", "und", "der", "die", "das",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-zà-öø-ÿ0-9]{3,}", compact_whitespace(value).lower())
+        if token not in ignored
+    }
+
+
+def update_recycle_verification(project_root: Path) -> dict[str, Any]:
+    queue_path = project_root / "manifests" / "recycle_verification_queue.json"
+    if not queue_path.exists():
+        return {"version": 1, "ready": False, "verified_count": 0, "claim_count": 0}
+    queue = read_json(queue_path)
+    candidates = [item for item in queue.get("claims", []) if isinstance(item, dict)]
+    sources = {
+        str(item.get("id")): item
+        for item in load_manifest(project_root, "sources.json").get("sources", [])
+        if isinstance(item, dict)
+        and item.get("review_status") == "approved"
+        and not item.get("blueprint_only")
+        and str(item.get("publisher", "")) != "reference_documentary_blueprint"
+    }
+    verified_claims = [
+        item
+        for item in approved_claims(project_root)
+        if any(str(source_id) in sources for source_id in item.get("source_ids", []))
+    ]
+    verified_count = 0
+    used_claim_ids: set[str] = set()
+    for candidate in candidates:
+        expected = _verification_tokens(str(candidate.get("statement", "")))
+        best: tuple[float, dict[str, Any] | None] = (0.0, None)
+        for claim in verified_claims:
+            if str(claim.get("id", "")) in used_claim_ids:
+                continue
+            actual = _verification_tokens(str(claim.get("text", "")))
+            overlap = len(expected & actual) / max(1, len(expected | actual))
+            if overlap > best[0]:
+                best = (overlap, claim)
+        if best[1] is not None and best[0] >= 0.2:
+            claim = best[1]
+            candidate.update(
+                {
+                    "status": "independently_verified",
+                    "verified_claim_id": str(claim.get("id", "")),
+                    "verified_source_ids": [str(item) for item in claim.get("source_ids", []) if str(item) in sources],
+                    "match_score": round(best[0], 3),
+                }
+            )
+            used_claim_ids.add(str(claim.get("id", "")))
+            verified_count += 1
+        else:
+            candidate.update(
+                {
+                    "status": "pending_independent_verification",
+                    "verified_claim_id": "",
+                    "verified_source_ids": [],
+                    "match_score": round(best[0], 3),
+                }
+            )
+    queue["claims"] = candidates
+    queue["verified_count"] = verified_count
+    queue["claim_count"] = len(candidates)
+    queue["coverage_ratio"] = round(verified_count / len(candidates), 4) if candidates else 0.0
+    queue["ready"] = bool(verified_count and sources)
+    queue["updated_at"] = datetime.now(UTC).isoformat()
+    write_json(queue_path, queue)
+    workflow = load_manifest(project_root, "workflow.json")
+    workflow["recycle_verification_ready"] = queue["ready"]
+    workflow["recycle_verified_claim_count"] = verified_count
+    workflow["recycle_verification_claim_count"] = len(candidates)
+    save_manifest(project_root, "workflow.json", workflow)
+    return queue
+
+
 def _report_markdown(reference: dict[str, Any], blueprint: dict[str, Any], discovery_priorities: list[str]) -> str:
+    coverage = blueprint.get("coverage", {})
     lines = [
         "# Recycle Engine Report",
         "",
@@ -1109,6 +1383,12 @@ def _report_markdown(reference: dict[str, Any], blueprint: dict[str, Any], disco
         f"- Input kind: {reference.get('input_kind', '')}",
         f"- Source: {reference.get('source_url', '') or reference.get('stored_path', '')}",
         f"- Duration seconds: {blueprint.get('duration_seconds', 0.0)}",
+        f"- Analysis windows: {coverage.get('window_count', 0)} (maximum {coverage.get('maximum_window_seconds', 0)} seconds)",
+        f"- Transcript coverage: {float(coverage.get('transcript_coverage_ratio', 0)):.1%}",
+        f"- Transcript timeline reach: {float(coverage.get('transcript_timeline_ratio', 0)):.1%}",
+        f"- Temporal coverage: {float(coverage.get('temporal_coverage_ratio', 0)):.1%}",
+        f"- Visual sampling coverage: {float(coverage.get('visual_coverage_ratio', 0)):.1%}",
+        f"- Analysis grade: {coverage.get('analysis_grade', '')}",
         "",
         "## Timeline",
     ]
@@ -1176,6 +1456,14 @@ def prepare_recycle_documentary(project_root: Path) -> dict[str, Any]:
     duration_seconds = _fallback_duration(project_root, reference, transcript)
     chapters = _normalize_chapters(reference.get("chapters", []), duration_seconds, transcript)
     visual = _visual_analysis(project_root, stored_path, chapters, duration_seconds)
+    coverage = _coverage_report(duration_seconds, transcript, chapters, visual)
+    if not coverage["complete_transcript_coverage"] or not coverage["complete_temporal_coverage"]:
+        raise RuntimeError(
+            "Recycle analysis could not prove complete documentary coverage: "
+            f"transcript assignment={coverage['transcript_coverage_ratio']:.1%}, "
+            f"transcript timeline reach={coverage['transcript_timeline_ratio']:.1%}, "
+            f"temporal={coverage['temporal_coverage_ratio']:.1%}."
+        )
 
     scenes = []
     observations = visual.get("scene_observations", {}) if isinstance(visual, dict) else {}
@@ -1213,6 +1501,7 @@ def prepare_recycle_documentary(project_root: Path) -> dict[str, Any]:
         "chapters": chapters,
         "transcript": transcript,
         "visual_analysis": visual,
+        "coverage": coverage,
         "scenes": scenes,
         "claims": claims,
         "verification_queue": verification_queue,
@@ -1263,8 +1552,8 @@ def prepare_recycle_documentary(project_root: Path) -> dict[str, Any]:
             "workflow_type": "recycle_documentary",
             "reference_documentary_loaded": True,
             "recycle_analysis_ready": True,
-            "recycle_verification_ready": True,
-            "recycle_reconstruction_ready": True,
+            "recycle_verification_ready": False,
+            "recycle_reconstruction_ready": False,
             "recycle_report": "manifests/recycle_engine_report.md",
         }
     )
