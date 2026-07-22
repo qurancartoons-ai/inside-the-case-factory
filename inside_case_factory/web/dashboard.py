@@ -27,10 +27,26 @@ from inside_case_factory.core.project import available_project_slug, create_proj
 from inside_case_factory.core.progress import TaskQueue, write_progress_event
 from inside_case_factory.core.recycle import create_reference_documentary, prepare_recycle_documentary
 from inside_case_factory.core.draft_review import approve_scene, create_review_draft, revise_draft
+from inside_case_factory.core.editor_workspace import (
+    EditorError,
+    apply_operation,
+    apply_plan,
+    build_ai_edit_plan,
+    clear_pending_plan,
+    create_revision,
+    editor_state,
+    ensure_editor_workspace,
+    get_pending_plan,
+    redo,
+    restore_revision,
+    undo,
+)
 from inside_case_factory.core.user_experience import apply_dossier_instruction, production_progress, revision_change_plan, supported_script_map, youtube_draft
 from inside_case_factory.core.reference_intake import create_reference_intake, select_reference_match
 from inside_case_factory.core.relevance import rebuild_relevance_cache
 from inside_case_factory.core.research_panel import ResearchPanelService
+from inside_case_factory.core.visual_direction import default_visual_style_profile
+from inside_case_factory.pipeline.generator import generate_video_project
 from inside_case_factory.core.research import (
     add_claim,
     add_source,
@@ -52,6 +68,7 @@ from inside_case_factory.providers.reasoning import (
 )
 from inside_case_factory.utils.files import read_json
 from inside_case_factory.utils.files import write_json
+from inside_case_factory.utils.text import compact_whitespace
 
 
 Response = tuple[str, list[tuple[str, str]], bytes]
@@ -117,6 +134,8 @@ class DashboardApp:
                 return self.html(self.draft_review_page(parts[1]))
             if len(parts) == 3 and parts[2] == "production":
                 return self.html(self.production_overview_page(parts[1]))
+            if len(parts) == 3 and parts[2] == "editor":
+                return self.html(self.editor_workspace_page(parts[1], environ))
             if len(parts) == 3 and parts[2] == "progress-data":
                 return self.progress_data(parts[1])
             if len(parts) == 3 and parts[2] == "dossier-review":
@@ -165,6 +184,28 @@ class DashboardApp:
                 return self.generate_scenes(parts[1])
             if len(parts) == 3 and parts[2] == "media":
                 return self.add_media(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "apply":
+                return self.editor_apply(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "ai-plan":
+                return self.editor_ai_plan(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "ai-apply":
+                return self.editor_ai_apply(parts[1])
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "ai-cancel":
+                return self.editor_ai_cancel(parts[1])
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "undo":
+                return self.editor_undo(parts[1])
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "redo":
+                return self.editor_redo(parts[1])
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "save-revision":
+                return self.editor_save_revision(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "restore-revision":
+                return self.editor_restore_revision(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "search-media":
+                return self.editor_search_media(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "use-media":
+                return self.editor_use_media(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "render":
+                return self.editor_render(parts[1])
             if len(parts) == 3 and parts[2] == "reference-intake":
                 return self.add_reference_intake(parts[1], environ)
             if len(parts) == 5 and parts[2] == "reference-intake" and parts[4] == "select":
@@ -415,6 +456,8 @@ class DashboardApp:
             </div>
             <label class="wide">Reference documentary URL<input type="url" name="reference_documentary_url" placeholder="https://www.youtube.com/watch?v=... of https://vimeo.com/..." ></label>
             <label>Reference documentary MP4<input type="file" name="reference_documentary_file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska"></label>
+            <label class="wide">Recycle instructions (optioneel)<textarea name="recycle_instructions" rows="3" placeholder="Focus op bepaalde periode, gebeurtenissen of personen."></textarea></label>
+            <label class="wide"><input type="checkbox" name="enable_branding" value="yes"> Branding/watermark tonen (alleen aanzetten als je dit expliciet wilt)</label>
             <label>Screenshots<input type="file" name="screenshot" accept="image/*" multiple></label>
             <label>Lokale clips<input type="file" name="clip" accept="video/*,audio/*" multiple></label>
             <label class="wide">YouTube-links<textarea name="youtube_urls" rows="3" placeholder="Eén URL per regel"></textarea></label>
@@ -446,7 +489,16 @@ class DashboardApp:
         workflow.update({"target_duration_minutes": duration, "language": self.form_value(form, "language", "Nederlands"), "autonomy_mode": self.form_value(form, "mode", "review"), "content_mode": normalize_content_mode(self.form_value(form, "style", "factual_documentary")), "audience": self.form_value(form, "audience"), "workflow_type": workflow_type})
         write_json(project.root / "manifests/workflow.json", workflow)
         reference_url = self.form_value(form, "reference_documentary_url").strip()
-        write_json(project.root / "manifests/production_request.json", {"prompt": prompt, "target_duration_minutes": duration, "language": workflow["language"], "autonomy_mode": workflow["autonomy_mode"], "style": self.form_value(form, "style"), "audience": workflow["audience"], "workflow_type": workflow_type, "reference_documentary_url": reference_url})
+        recycle_instructions = self.form_value(form, "recycle_instructions").strip()
+        branding_enabled = self.form_value(form, "enable_branding", "").strip().lower() in {"yes", "on", "true", "1"}
+        write_json(project.root / "manifests/production_request.json", {"prompt": prompt, "target_duration_minutes": duration, "language": workflow["language"], "autonomy_mode": workflow["autonomy_mode"], "style": self.form_value(form, "style"), "audience": workflow["audience"], "workflow_type": workflow_type, "reference_documentary_url": reference_url, "recycle_instructions": recycle_instructions})
+        visual_style = default_visual_style_profile()
+        visual_style["branding"] = {
+            "enabled": branding_enabled,
+            "text": "Inside the Case Factory" if branding_enabled else "",
+            "opacity": 0.58 if branding_enabled else 0.0,
+        }
+        write_json(project.root / "manifests" / "visual_style_profile.json", visual_style)
         profile = self.form_value(form, "provider_profile", "offline")
         write_json(project.root / "manifests/provider_config.json", {"version": 1, "profile": profile, "budget_usd": budget, "external_calls_enabled": profile != "offline" and budget > 0, "cache_enabled": True, "retries": 2, "tasks": {}})
         reference_uploads = self._uploads(form, "reference_documentary_file")
@@ -459,12 +511,18 @@ class DashboardApp:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
                     temp = Path(handle.name); handle.write(field.file.read())
                 try:
-                    create_reference_documentary(project.root, local_path=temp, original_filename=Path(str(field.filename)).name)
+                    create_reference_documentary(project.root, local_path=temp, original_filename=Path(str(field.filename)).name, instructions=recycle_instructions)
                     prepare_recycle_documentary(project.root)
+                except RuntimeError as error:
+                    return self.html(self.page("Recycle workflow geblokkeerd", f'<section class="panel"><p>{escape(str(error))}</p></section>'), "400 Bad Request")
                 finally:
                     temp.unlink(missing_ok=True)
             elif reference_url:
-                create_reference_documentary(project.root, source_url=reference_url)
+                try:
+                    create_reference_documentary(project.root, source_url=reference_url, instructions=recycle_instructions)
+                    prepare_recycle_documentary(project.root)
+                except RuntimeError as error:
+                    return self.html(self.page("Recycle workflow geblokkeerd", f'<section class="panel"><p>{escape(str(error))}</p></section>'), "400 Bad Request")
         for field in self._uploads(form, "screenshot") + self._uploads(form, "clip"):
             suffix = Path(str(field.filename)).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
@@ -711,6 +769,11 @@ class DashboardApp:
             if final_video.exists()
             else "<span class=\"muted\">Video nog niet klaar.</span>"
         )
+        editor_link = (
+            f"<a class=\"button\" href=\"/projects/{escape(slug)}/editor\">Video bewerken</a>"
+            if final_video.exists()
+            else ""
+        )
         return self.page(
             topic,
             f"""
@@ -723,6 +786,7 @@ class DashboardApp:
               </div>
               <div class="progress-number"><strong>{progress['percentage']}%</strong><span>{escape(progress['estimated_remaining'])}</span>
                 <a class="button" href="/projects/{escape(slug)}/production">Bekijk voortgang</a>
+                                {editor_link}
               </div>
             </section>
             {self.review_action_card(project_root, slug)}
@@ -730,6 +794,493 @@ class DashboardApp:
             <details class="panel"><summary>Technische details</summary><a href="/projects/{escape(slug)}/advanced">Developer mode openen</a></details>
             """,
         )
+
+    def _editor_selection(self, environ: dict[str, Any]) -> tuple[str, str, str]:
+        raw = str(environ.get("QUERY_STRING", ""))
+        params = parse_qs(raw)
+        scene_id = (params.get("scene") or [""])[0].strip()
+        shot_id = (params.get("shot") or [""])[0].strip()
+        notice = (params.get("notice") or [""])[0].strip()
+        return scene_id, shot_id, notice
+
+    def _editor_redirect(self, slug: str, scene_id: str = "", shot_id: str = "", notice: str = "") -> Response:
+        query = []
+        if scene_id:
+            query.append(f"scene={quote(scene_id)}")
+        if shot_id:
+            query.append(f"shot={quote(shot_id)}")
+        if notice:
+            query.append(f"notice={quote(notice)}")
+        suffix = f"?{'&'.join(query)}" if query else ""
+        return self.redirect(f"/projects/{slug}/editor{suffix}")
+
+    def editor_workspace_page(self, slug: str, environ: dict[str, Any]) -> str:
+        project_root = self.project_root(slug)
+        if not project_root.is_dir():
+            return self.page("Project niet gevonden", "<section class=\"panel\"><p>Project niet gevonden.</p></section>")
+        final_video = project_root / "exports" / "final_video.mp4"
+        if not final_video.exists():
+            return self.page(
+                "Editor niet beschikbaar",
+                f"""{self.back_button(slug)}<section class=\"panel\"><h2>Editor is beschikbaar na de eerste render</h2><p>Rond eerst de productie af en open daarna opnieuw.</p><a class=\"button\" href=\"/projects/{escape(slug)}/production\">Naar voortgang</a></section>""",
+            )
+
+        ensure_editor_workspace(project_root)
+        state = editor_state(project_root)
+        scene_id, shot_id, notice = self._editor_selection(environ)
+        timeline = state.get("timeline", {}) if isinstance(state.get("timeline"), dict) else {}
+        scenes = timeline.get("scenes", []) if isinstance(timeline.get("scenes"), list) else []
+        selected_scene = next((item for item in scenes if str(item.get("scene_id", "")) == scene_id), scenes[0] if scenes else {})
+        selected_shot = None
+        if isinstance(selected_scene, dict):
+            selected_shot = next((item for item in selected_scene.get("shots", []) if str(item.get("id", "")) == shot_id), None)
+            if selected_shot is None:
+                selected_shot = (selected_scene.get("shots", []) or [None])[0]
+
+        subtitle_style = timeline.get("subtitle_style", {}) if isinstance(timeline.get("subtitle_style"), dict) else {}
+        subtitles_enabled = bool(timeline.get("subtitles_enabled", False))
+        revisions = state.get("revisions", []) if isinstance(state.get("revisions"), list) else []
+        current_revision = state.get("current_revision", {}) if isinstance(state.get("current_revision"), dict) else {}
+        pending_plan = get_pending_plan(project_root)
+        candidates_manifest = self.read_manifest(project_root / "manifests" / "editor_media_candidates.json")
+        candidate_rows = candidates_manifest.get("candidates", []) if isinstance(candidates_manifest.get("candidates"), list) else []
+
+        timeline_html = []
+        for scene in scenes:
+            sid = str(scene.get("scene_id", ""))
+            shot_cards = []
+            for shot in scene.get("shots", []):
+                if not isinstance(shot, dict):
+                    continue
+                active = " style='border-color:#176b5b;background:#eef8f6'" if str(shot.get("id", "")) == str((selected_shot or {}).get("id", "")) else ""
+                thumb = f"/projects/{escape(slug)}/preview/thumbnail/{escape(sid)}"
+                shot_cards.append(
+                    f"""
+                    <a href=\"/projects/{escape(slug)}/editor?scene={quote(sid)}&shot={quote(str(shot.get('id', '')))}\" class=\"panel\"{active} style=\"padding:10px;text-decoration:none;color:inherit;display:block;\" data-seek=\"{escape(str(scene.get('start_seconds', 0)))}\">
+                      <img src=\"{thumb}\" alt=\"{escape(str(scene.get('heading', sid)))}\" style=\"width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:6px;\">
+                      <p style=\"margin:8px 0 2px;font-weight:700;\">{escape(str(shot.get('media_type', 'asset')).title())}</p>
+                      <p class=\"muted\" style=\"margin:0;\">{escape(str(shot.get('start_seconds', 0)))}s - {escape(str(shot.get('end_seconds', 0)))}s · {escape(str(shot.get('duration_seconds', 0)))}s</p>
+                      <p class=\"muted\" style=\"margin:4px 0 0;\">{escape(str(shot.get('motion', '')))}</p>
+                    </a>
+                    """
+                )
+            timeline_html.append(
+                f"""
+                <section class=\"panel\" style=\"padding:14px;\">
+                  <h3 style=\"margin:0 0 8px;\">{escape(str(scene.get('heading', sid)))} · {escape(str(scene.get('start_seconds', 0)))}s - {escape(str(float(scene.get('start_seconds', 0)) + float(scene.get('duration_seconds', 0)) ))}s</h3>
+                  <div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;\">{''.join(shot_cards)}</div>
+                </section>
+                """
+            )
+
+        selected_scene_id = str(selected_scene.get("scene_id", "")) if isinstance(selected_scene, dict) else ""
+        selected_shot_id = str((selected_shot or {}).get("id", "")) if isinstance(selected_shot, dict) else ""
+        inspector = ""
+        if isinstance(selected_scene, dict) and isinstance(selected_shot, dict):
+            inspector = f"""
+            <section class=\"panel\">
+              <h2>Scene/clip inspector</h2>
+              <p><strong>Scène:</strong> {escape(str(selected_scene.get('heading', selected_scene_id)))}</p>
+              <p><strong>Narratie:</strong> {escape(str(selected_scene.get('narration', '')))}</p>
+              <p><strong>Visueel doel:</strong> {escape(str(selected_scene.get('visual_purpose', '')))}</p>
+              <p><strong>Gebeurtenis:</strong> {escape(str(selected_scene.get('event', '')))}</p>
+              <p><strong>Queries:</strong> {escape(', '.join(str(item) for item in selected_scene.get('queries', [])))}</p>
+              <p><strong>Bron/licentie:</strong> {escape(str(selected_shot.get('source', '')))} · {escape(str(selected_shot.get('license', '')))}</p>
+              <form method=\"post\" action=\"/projects/{escape(slug)}/editor/apply\" class=\"grid-form\">
+                <input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\">
+                <button name=\"action\" value=\"remove_shot\">Delete</button>
+                <button name=\"action\" value=\"duplicate_shot\">Duplicate</button>
+                <button name=\"action\" value=\"move_earlier\" class=\"secondary\">Move earlier</button>
+                <button name=\"action\" value=\"move_later\" class=\"secondary\">Move later</button>
+                <label>Duration (sec)<input type=\"number\" step=\"0.1\" min=\"0.7\" name=\"duration_seconds\" value=\"{escape(str(selected_shot.get('duration_seconds', 2.5)))}\"></label>
+                <button name=\"action\" value=\"set_duration\">Apply duration</button>
+                <label>Motion<select name=\"motion\"><option value=\"static\">Static</option><option value=\"slow_zoom\">Slow zoom</option><option value=\"push_in\">Push-in</option><option value=\"pan\">Pan</option><option value=\"parallax\">Parallax</option></select></label>
+                <button name=\"action\" value=\"set_motion\">Apply motion</button>
+                <label>Transition<select name=\"transition\"><option>hard_cut</option><option>match_cut</option><option>cross_dissolve</option><option>dip_to_black</option></select></label>
+                <button name=\"action\" value=\"set_transition\">Apply transition</button>
+                <label>Crop mode<select name=\"crop\"><option value=\"cover_16_9\">Fill</option><option value=\"fit_16_9\">Fit</option><option value=\"crop_16_9\">Crop</option></select></label>
+                <button name=\"action\" value=\"set_crop\">Apply crop</button>
+                <label class=\"wide\">Add text / overlay<input name=\"overlay_text\" placeholder=\"Title, source label, date...\"></label>
+                <button name=\"action\" value=\"add_overlay\">Add text</button>
+                <label>Composition<select name=\"composition\"><option value=\"single_frame\">Single frame</option><option value=\"picture_in_picture\">Picture-in-picture</option><option value=\"split_screen\">Split screen</option><option value=\"document_overlay\">Document overlay</option></select></label>
+                <button name=\"action\" value=\"set_composition\">Add overlay/PIP</button>
+                <label>Split at (sec)<input type=\"number\" name=\"split_seconds\" min=\"0.7\" step=\"0.1\"></label>
+                <button name=\"action\" value=\"split_shot\">Split clip</button>
+              </form>
+            </section>
+            """
+
+        candidates_html = "".join(
+            f"""
+            <article class=\"media-card\">
+              <img src=\"/projects/{escape(slug)}/media/{escape(str(item.get('id', '')))}/preview\" alt=\"candidate\">
+              <div>
+                <h3>{escape(str(item.get('title') or item.get('id') or 'Asset'))}</h3>
+                <p><strong>Provider:</strong> {escape(str(item.get('provider') or item.get('source') or ''))}</p>
+                <p><strong>Type:</strong> {escape(str(item.get('type') or item.get('kind') or 'image'))} · <strong>Relevantie:</strong> {escape(str(item.get('relevance_score', '')))}</p>
+                <p><strong>Duur/resolutie:</strong> {escape(str(item.get('duration_seconds') or item.get('dimensions') or 'n/a'))}</p>
+                <p><strong>Licentie:</strong> {escape(str(item.get('license') or item.get('license_notes') or ''))}</p>
+                <div class=\"actions\" style=\"justify-content:flex-start;\">
+                  <a class=\"button ghost\" href=\"/projects/{escape(slug)}/media/{escape(str(item.get('id', '')))}/preview\" target=\"_blank\">Preview</a>
+                  <form method=\"post\" action=\"/projects/{escape(slug)}/editor/use-media\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"asset_id\" value=\"{escape(str(item.get('id', '')))}\"><button>Use this asset</button></form>
+                </div>
+              </div>
+            </article>
+            """
+            for item in candidate_rows
+            if isinstance(item, dict)
+        ) or "<p class=\"muted\">Nog geen kandidaten. Zoek betere media voor de geselecteerde clip.</p>"
+
+        pending_preview = ""
+        if pending_plan and pending_plan.get("status") == "awaiting_confirmation":
+            summary = pending_plan.get("summary", {}) if isinstance(pending_plan.get("summary"), dict) else {}
+            pending_preview = f"""
+            <section class=\"review-card\">
+              <div>
+                <p class=\"eyebrow\">AI wijzigingspreview</p>
+                <h2>Controleer voor toepassen</h2>
+                <p>Wat verandert: {escape(str(summary.get('what_will_change', '')))}</p>
+                <p>Scènes: {escape(', '.join(str(item) for item in summary.get('scenes', [])) or 'geen expliciete selectie')}</p>
+                <p>Duurwijziging: {escape(str(summary.get('estimated_duration_change_seconds', 0)))}s · Nieuwe media nodig: {escape('ja' if summary.get('needs_media_search') else 'nee')} · Voice-over opnieuw nodig: {escape('ja' if summary.get('voiceover_regeneration_required') else 'nee')}</p>
+              </div>
+              <div class=\"actions\">
+                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-apply\"><button>Apply</button></form>
+                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-cancel\"><button class=\"secondary\">Cancel</button></form>
+              </div>
+            </section>
+            """
+
+        revision_rows = "".join(
+            f"<option value=\"{escape(str(item.get('id', '')))}\">{escape(str(item.get('label', item.get('id', ''))))} · {escape(str(item.get('created_at', '')))}</option>"
+            for item in revisions
+            if isinstance(item, dict)
+        )
+
+        subtitle_entries = timeline.get("subtitle_entries", []) if isinstance(timeline.get("subtitle_entries"), list) else []
+        selected_sub = next((entry for entry in subtitle_entries if isinstance(entry, dict) and str(entry.get("scene_id", "")) == selected_scene_id), {})
+
+        notice_html = f"<section class=\"panel\"><p>{escape(notice)}</p></section>" if notice else ""
+
+        return self.page(
+            "Video bewerken",
+            f"""
+            {self.back_button(slug)}
+            <nav class=\"crumb\"><a href=\"/projects/{escape(slug)}\">Project</a><span>/</span><strong>Video bewerken</strong></nav>
+            {notice_html}
+            <section class=\"review-player\"><div>
+              <video id=\"editor-player\" controls preload=\"metadata\" src=\"/projects/{escape(slug)}/preview/video\"></video>
+              <div class=\"actions\" style=\"justify-content:flex-start;margin-top:10px;\">
+                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/render\"><button>Nieuwe versie renderen</button></form>
+                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/undo\"><button class=\"secondary\" {'disabled' if not state.get('can_undo') else ''}>Undo</button></form>
+                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/redo\"><button class=\"secondary\" {'disabled' if not state.get('can_redo') else ''}>Redo</button></form>
+                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/save-revision\" class=\"inline\"><input name=\"label\" placeholder=\"Save version label\" required><button class=\"ghost\">Save version</button></form>
+              </div>
+            </div><aside>
+              <h2>Versie</h2>
+              <p><strong>Actief:</strong> {escape(str(current_revision.get('label', 'Original')))}</p>
+              <p class=\"muted\">{escape(str(current_revision.get('created_at', '')))}</p>
+              <form method=\"post\" action=\"/projects/{escape(slug)}/editor/restore-revision\"><label>Restore previous version<select name=\"revision_id\">{revision_rows}</select></label><button class=\"secondary\">Restore</button></form>
+            </aside></section>
+
+            {pending_preview}
+
+            <section class=\"panel\">
+              <h2>Visual timeline</h2>
+              <p class=\"muted\">Tracks: Video/Images · Voice-over · Subtitles · Overlays/Titles · Optional audio</p>
+              {''.join(timeline_html) if timeline_html else '<p>Geen timeline beschikbaar.</p>'}
+            </section>
+
+            {inspector}
+
+            <section class=\"panel\">
+              <h2>Media browser</h2>
+              <form method=\"post\" action=\"/projects/{escape(slug)}/editor/search-media\" class=\"grid-form\">
+                <input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\">
+                <label class=\"wide\">Search better media<input name=\"query\" placeholder=\"Event-specific query (optional)\"></label>
+                <button>Find alternatives</button>
+              </form>
+              {candidates_html}
+              <p class=\"muted\">Upload own media blijft beschikbaar via het bestaande project media-scherm.</p>
+            </section>
+
+            <section class=\"panel\">
+              <h2>Subtitle editor</h2>
+              <p><strong>Status:</strong> {escape('Enabled' if subtitles_enabled else 'Disabled')}</p>
+              <form method=\"post\" action=\"/projects/{escape(slug)}/editor/apply\" class=\"grid-form\">
+                <input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\">
+                <button name=\"action\" value=\"enable_subtitles\">Enable subtitles</button>
+                <button name=\"action\" value=\"disable_subtitles\" class=\"secondary\">Disable all subtitles</button>
+                <label>Preset size<input type=\"number\" name=\"subtitle_size\" min=\"12\" max=\"30\" value=\"{escape(str(subtitle_style.get('size', 16)))}\"></label>
+                <label>Placement<select name=\"subtitle_placement\"><option value=\"bottom\">Bottom safe</option><option value=\"top\">Top safe</option></select></label>
+                <button name=\"action\" value=\"set_subtitle_style\">Apply subtitle preset</button>
+                <label class=\"wide\">Edit subtitle text for selected scene<textarea name=\"subtitle_text\" rows=\"3\">{escape(str(selected_sub.get('text', '')))}</textarea></label>
+                <button name=\"action\" value=\"edit_subtitle\">Save subtitle text</button>
+                <button name=\"action\" value=\"remove_subtitle\" class=\"secondary\">Remove subtitle from scene</button>
+              </form>
+            </section>
+
+            <section class=\"panel\">
+              <h2>AI edit instruction</h2>
+              <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-plan\" class=\"grid-form\">
+                <input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\">
+                <label>Mode<select name=\"mode\"><option value=\"scene\">Edit selected scene</option><option value=\"documentary\">Edit entire documentary</option></select></label>
+                <label class=\"wide\">Instruction<textarea name=\"instruction\" rows=\"4\" required placeholder=\"Replace this shot with courtroom arrival footage...\"></textarea></label>
+                <button>Create AI edit plan</button>
+              </form>
+            </section>
+
+            <script>
+              document.querySelectorAll('[data-seek]').forEach(node => {{
+                node.addEventListener('click', event => {{
+                  const player = document.getElementById('editor-player');
+                  if (!player) return;
+                  const value = Number(node.getAttribute('data-seek') || '0');
+                  if (!Number.isFinite(value)) return;
+                  player.currentTime = value;
+                }});
+              }});
+            </script>
+            """,
+        )
+
+    def editor_apply(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        scene_id = self.form_value(form, "scene_id").strip()
+        shot_id = self.form_value(form, "shot_id").strip()
+        action = self.form_value(form, "action").strip()
+
+        operation: dict[str, Any]
+        label = "Editor wijziging"
+        if action == "remove_shot":
+            operation = {"type": "remove_shot", "scene_id": scene_id, "shot_id": shot_id}
+            label = "Shot verwijderd"
+        elif action == "duplicate_shot":
+            operation = {"type": "duplicate_shot", "scene_id": scene_id, "shot_id": shot_id}
+            label = "Shot gedupliceerd"
+        elif action == "move_earlier":
+            operation = {"type": "move_shot", "scene_id": scene_id, "shot_id": shot_id, "direction": "earlier"}
+            label = "Shot verplaatst"
+        elif action == "move_later":
+            operation = {"type": "move_shot", "scene_id": scene_id, "shot_id": shot_id, "direction": "later"}
+            label = "Shot verplaatst"
+        elif action == "set_duration":
+            operation = {
+                "type": "set_shot_duration",
+                "scene_id": scene_id,
+                "shot_id": shot_id,
+                "duration_seconds": float(self.form_value(form, "duration_seconds", "0") or 0),
+            }
+            label = "Shotduur aangepast"
+        elif action == "split_shot":
+            operation = {
+                "type": "split_shot",
+                "scene_id": scene_id,
+                "shot_id": shot_id,
+                "split_seconds": float(self.form_value(form, "split_seconds", "0") or 0),
+            }
+            label = "Shot gesplitst"
+        elif action == "set_motion":
+            operation = {
+                "type": "set_motion",
+                "scene_id": scene_id,
+                "shot_id": shot_id,
+                "motion": self.form_value(form, "motion"),
+            }
+            label = "Motion aangepast"
+        elif action == "set_transition":
+            operation = {"type": "set_transition", "scene_id": scene_id, "shot_id": shot_id, "transition": self.form_value(form, "transition")}
+            label = "Transition aangepast"
+        elif action == "set_crop":
+            operation = {"type": "set_crop_mode", "scene_id": scene_id, "shot_id": shot_id, "crop": self.form_value(form, "crop")}
+            label = "Crop aangepast"
+        elif action == "add_overlay":
+            operation = {"type": "add_overlay", "scene_id": scene_id, "shot_id": shot_id, "text": self.form_value(form, "overlay_text")}
+            label = "Overlay toegevoegd"
+        elif action == "set_composition":
+            operation = {
+                "type": "set_composition",
+                "scene_id": scene_id,
+                "shot_id": shot_id,
+                "composition": self.form_value(form, "composition"),
+            }
+            label = "Compositie aangepast"
+        elif action == "enable_subtitles":
+            operation = {"type": "enable_subtitles", "scene_id": scene_id}
+            label = "Subtitles ingeschakeld"
+        elif action == "disable_subtitles":
+            operation = {"type": "disable_subtitles", "scene_id": scene_id}
+            label = "Subtitles uitgeschakeld"
+        elif action == "set_subtitle_style":
+            operation = {
+                "type": "set_subtitle_style",
+                "scene_id": scene_id,
+                "size": int(self.form_value(form, "subtitle_size", "16") or 16),
+                "placement": self.form_value(form, "subtitle_placement", "bottom"),
+                "enabled": True,
+            }
+            label = "Subtitle preset toegepast"
+        elif action == "edit_subtitle":
+            operation = {"type": "edit_subtitle", "scene_id": scene_id, "text": self.form_value(form, "subtitle_text")}
+            label = "Subtitle tekst aangepast"
+        elif action == "remove_subtitle":
+            operation = {"type": "remove_subtitle", "scene_id": scene_id}
+            label = "Subtitle verwijderd"
+        else:
+            return self._editor_redirect(slug, scene_id, shot_id, "Onbekende editor-actie.")
+
+        try:
+            result = apply_operation(self.project_root(slug), operation)
+            create_revision(
+                self.project_root(slug),
+                label=label,
+                operation_type=str(operation.get("type", "edit")),
+                operation_summary=label,
+                duration_delta_seconds=float(result.get("duration_delta_seconds", 0.0) or 0.0),
+            )
+        except (EditorError, ValueError) as error:
+            return self._editor_redirect(slug, scene_id, shot_id, str(error))
+
+        return self._editor_redirect(slug, scene_id, shot_id, f"{label} opgeslagen")
+
+    def editor_ai_plan(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        scene_id = self.form_value(form, "scene_id").strip()
+        shot_id = self.form_value(form, "shot_id").strip()
+        instruction = self.form_value(form, "instruction").strip()
+        mode = self.form_value(form, "mode", "scene").strip().lower()
+        if not instruction:
+            return self._editor_redirect(slug, scene_id, shot_id, "AI instructie ontbreekt.")
+        try:
+            build_ai_edit_plan(
+                self.project_root(slug),
+                instruction,
+                mode="documentary" if mode == "documentary" else "scene",
+                selected_scene_id=scene_id,
+                selected_shot_id=shot_id,
+            )
+        except EditorError as error:
+            return self._editor_redirect(slug, scene_id, shot_id, str(error))
+        return self._editor_redirect(slug, scene_id, shot_id, "AI plan klaar voor controle")
+
+    def editor_ai_apply(self, slug: str) -> Response:
+        try:
+            apply_plan(self.project_root(slug))
+        except EditorError as error:
+            return self._editor_redirect(slug, notice=str(error))
+        return self._editor_redirect(slug, notice="AI plan toegepast")
+
+    def editor_ai_cancel(self, slug: str) -> Response:
+        clear_pending_plan(self.project_root(slug))
+        return self._editor_redirect(slug, notice="AI plan geannuleerd")
+
+    def editor_undo(self, slug: str) -> Response:
+        if not undo(self.project_root(slug)):
+            return self._editor_redirect(slug, notice="Geen undo beschikbaar")
+        return self._editor_redirect(slug, notice="Undo uitgevoerd")
+
+    def editor_redo(self, slug: str) -> Response:
+        if not redo(self.project_root(slug)):
+            return self._editor_redirect(slug, notice="Geen redo beschikbaar")
+        return self._editor_redirect(slug, notice="Redo uitgevoerd")
+
+    def editor_save_revision(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        label = compact_whitespace(self.form_value(form, "label")) or "Nieuwe versie"
+        create_revision(
+            self.project_root(slug),
+            label=label,
+            operation_type="manual_save",
+            operation_summary="Manual save version.",
+            duration_delta_seconds=0.0,
+        )
+        return self._editor_redirect(slug, notice="Versie opgeslagen")
+
+    def editor_restore_revision(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        revision_id = self.form_value(form, "revision_id").strip()
+        if not revision_id:
+            return self._editor_redirect(slug, notice="Selecteer een versie om te herstellen")
+        if not restore_revision(self.project_root(slug), revision_id):
+            return self._editor_redirect(slug, notice="Versie niet gevonden")
+        return self._editor_redirect(slug, notice=f"Versie {revision_id} hersteld")
+
+    def editor_search_media(self, slug: str, environ: dict[str, Any]) -> Response:
+        root = self.project_root(slug)
+        form = self.read_form(environ)
+        scene_id = self.form_value(form, "scene_id").strip()
+        shot_id = self.form_value(form, "shot_id").strip()
+        query_override = compact_whitespace(self.form_value(form, "query"))
+
+        scenes_manifest = self.read_manifest(root / "manifests" / "scenes.json")
+        scenes = scenes_manifest.get("scenes", []) if isinstance(scenes_manifest.get("scenes"), list) else []
+        scene = next((item for item in scenes if isinstance(item, dict) and str(item.get("id", "")) == scene_id), None)
+        if not isinstance(scene, dict):
+            return self._editor_redirect(slug, scene_id, shot_id, "Selecteer eerst een scène voor media zoeken")
+
+        topic = query_override or compact_whitespace(str(scene.get("event_shown") or " ".join(str(item) for item in scene.get("events", [])) or scene.get("heading", "")))
+        people = ", ".join(str(item) for item in scene.get("people", [])[:3])
+        locations = ", ".join(str(item) for item in scene.get("locations", [])[:3])
+        dates = ", ".join(str(item) for item in scene.get("dates", [])[:2])
+        events = ", ".join(str(item) for item in scene.get("events", [])[:3])
+        visual_direction = self.read_manifest(root / "manifests" / "visual_direction.json")
+        direction_scene = next((item for item in visual_direction.get("scenes", []) if isinstance(item, dict) and str(item.get("scene_id", "")) == scene_id), {})
+        shot = next((item for item in direction_scene.get("shots", []) if isinstance(item, dict) and str(item.get("id", "")) == shot_id), {})
+        desired_media_type = str((shot.get("asset", {}) if isinstance(shot.get("asset"), dict) else {}).get("kind", "image"))
+
+        result = discover_archival_media(
+            root,
+            DiscoveryQuery(
+                topic=topic,
+                people=people,
+                locations=locations,
+                dates=dates,
+                events=events,
+                desired_media_type=desired_media_type if desired_media_type in {"image", "video", "document"} else "image",
+                shot_id=shot_id,
+                composition=str(shot.get("composition", "single_frame")),
+                content_reason=compact_whitespace(str(scene.get("media_requirements", "Event-specific evidence"))),
+                limit_per_source=4,
+            ),
+            scene_id=scene_id,
+        )
+        media_manifest = self.read_manifest(root / "manifests" / "media_sources.json")
+        assets = media_manifest.get("assets", []) if isinstance(media_manifest.get("assets"), list) else []
+        result_ids = {str(item.get("id", "")) for item in result.get("assets", []) if isinstance(item, dict)}
+        candidates = [item for item in assets if isinstance(item, dict) and str(item.get("id", "")) in result_ids]
+        write_json(root / "manifests" / "editor_media_candidates.json", {"version": 1, "scene_id": scene_id, "shot_id": shot_id, "created_at": datetime.now(UTC).isoformat(), "candidates": candidates})
+        return self._editor_redirect(slug, scene_id, shot_id, f"{len(candidates)} mediakandidaten gevonden")
+
+    def editor_use_media(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        scene_id = self.form_value(form, "scene_id").strip()
+        shot_id = self.form_value(form, "shot_id").strip()
+        asset_id = self.form_value(form, "asset_id").strip()
+        if not asset_id:
+            return self._editor_redirect(slug, scene_id, shot_id, "Geen asset geselecteerd")
+        try:
+            apply_operation(self.project_root(slug), {"type": "replace_asset", "scene_id": scene_id, "shot_id": shot_id, "asset_id": asset_id})
+            create_revision(self.project_root(slug), label="Media vervangen", operation_type="replace_asset", operation_summary="Shot asset replaced.")
+        except EditorError as error:
+            return self._editor_redirect(slug, scene_id, shot_id, str(error))
+        return self._editor_redirect(slug, scene_id, shot_id, "Asset toegepast")
+
+    def editor_render(self, slug: str) -> Response:
+        root = self.project_root(slug)
+        try:
+            write_progress_event(root, "started", "editor", "Preparing edit")
+            write_progress_event(root, "started", "editor", "Updating scene")
+            write_progress_event(root, "started", "editor", "Generating voice segment")
+            write_progress_event(root, "started", "editor", "Building preview")
+            write_progress_event(root, "started", "editor", "Rendering final video")
+            project_manifest = self.read_manifest(root / "manifests" / "project.json")
+            topic = str(project_manifest.get("topic", slug))
+            generate_video_project(self.settings, topic, existing_project_root=root, respect_existing_direction=True)
+            write_progress_event(root, "completed", "editor", "Complete")
+            create_revision(root, label="Nieuwe render", operation_type="render", operation_summary="Rendered a new edited version.")
+        except Exception as error:
+            write_progress_event(root, "failed", "editor", f"Render failed: {error}")
+            return self._editor_redirect(slug, notice=f"Render mislukt: {error}")
+        return self._editor_redirect(slug, notice="Nieuwe versie gerenderd")
 
     def draft_review_page(self, slug: str) -> str:
         project_root = self.project_root(slug)

@@ -101,6 +101,9 @@ def _scene_specific_queries(scene: dict[str, Any], intent: dict[str, Any]) -> li
     visual_requirements = compact_whitespace(str(scene.get("media_requirements", "")))
     content_reason = compact_whitespace(str(intent.get("content_reason", "")))
     narration_fragment = _short_narration_fragment(str(scene.get("narration", "")))
+    replacement_goal = compact_whitespace(str(scene.get("replacement_footage_should_communicate", "")))
+    action_occurring = compact_whitespace(str(scene.get("action_occurring", "")))
+    where_it_takes_place = compact_whitespace(str(scene.get("where_it_takes_place", "")))
 
     queries: list[str] = []
     queries.extend(compact_whitespace(str(value)) for value in intent.get("search_terms", []) if str(value).strip())
@@ -120,6 +123,12 @@ def _scene_specific_queries(scene: dict[str, Any], intent: dict[str, Any]) -> li
         queries.append(content_reason)
     if narration_fragment:
         queries.append(compact_whitespace(f"{subject} {narration_fragment}" if subject else narration_fragment))
+    if action_occurring:
+        queries.append(compact_whitespace(f"{subject} {action_occurring}" if subject else action_occurring))
+    if where_it_takes_place:
+        queries.append(compact_whitespace(f"{subject} {where_it_takes_place}" if subject else where_it_takes_place))
+    if replacement_goal:
+        queries.append(replacement_goal)
 
     aggregate = compact_whitespace(" ".join([
         subject,
@@ -194,6 +203,9 @@ def scene_texts(project_root: Path) -> dict[str, str]:
 
 def rank_candidate(candidate: dict[str, Any], query: DiscoveryQuery, scenes: dict[str, str]) -> tuple[float, list[str]]:
     query_terms = _terms(query.topic, query.people, query.locations, query.dates, query.events)
+    event_terms = _terms(query.events)
+    location_terms = _terms(query.locations)
+    people_terms = _terms(query.people)
     candidate_terms = _terms(
         str(candidate.get("title", "")),
         str(candidate.get("creator", "")),
@@ -201,6 +213,27 @@ def rank_candidate(candidate: dict[str, Any], query: DiscoveryQuery, scenes: dic
         str(candidate.get("source", "")),
     )
     relevance = min(1.0, len(query_terms & candidate_terms) / max(1, min(5, len(query_terms))))
+    if event_terms and not (event_terms & candidate_terms):
+        relevance *= 0.72
+    if location_terms and not (location_terms & candidate_terms):
+        relevance *= 0.85
+    if people_terms and (people_terms & candidate_terms) and event_terms and not (event_terms & candidate_terms):
+        # Penalize generic person-only imagery when event evidence is requested.
+        relevance *= 0.65
+    boosted_markers = {
+        "archive",
+        "archival",
+        "news",
+        "headline",
+        "court",
+        "hospital",
+        "ambulance",
+        "explosion",
+        "interview",
+        "document",
+    }
+    if boosted_markers & candidate_terms:
+        relevance = min(1.0, relevance + 0.08)
     suggested: list[tuple[float, str]] = []
     for scene_id, text in scenes.items():
         scene_terms = _terms(text)
@@ -457,7 +490,7 @@ class ResearchSourceImageConnector(ArchiveConnector):
 
 
 def default_connectors(project_root: Path | None = None) -> list[ArchiveConnector]:
-    connectors: list[ArchiveConnector] = [WikimediaCategoryConnector(), WikimediaCommonsConnector(), InternetArchiveConnector()]
+    connectors: list[ArchiveConnector] = [InternetArchiveConnector(), WikimediaCategoryConnector(), WikimediaCommonsConnector()]
     if project_root is not None:
         connectors.append(ResearchSourceImageConnector(project_root))
         pexels_settings = _media_provider_settings(project_root, "pexels")
@@ -683,7 +716,10 @@ def discover_project_scene_media(
         availability[connector.name] = defaults
     # One eligible candidate per shot is enough to advance into review; the
     # render pipeline already has offline-safe fallbacks for uncovered scenes.
-    target_per_shot = 1
+    workflow_path = project_root / "manifests" / "workflow.json"
+    workflow = read_json(workflow_path) if workflow_path.exists() else {}
+    recycle_mode = str(workflow.get("workflow_type", "")) == "recycle_documentary"
+    target_per_shot = 3 if recycle_mode else 1
     for scene in scenes:
         if time.monotonic() - started_at >= budget_seconds:
             budget_exhausted = True

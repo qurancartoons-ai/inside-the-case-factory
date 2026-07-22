@@ -876,6 +876,49 @@ def script_content_hash(script: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _recycle_original_script(project_root: Path, claims: list[dict[str, Any]], target_duration_minutes: int) -> dict[str, Any]:
+    recycle = load_optional_manifest(project_root, "recycle_blueprint.json")
+    timeline = [item for item in recycle.get("timeline", []) if isinstance(item, dict)]
+    title = str(recycle.get("title") or project_topic(project_root))
+    sections = []
+    paragraphs = [
+        f"This documentary reconstructs the record around {title} through independently checked events rather than the reference documentary's wording.",
+        "Each chapter follows verified chronology and clarifies what is known, what is disputed, and what still requires corroboration.",
+    ]
+    by_id = {str(item.get("id", "")): item for item in claims if isinstance(item, dict)}
+    generated_from: list[str] = []
+    for index, event in enumerate(timeline[:18], start=1):
+        event_label = compact_whitespace(str(event.get("label", "Event")))
+        event_date = compact_whitespace(str(event.get("date", "")))
+        event_summary = compact_whitespace(str(event.get("summary", "")))
+        candidate_claim = next((claim for claim in claims if event_summary and event_summary[:48].lower() in str(claim.get("text", "")).lower()), None)
+        claim_id = str(candidate_claim.get("id", "")) if isinstance(candidate_claim, dict) else ""
+        if claim_id and claim_id in by_id:
+            generated_from.append(claim_id)
+        prefix = f"By {event_date}, " if event_date else "At this stage, "
+        line = f"{prefix}the story pivots around {event_label.lower()}, with evidence pointing to {event_summary.lower() or 'a material shift in the investigation'}"
+        line = compact_whitespace(line.rstrip(".")) + "."
+        paragraphs.append(line)
+        sections.append({
+            "id": f"sec{index:02}",
+            "claim_ids": [claim_id] if claim_id else [],
+            "text": line,
+        })
+    paragraphs.append("The closing chapter separates confirmed findings from unresolved claims and identifies the strongest remaining verification questions.")
+    narration = "\n\n".join(paragraphs)
+    return {
+        "version": 1,
+        "title": title,
+        "target_duration_minutes": target_duration_minutes,
+        "status": "draft",
+        "generated_from": generated_from,
+        "opening_hook": paragraphs[0],
+        "narration": narration,
+        "sections": sections,
+        "originality_policy": "never_copy_reference_transcript",
+    }
+
+
 def review_item(project_root: Path, manifest_name: str, collection: str, item_id: str, status: str) -> tuple[bool, bool]:
     manifest = load_manifest(project_root, manifest_name)
     items = manifest.get(collection, [])
@@ -1003,6 +1046,16 @@ def generate_script(
         save_manifest(project_root, "workflow.json", workflow)
         return script
 
+    if str(workflow.get("workflow_type", "")) == "recycle_documentary":
+        script = _recycle_original_script(project_root, claims, target_duration_minutes)
+        from inside_case_factory.core.reference_intake import apply_reference_to_script
+        script = apply_reference_to_script(project_root, script)
+        save_manifest(project_root, "script.json", script)
+        workflow["stage"] = "review_script"
+        workflow["target_duration_minutes"] = target_duration_minutes
+        save_manifest(project_root, "workflow.json", workflow)
+        return script
+
     title = project_topic(project_root)
     ordered = sorted(claims, key=lambda claim: str(claim.get("date", "")))
     paragraphs = [
@@ -1095,6 +1148,64 @@ def generate_scenes(
         workflow["stage"] = "discover_media"
         save_manifest(project_root, "workflow.json", workflow)
         return scenes
+
+    if str(workflow.get("workflow_type", "")) == "recycle_documentary":
+        recycle = load_optional_manifest(project_root, "recycle_blueprint.json")
+        recycle_scenes = [item for item in recycle.get("scenes", []) if isinstance(item, dict)]
+        scene_queries = recycle.get("scene_queries", {}) if isinstance(recycle.get("scene_queries", {}), dict) else {}
+        shot_plan = [item for item in recycle.get("shot_plan", []) if isinstance(item, dict)]
+        by_scene_shots: dict[str, list[dict[str, Any]]] = {}
+        for item in shot_plan:
+            by_scene_shots.setdefault(str(item.get("scene_id", "")), []).append(item)
+
+        claims_by_id = {str(item.get("id", "")): item for item in claims if isinstance(item, dict)}
+        scenes: list[dict[str, Any]] = []
+        for index, source in enumerate(recycle_scenes, start=1):
+            scene_id = f"s{index:02}"
+            claim_ids = []
+            for claim in claims:
+                text = str(claim.get("text", "")).lower()
+                if str(source.get("event_focus", "")).lower() and str(source.get("event_focus", "")).lower() in text:
+                    claim_ids.append(str(claim.get("id", "")))
+            claim_ids = [item for item in claim_ids if item in claims_by_id][:4]
+            event_queries = list(scene_queries.get(str(source.get("scene_id", "")), []))
+            if not event_queries:
+                event_queries = [compact_whitespace(str(source.get("event_focus", "")))]
+            alt_queries = []
+            for shot in by_scene_shots.get(str(source.get("scene_id", "")), []):
+                for query in shot.get("search_queries", []):
+                    value = compact_whitespace(str(query))
+                    if value and value not in alt_queries:
+                        alt_queries.append(value)
+            scenes.append(
+                {
+                    "id": scene_id,
+                    "index": index,
+                    "heading": str(source.get("title", f"Scene {index}")),
+                    "narration": compact_whitespace(str(source.get("viewer_understanding", "")) or str(source.get("narration", ""))),
+                    "estimated_duration_seconds": float(source.get("duration_seconds", 30.0) or 30.0),
+                    "claim_ids": claim_ids,
+                    "people": list(source.get("entities", {}).get("people", [])),
+                    "locations": list(source.get("entities", {}).get("places", [])),
+                    "dates": list(source.get("entities", {}).get("dates", [])),
+                    "events": list(source.get("entities", {}).get("historical_events", [])) or [str(source.get("event_focus", ""))],
+                    "who_is_visible": list(source.get("who_is_visible", [])),
+                    "event_shown": str(source.get("event_shown", source.get("event_focus", ""))),
+                    "where_it_takes_place": str(source.get("where_it_takes_place", "")),
+                    "action_occurring": str(source.get("action_occurring", "")),
+                    "replacement_footage_should_communicate": str(source.get("replacement_footage_should_communicate", "")),
+                    "media_requirements": str(source.get("purpose", "Event-specific archival reconstruction.")),
+                    "archival_media_queries": event_queries[:8],
+                    "alternative_media_queries": alt_queries[:8],
+                    "ai_visual_prompt": "Use only if no approved real archival media remains after provider search.",
+                }
+            )
+        payload = {"version": 1, "status": "draft", "scenes": scenes}
+        save_manifest(project_root, "scenes.json", payload)
+        workflow["scenes_generated"] = True
+        workflow["stage"] = "discover_media"
+        save_manifest(project_root, "workflow.json", workflow)
+        return payload
 
     claims_by_id = {str(claim.get("id")): claim for claim in claims}
     narration = str(script.get("narration", ""))

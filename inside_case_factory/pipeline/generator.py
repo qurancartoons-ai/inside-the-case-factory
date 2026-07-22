@@ -63,8 +63,35 @@ def _format_timestamp(seconds: float) -> str:
     return f"{hours:02}:{minutes:02}:{secs:02},{ms:03}"
 
 
-def _wrap_subtitle(text: str, width: int = 58) -> str:
-    words = compact_whitespace(text).split(" ")
+def _wrap_subtitle(text: str, width: int = 42) -> str:
+    cleaned = compact_whitespace(text)
+    words = [word for word in cleaned.split(" ") if word]
+    if not words:
+        return ""
+    if len(cleaned) <= width:
+        return cleaned
+
+    best_split = 0
+    best_score = 10**9
+    for index in range(1, len(words)):
+        left = " ".join(words[:index]).strip()
+        right = " ".join(words[index:]).strip()
+        if not left or not right:
+            continue
+        if len(left) > width + 8 or len(right) > width + 8:
+            continue
+        punctuation_bonus = -8 if left.endswith((",", ";", ":")) else 0
+        score = abs(len(left) - len(right)) + max(0, len(left) - width) + max(0, len(right) - width) + punctuation_bonus
+        if score < best_score:
+            best_score = score
+            best_split = index
+
+    if best_split:
+        first = " ".join(words[:best_split]).strip()
+        second = " ".join(words[best_split:]).strip()
+        return f"{first}\n{second}"
+
+    # Fallback: hard width wrapping but still capped at two lines.
     lines: list[str] = []
     current = ""
     for word in words:
@@ -76,7 +103,19 @@ def _wrap_subtitle(text: str, width: int = 58) -> str:
             current = candidate
     if current:
         lines.append(current)
-    return "\n".join(lines[:3])
+    return "\n".join(lines[:2])
+
+
+def _ass_timestamp(seconds: float) -> str:
+    centis = int(round(max(0.0, seconds) * 100))
+    hours, remainder = divmod(centis, 360_000)
+    minutes, remainder = divmod(remainder, 6_000)
+    secs, cs = divmod(remainder, 100)
+    return f"{hours}:{minutes:02}:{secs:02}.{cs:02}"
+
+
+def _ass_escape(value: str) -> str:
+    return value.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
 
 
 def _write_srt(path: Path, scenes: list[dict[str, object]]) -> None:
@@ -96,7 +135,69 @@ def _write_srt(path: Path, scenes: list[dict[str, object]]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _scene_svg(title: str, scene: dict[str, object], index: int) -> str:
+def _scene_has_lower_third_conflict(scene: dict[str, object], direction_by_scene: dict[str, dict[str, object]]) -> bool:
+    scene_id = str(scene.get("id", ""))
+    direction = direction_by_scene.get(scene_id, {}) if isinstance(direction_by_scene, dict) else {}
+    shots = direction.get("shots", []) if isinstance(direction, dict) else []
+    for shot in shots if isinstance(shots, list) else []:
+        if not isinstance(shot, dict):
+            continue
+        composition = str(shot.get("composition", ""))
+        text_overlay = str(shot.get("text_overlay", ""))
+        if composition in {"picture_in_picture", "document_overlay", "split_screen"}:
+            return True
+        if text_overlay:
+            return True
+    return False
+
+
+def _write_ass_subtitles(
+    path: Path,
+    scenes: list[dict[str, object]],
+    direction_by_scene: dict[str, dict[str, object]],
+    *,
+    font_size: int,
+    bottom_margin: int,
+    fade_in_ms: int,
+    fade_out_ms: int,
+    max_chars: int,
+) -> None:
+    header = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "PlayResX: 1920",
+        "PlayResY: 1080",
+        "WrapStyle: 0",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Base,DejaVu Sans,{font_size},&H00F2F2F2,&H00F2F2F2,&H00101010,&H64000000,0,0,0,0,100,100,0,0,1,2,1,2,58,58,{bottom_margin},1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    events: list[str] = []
+    for scene in scenes:
+        start = float(scene.get("start_seconds", 0.0) or 0.0)
+        end = float(scene.get("end_seconds", 0.0) or 0.0)
+        wrapped = _wrap_subtitle(str(scene.get("narration", "")), width=max_chars)
+        wrapped = "\\N".join(wrapped.split("\n")[:2])
+        wrapped = _ass_escape(wrapped)
+        align_tag = r"\an8" if _scene_has_lower_third_conflict(scene, direction_by_scene) else r"\an2"
+        fade_tag = rf"\fad({max(0, fade_in_ms)},{max(0, fade_out_ms)})"
+        tag = "{" + align_tag + fade_tag + "}"
+        events.append(
+            "Dialogue: 0,"
+            f"{_ass_timestamp(start)},{_ass_timestamp(max(start + 0.2, end))},"
+            f"Base,,0,0,0,,{tag}{wrapped}"
+        )
+    content = "\n".join([*header, *events, ""])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _scene_svg(title: str, scene: dict[str, object], index: int, *, branding_text: str = "", branding_opacity: float = 0.0) -> str:
     palettes = [
         ("#0b1217", "#1f3a46", "#b89154", "#d8dde0"),
         ("#111018", "#32304f", "#8b3244", "#e0d5c6"),
@@ -106,7 +207,6 @@ def _scene_svg(title: str, scene: dict[str, object], index: int) -> str:
     ]
     bg, mid, accent, ink = palettes[(index - 1) % len(palettes)]
     heading = svg_escape(str(scene["heading"]).upper())
-    short_title = svg_escape(title[:52])
     prompt_hint = svg_escape(str(scene["visual_summary"])[:86])
     number = f"{index:02}"
 
@@ -165,11 +265,10 @@ def _scene_svg(title: str, scene: dict[str, object], index: int) -> str:
     <path d="M840 635 C610 590 510 490 452 325"/>
   </g>
   <g fill="{ink}" font-family="DejaVu Sans, Arial">
-    <text x="110" y="890" font-size="30" opacity="0.68">INSIDE THE CASE FACTORY</text>
     <text x="110" y="940" font-size="62" font-weight="700">{heading}</text>
-    <text x="112" y="990" font-size="30" opacity="0.74">{short_title}</text>
     <text x="1540" y="930" font-size="96" font-weight="700" opacity="0.58">{number}</text>
     <text x="111" y="1040" font-size="24" opacity="0.58">{prompt_hint}</text>
+        {f'<text x="110" y="890" font-size="28" opacity="{max(0.0, min(1.0, branding_opacity)):.2f}">{svg_escape(branding_text[:80])}</text>' if branding_text else ''}
   </g>
   <rect width="1920" height="1080" fill="#000000" opacity="0" filter="url(#grain)"/>
   <rect x="0" y="0" width="1920" height="1080" fill="none" stroke="#000000" stroke-width="80" opacity="0.24"/>
@@ -213,18 +312,26 @@ def _render_scene_video(
     drift_y = 14 + index * 2
     zoom_speed = 0.00055 + (index % 3) * 0.00012
     zoom = {
+        "static": "1.0",
         "slow_zoom_out": f"max(1.16-on*{zoom_speed},1.0)",
         "rack_focus": "1.06",
         "ken_burns_pan": "1.08",
         "parallax": f"min(1.0+on*{zoom_speed * 0.7},1.12)",
         "controlled_push_in": f"min(1.0+on*{zoom_speed * 1.25},1.18)",
     }.get(motion, f"min(1.0+on*{zoom_speed},1.16)")
-    x_expr = f"iw/2-(iw/zoom/2)+sin(on/52)*{drift_x}"
-    y_expr = f"ih/2-(ih/zoom/2)+cos(on/67)*{drift_y}"
-    if motion == "ken_burns_pan":
+    x_expr = "iw/2-(iw/zoom/2)"
+    y_expr = "ih/2-(ih/zoom/2)"
+    if motion == "static":
+        x_expr = "iw/2-(iw/zoom/2)"
+        y_expr = "ih/2-(ih/zoom/2)"
+    elif motion == "ken_burns_pan":
         x_expr = f"(iw-iw/zoom)*on/{max(1, frames - 1)}"
     elif motion == "parallax":
-        x_expr = f"iw/2-(iw/zoom/2)+sin(on/34)*{drift_x * 1.4}"
+        x_expr = f"iw/2-(iw/zoom/2)+{drift_x * 0.35}*on/{max(1, frames - 1)}"
+        y_expr = f"ih/2-(ih/zoom/2)+{drift_y * 0.2}*on/{max(1, frames - 1)}"
+    elif motion == "controlled_push_in":
+        x_expr = f"iw/2-(iw/zoom/2)+{drift_x * 0.18}*on/{max(1, frames - 1)}"
+        y_expr = f"ih/2-(ih/zoom/2)+{drift_y * 0.12}*on/{max(1, frames - 1)}"
     elif motion == "rack_focus":
         x_expr = "iw/2-(iw/zoom/2)"
         y_expr = "ih/2-(ih/zoom/2)"
@@ -403,15 +510,44 @@ def _xfade_videos(
 
 def _mux_subtitles_and_audio(video_path: Path, audio_path: Path, subtitles_path: Path, output_path: Path) -> None:
     subtitle_filter = (
-        f"subtitles={subtitles_path.resolve()}:"
-        "force_style='FontName=DejaVu Sans,FontSize=26,PrimaryColour=&H00F2F2F2,"
-        "OutlineColour=&H00101010,BorderStyle=1,Outline=2,Shadow=1,MarginV=70'"
+        f"ass={subtitles_path.resolve()}"
     )
     _run(
         [
             "ffmpeg", "-y", "-i", str(video_path), "-i", str(audio_path), "-vf", subtitle_filter,
             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(output_path),
+        ]
+    )
+
+
+def _mux_audio_only(video_path: Path, audio_path: Path, output_path: Path) -> None:
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-i",
+            str(audio_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output_path),
         ]
     )
 
@@ -592,6 +728,7 @@ def generate_video_project(
     _quality_render_number: int | None = None,
     _previous_criticism: dict[str, object] | None = None,
     _require_approved_entry: bool | None = None,
+    respect_existing_direction: bool = False,
 ) -> GeneratedVideo:
     width = int(settings.video.get("width", 1920))
     height = int(settings.video.get("height", 1080))
@@ -727,23 +864,56 @@ def generate_video_project(
     producer_blueprint = ProducerEngine().plan(
         project.root, scenes, render_number=_quality_render_number, previous_review=_previous_criticism, provider_router=provider_router,
     )
-    _progress(f"Director AI is building render plan {_quality_render_number}")
-    cinematic_plan = DirectorEngine().plan(
-        project.root, scenes, width=width, height=height, render_number=_quality_render_number,
-        criticism=_previous_criticism,
-        provider_router=provider_router,
-    )
+    existing_direction_path = manifests_dir / "visual_direction.json"
+    if respect_existing_direction and existing_direction_path.exists():
+        _progress("reusing existing edited visual direction")
+        cinematic_plan = read_json(existing_direction_path)
+    else:
+        _progress(f"Director AI is building render plan {_quality_render_number}")
+        cinematic_plan = DirectorEngine().plan(
+            project.root, scenes, width=width, height=height, render_number=_quality_render_number,
+            criticism=_previous_criticism,
+            provider_router=provider_router,
+        )
     style_profile = cinematic_plan["style_profile"]
+    subtitle_style = style_profile.get("subtitles", {}) if isinstance(style_profile, dict) else {}
+    branding_style = style_profile.get("branding", {}) if isinstance(style_profile, dict) else {}
     direction_by_scene = {str(item["scene_id"]): item for item in cinematic_plan["scenes"]}
 
     _progress("creating subtitles")
-    subtitles_path = manifests_dir / "subtitles.srt"
-    _write_srt(subtitles_path, scenes)
+    subtitles_path = manifests_dir / "subtitles.ass"
+    existing_subtitles = read_json(manifests_dir / "subtitles.json") if (manifests_dir / "subtitles.json").exists() else {}
+    edited_entries = existing_subtitles.get("entries", []) if isinstance(existing_subtitles.get("entries"), list) else []
+    subtitle_rows = [
+        {
+            "id": str(entry.get("scene_id", "")),
+            "start_seconds": float(entry.get("start_seconds", 0.0) or 0.0),
+            "end_seconds": float(entry.get("end_seconds", 0.0) or 0.0),
+            "narration": str(entry.get("text", "")),
+        }
+        for entry in edited_entries
+        if isinstance(entry, dict) and str(entry.get("scene_id", "")).strip()
+    ]
+    subtitle_source = subtitle_rows if subtitle_rows and bool(existing_subtitles.get("manual_edit", False)) else scenes
+    _write_ass_subtitles(
+        subtitles_path,
+        subtitle_source,
+        direction_by_scene,
+        font_size=int(subtitle_style.get("size", 16) or 16),
+        bottom_margin=int(subtitle_style.get("bottom_margin", 54) or 54),
+        fade_in_ms=int(subtitle_style.get("fade_in_ms", 150) or 150),
+        fade_out_ms=int(subtitle_style.get("fade_out_ms", 180) or 180),
+        max_chars=int(subtitle_style.get("max_chars_per_line", 38) or 38),
+    )
+    legacy_srt_path = manifests_dir / "subtitles.srt"
+    _write_srt(legacy_srt_path, subtitle_source)
     write_json(
         manifests_dir / "subtitles.json",
         {
-            "format": "srt",
+            "format": "ass",
             "path": str(subtitles_path.relative_to(project.root)),
+            "enabled": bool(subtitle_style.get("enabled", False)),
+            "manual_edit": bool(existing_subtitles.get("manual_edit", False)),
             "entries": [
                 {
                     "scene_id": scene["id"],
@@ -751,7 +921,7 @@ def generate_video_project(
                     "end_seconds": scene["end_seconds"],
                     "text": scene["narration"],
                 }
-                for scene in scenes
+                for scene in subtitle_source
             ],
         },
     )
@@ -784,7 +954,18 @@ def generate_video_project(
                     except (ProductionProviderError, RuntimeError):
                         generated = False
                 if not generated:
-                    image_provider.write_svg(svg_path, _scene_svg(str(script["title"]), graphic_scene, shot_number))
+                    branding_enabled = bool(branding_style.get("enabled", False))
+                    branding_text = str(branding_style.get("text", "")).strip() if branding_enabled else ""
+                    image_provider.write_svg(
+                        svg_path,
+                        _scene_svg(
+                            str(script["title"]),
+                            graphic_scene,
+                            shot_number,
+                            branding_text=branding_text,
+                            branding_opacity=float(branding_style.get("opacity", 0.0) or 0.0),
+                        ),
+                    )
                     _render_svg_to_png(svg_path, png_path, width, height)
                 image_path = png_path
                 asset_path = str(png_path.relative_to(project.root))
@@ -862,7 +1043,10 @@ def generate_video_project(
 
     _progress("rendering final MP4 with subtitles and synchronized narration")
     final_video_path = exports_dir / "final_video.mp4"
-    _mux_subtitles_and_audio(silent_video_path, mastered_audio_path, subtitles_path, final_video_path)
+    if bool(subtitle_style.get("enabled", False)):
+        _mux_subtitles_and_audio(silent_video_path, mastered_audio_path, subtitles_path, final_video_path)
+    else:
+        _mux_audio_only(silent_video_path, mastered_audio_path, final_video_path)
 
     duration = media_duration_seconds(final_video_path)
     _progress(f"Film Critic AI is evaluating render {_quality_render_number}")

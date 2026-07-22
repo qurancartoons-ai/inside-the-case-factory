@@ -7,8 +7,8 @@ from inside_case_factory.providers.visual_assets import resolve_shot_assets
 from inside_case_factory.utils.files import read_json, write_json
 
 
-MOTIONS = ("slow_zoom_in", "ken_burns_pan", "controlled_push_in", "parallax", "slow_zoom_out", "rack_focus")
-TRANSITIONS = ("hard_cut", "cross_dissolve", "dip_to_black", "match_cut", "directional_wipe", "document_to_scene", "blur")
+MOTIONS = ("static", "controlled_push_in", "slow_zoom_in", "slow_zoom_out", "parallax")
+TRANSITIONS = ("hard_cut", "match_cut", "cross_dissolve", "hard_cut", "hard_cut")
 
 
 def default_visual_style_profile() -> dict[str, Any]:
@@ -21,7 +21,19 @@ def default_visual_style_profile() -> dict[str, Any]:
         "vignette": 0.18,
         "depth_effect": "restrained",
         "typography": {"family": "DejaVu Sans", "title_weight": 700, "safe_margin_percent": 7},
-        "subtitles": {"size": 26, "max_chars_per_line": 58, "outline": 2, "bottom_margin": 70},
+        "subtitles": {
+            "enabled": False,
+            "size": 16,
+            "max_chars_per_line": 38,
+            "outline": 2,
+            "bottom_margin": 54,
+            "fade_in_ms": 150,
+            "fade_out_ms": 180,
+            "smart_positioning": True,
+            "safe_area_only": True,
+            "max_lines": 2,
+        },
+        "branding": {"enabled": False, "text": "", "opacity": 0.0},
         "archival_treatment": {"preserve_source_color": True, "max_grain": 0.06, "gentle_contrast_match": True},
     }
 
@@ -37,8 +49,15 @@ def _shot_type(scene: dict[str, Any]) -> str:
 
 
 def _shot_media_intent(scene: dict[str, Any], scene_id: str, shot_id: str, shot_index: int) -> dict[str, Any]:
-    media_sequence = ("video", "image", "document", "image", "video", "map")
-    desired = media_sequence[shot_index % len(media_sequence)]
+    media_sequence = (
+        ("video", "wide_establishing"),
+        ("image", "close_up_detail"),
+        ("document", "headline_document"),
+        ("map", "location_context"),
+        ("video", "archive_event"),
+        ("image", "portrait_reaction"),
+    )
+    desired, framing_goal = media_sequence[shot_index % len(media_sequence)]
     people = [str(item) for item in scene.get("people", [])]
     locations = [str(item) for item in scene.get("locations", [])]
     dates = [str(item) for item in scene.get("dates", [])]
@@ -50,10 +69,29 @@ def _shot_media_intent(scene: dict[str, Any], scene_id: str, shot_id: str, shot_
     qualifier = {
         "video": "archival footage news film",
         "image": "archive photograph",
-        "document": "police document newspaper clipping court record",
+        "document": "newspaper headline police document court record",
         "map": "historical map location",
     }.get(desired, desired)
-    search_terms = list(dict.fromkeys([*base_queries, f"{detail} {qualifier}".strip(), f"{subject} {qualifier}".strip()]))
+    event_focus = events[0].lower() if events else ""
+    evidence_terms: list[str] = []
+    if "accident" in event_focus or "burn" in event_focus or "explosion" in event_focus:
+        evidence_terms.extend(["incident site", "explosion aftermath", "ambulance", "hospital", "news interview"])
+    if "trial" in event_focus or "court" in event_focus:
+        evidence_terms.extend(["courtroom", "verdict headline", "court sketch", "press scrum"])
+    if "launch" in event_focus or "landing" in event_focus:
+        evidence_terms.extend(["launch pad", "mission control", "spacecraft", "re-entry"])
+    if "abduction" in event_focus or "kidnap" in event_focus:
+        evidence_terms.extend(["crime scene", "police evidence", "newspaper front page", "witness interview"])
+    search_terms = list(
+        dict.fromkeys(
+            [
+                *base_queries,
+                *[f"{subject} {term}".strip() for term in evidence_terms],
+                f"{detail} {qualifier}".strip(),
+                f"{subject} {qualifier}".strip(),
+            ]
+        )
+    )
     composition = "picture_in_picture" if shot_index == 1 else "single_frame"
     return {
         "scene_id": scene_id,
@@ -67,6 +105,7 @@ def _shot_media_intent(scene: dict[str, Any], scene_id: str, shot_id: str, shot_
         "search_terms": search_terms,
         "aliases": aliases,
         "composition": composition,
+        "framing_goal": framing_goal,
         "minimum_resolution": {"width": 1280, "height": 720},
         "maximum_reuse": 1,
         "rights_requirements": ["approved", "public_domain", "licensed", "cc0", "cc-by", "cc-by-sa"],
@@ -108,9 +147,12 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
     sound_cues: list[dict[str, Any]] = []
     for scene_index, scene in enumerate(scenes):
         scene_id = str(scene.get("id", f"s{scene_index + 1:02}"))
-        duration = max(2.5, float(scene.get("duration_seconds", scene.get("estimated_duration_seconds", 8.0))))
-        shot_count = max(1, min(5, int((duration + 5.9) // 6.0)))
-        base_duration = duration / shot_count
+        duration = max(4.0, float(scene.get("duration_seconds", scene.get("estimated_duration_seconds", 8.0))))
+        target_avg = 3.4
+        shot_count = max(2, min(10, int(round(duration / target_avg))))
+        if shot_count * 5.0 < duration:
+            shot_count += 1
+        base_duration = max(2.0, min(5.0, duration / shot_count))
         shots = []
         for shot_index in range(shot_count):
             shot_id = f"{scene_id}-shot-{shot_index + 1}"
@@ -143,6 +185,8 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
                 if secondary_asset:
                     used_assets.add(str(secondary_asset["id"]))
             motion = MOTIONS[(scene_index + shot_index) % len(MOTIONS)]
+            if shot_index == 0:
+                motion = "static"
             if motion == previous_motion:
                 motion = MOTIONS[(MOTIONS.index(motion) + 1) % len(MOTIONS)]
             previous_motion = motion
@@ -155,14 +199,14 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
                 "duration_seconds": round(base_duration, 3),
                 "motion": motion,
                 "crop": "cover_16_9",
-                "framing": "rule_of_thirds" if shot_index % 2 == 0 else "center_detail",
+                "framing": "wide" if shot_index % 2 == 0 else "close_up",
                 "focus_point": "primary_subject" if scene.get("people") else "evidence_detail",
                 "text_overlay": "" if shot_index else str(scene.get("heading", ""))[:80],
                 "document_highlight": bool(asset.get("kind") == "document"),
                 "map_animation": "route_reveal" if asset.get("kind") == "map" else "none",
                 "timeline_animation": "progressive_markers" if asset.get("kind") == "timeline" else "none",
                 "composition": desired_composition if secondary_asset else "single_frame",
-                "effects": ["vignette", "depth"] if motion in {"parallax", "rack_focus"} else ["vignette"],
+                "effects": ["vignette", "depth"] if motion in {"rack_focus"} else ["vignette"],
                 "narrative_reason": str(asset.get("content_reason") or media_intent["content_reason"]),
                 "claim_ids": [str(item) for item in scene.get("claim_ids", [])],
             })

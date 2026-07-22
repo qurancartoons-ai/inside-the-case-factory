@@ -40,9 +40,12 @@ def build_international_strategy(topic: str, project_language: str, plan: dict[s
     search_topic = planned_topic if len(planned_topic.split()) >= 2 else topic
     query_parts = []
     official = {"English": "official police court government report", "Dutch": "politie rechtbank officieel dossier", "Nederlands": "politie rechtbank officieel dossier", "Português": "polícia tribunal relatório oficial", "Deutsch": "Polizei Gericht offizieller Bericht", "Bahasa Melayu": "polis mahkamah laporan rasmi", "中文": "警方 法院 官方 报告", "עברית": "משטרה בית משפט דוח רשמי", "العربية": "شرطة محكمة تقرير رسمي"}
+    factual_questions = [str(item).strip() for item in (plan or {}).get("factual_questions", []) if str(item).strip()]
     for context in contexts:
         language = context["language"]
         query_parts.append(f'("{search_topic}" {official.get(language, official["English"])})')
+    if factual_questions:
+        query_parts.extend(f'("{question}")' for question in factual_questions[:8])
     return {
         "version": 1, "project_language": project_language, "contexts": contexts,
         "search_languages": list(dict.fromkeys(item["language"] for item in contexts)),
