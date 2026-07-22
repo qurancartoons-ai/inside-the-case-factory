@@ -878,7 +878,20 @@ class DashboardApp:
                     const blockerPanel=blocker
                         ? `<section class="panel error"><h2>Geblokkeerd</h2><p>${{esc(blocker)}}</p></section>`
                         : '';
+                    const gate=d.paid_gate||{{}};
+                    const approvalCard=gate.required
+                        ? `<section class="approval-card"><div><h1>${{esc(gate.title||'Onderzoek wacht op jouw toestemming')}}</h1><p>${{esc(gate.purpose||'Aanvullend onderzoek vereist toestemming.')}}</p><div class="approval-facts">${{
+                          [
+                            gate.maximum_cost_usd ? `<span><strong>${{Number(gate.maximum_cost_usd).toFixed(2)}}</strong><small>Budget</small></span>` : '',
+                            gate.provider ? `<span><strong>${{esc(gate.provider)}}</strong><small>Provider</small></span>` : '',
+                            gate.claims?.length ? `<span><strong>${{gate.claims.length}}</strong><small>Claims</small></span>` : '',
+                            gate.countries?.length ? `<span><strong>${{gate.countries.length}}</strong><small>Landen</small></span>` : '',
+                            gate.languages?.length ? `<span><strong>${{gate.languages.length}}</strong><small>Talen</small></span>` : ''
+                          ].filter(Boolean).join('')
+                        }}</div><p><strong>Details:</strong></p><ul style="margin:8px 0;padding-left:20px;"><li><strong>Claims:</strong> ${{esc((gate.claims||[]).slice(0,3).join('; ') || 'N/A')}}</li><li><strong>Landen:</strong> ${{esc((gate.countries||[]).slice(0,3).join(', ') || 'N/A')}}</li><li><strong>Talen:</strong> ${{esc((gate.languages||[]).join(', ') || 'N/A')}}</li></ul></div><div class="approval-actions"><form method="post" action="/projects/${{slug}}/paid-research/approve"><button>✓ Goedkeuren en doorgaan</button></form>{{gate.local_fallback_available?'<form method="post" action="/projects/${{slug}}/paid-research/fallback"><button class="ghost-button">↻ Alleen lokaal doorgaan</button></form>':''}}<form method="post" action="/projects/${{slug}}/paid-research/cancel"><button class="ghost-button">✕ Annuleren</button></form></div></section>`
+                        : '';
                     document.querySelector('#progress-content').innerHTML=`
+                        ${{approvalCard}}
                         ${{statusRepair}}
                         <section class="project-summary">
                             <div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase||'Onderwerp')}}</h1><p>${{esc(d.monitor_message||d.last_activity||'Nog geen activiteit geregistreerd')}}</p></div>
