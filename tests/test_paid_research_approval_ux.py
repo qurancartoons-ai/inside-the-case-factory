@@ -91,6 +91,39 @@ class PaidResearchApprovalUXTests(unittest.TestCase):
         self.assertIn("resolved_at", approval)
         resume.assert_called_once_with(self.root)
 
+    def test_resume_reconstructs_missing_wizard_plan(self):
+        (self.root / "manifests/production_plan.json").unlink()
+        with patch("inside_case_factory.web.dashboard.run_production") as run:
+            self.app.resume_managed_production(self.root)
+        plan = read_json(self.root / "manifests/production_plan.json")
+        research_plan = read_json(self.root / "manifests/research_plan.json")
+        self.assertEqual(plan["topic"], "Approval Case")
+        self.assertEqual(research_plan["provider"], "local_fallback")
+        run.assert_called_once_with(self.app.settings, self.root)
+
+    def test_restart_recovers_already_approved_research(self):
+        self.app.repair_research_review("approval-case", "research-further")
+        with patch.object(self.app, "resume_managed_production"):
+            self.app.paid_research_action("approval-case", "approve")
+        self.app.projects = lambda: [self.root]  # type: ignore[method-assign]
+        with patch("inside_case_factory.web.dashboard.Thread") as thread:
+            self.app.resume_recoverable_projects()
+        state = read_json(self.root / "manifests/orchestration.json")
+        self.assertEqual(state["status"], "queued")
+        thread.assert_called_once()
+
+    def test_research_further_resumes_existing_approved_run(self):
+        self.app.repair_research_review("approval-case", "research-further")
+        with patch.object(self.app, "resume_managed_production"):
+            self.app.paid_research_action("approval-case", "approve")
+        with patch.object(self.app, "resume_managed_production") as resume:
+            response = self.app.repair_research_review("approval-case", "research-further")
+        self.assertEqual(dict(response[1])["Location"], "/projects/approval-case/production")
+        resume.assert_called_once_with(self.root)
+        event = read_json(self.root / "manifests/progress_events.json")["events"][-1]
+        self.assertEqual(event["event"], "started")
+        self.assertEqual(event["stage"], "research")
+
     def test_cancel_and_local_fallback_also_clear_approval_card(self):
         self.app.repair_research_review("approval-case", "research-further")
         self.app.paid_research_action("approval-case", "cancel")
