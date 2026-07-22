@@ -441,6 +441,7 @@ def validate_scene_asset_gate(
             "fallback_mode_used": not blocked,
         }
     results: list[dict[str, Any]] = []
+    results_context_present: list[bool] = []
     blocked_scene_ids: list[str] = []
     for scene in scenes:
         scene_id = str(scene.get("id") or scene.get("scene_id") or "scene")
@@ -535,6 +536,7 @@ def validate_scene_asset_gate(
                 "rejection_reasons": list(dict.fromkeys(rejection_reasons)),
                 "blocking_reason": f"Scene {scene_id} has no acceptable asset for the current scene-intent gate." if not passed else "",
             })
+            results_context_present.append(True)
             continue
         results.append({
             "scene_id": scene_id,
@@ -544,8 +546,11 @@ def validate_scene_asset_gate(
             "rejection_reasons": list(dict.fromkeys(rejection_reasons)),
             "blocking_reason": f"Scene {scene_id} has no acceptable asset for the current scene-intent gate." if not accepted_asset_ids else "",
         })
+        results_context_present.append(False)
     overall_passed = all(item["passed"] for item in results)
-    if not overall_passed and resolved_mode != RUN_QUALITY_EVIDENCE_GRADE:
+    # Sample/demo fallback only applies when scenes do not carry explicit scene-intent context.
+    # When context exists, failures must stay visible to prevent semantic drift.
+    if not overall_passed and resolved_mode != RUN_QUALITY_EVIDENCE_GRADE and not any(results_context_present):
         fallback_results = []
         for item in results:
             fallback_results.append({

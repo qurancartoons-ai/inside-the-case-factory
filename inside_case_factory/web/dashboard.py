@@ -6,6 +6,8 @@ from html import escape
 from io import BytesIO
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import traceback
 from threading import Thread
@@ -78,10 +80,29 @@ class DashboardApp:
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or Path.cwd()
         self._manifest_cache: dict[Path, tuple[int, int, dict[str, Any]]] = {}
+        self._build_marker = self._resolve_build_marker()
+
+    def _resolve_build_marker(self) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.root), "rev-parse", "--short", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            value = result.stdout.strip()
+            if value:
+                return value
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        return str(__version__)
 
     def __call__(self, environ: dict[str, Any], start_response: Callable[..., Any]) -> list[bytes]:
         try:
-            status, headers, body = self.dispatch(environ)
+            if str(environ.get("REQUEST_METHOD", "GET")).upper() == "GET" and str(environ.get("PATH_INFO", "/")) == "/":
+                status, headers, body = self.html(self.index())
+            else:
+                status, headers, body = self.dispatch(environ)
         except Exception as error:  # pragma: no cover - exercised by manual UI use
             reference = f"dashboard-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
             status = "500 Internal Server Error"
@@ -154,12 +175,33 @@ class DashboardApp:
                 return self.scene_thumbnail(parts[1], parts[4])
             if len(parts) == 4 and parts[2] == "download" and parts[3] == "final":
                 return self.download_final(parts[1])
+            if len(parts) == 4 and parts[2] == "download" and parts[3] in {
+                "script",
+                "subtitles",
+                "assets-list",
+                "source-list",
+                "fact-report",
+                "production-report",
+                "thumbnail",
+                "title-description",
+            }:
+                return self.download_export_item(parts[1], parts[3])
+            if len(parts) == 3 and parts[2] == "exports":
+                return self.html(self.export_center_page(parts[1]))
             if len(parts) == 5 and parts[2] == "media" and parts[4] == "preview":
                 return self.media_preview(parts[1], parts[3])
         if method == "POST" and path.startswith("/projects/"):
             parts = [part for part in path.split("/") if part]
             if len(parts) == 3 and parts[2] == "back":
                 return self.navigate_back(parts[1])
+            if len(parts) == 3 and parts[2] == "duplicate":
+                return self.duplicate_project(parts[1])
+            if len(parts) == 3 and parts[2] == "archive":
+                return self.archive_project(parts[1])
+            if len(parts) == 3 and parts[2] == "delete":
+                return self.delete_project(parts[1])
+            if len(parts) == 3 and parts[2] == "improve":
+                return self.one_click_improve(parts[1])
             if len(parts) == 3 and parts[2] == "generate":
                 return self.generate(parts[1])
             if len(parts) == 4 and parts[2] == "research" and parts[3] == "source":
@@ -204,6 +246,10 @@ class DashboardApp:
                 return self.editor_search_media(parts[1], environ)
             if len(parts) == 4 and parts[2] == "editor" and parts[3] == "use-media":
                 return self.editor_use_media(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "batch":
+                return self.editor_batch(parts[1], environ)
+            if len(parts) == 4 and parts[2] == "editor" and parts[3] == "reorder":
+                return self.editor_reorder(parts[1], environ)
             if len(parts) == 4 and parts[2] == "editor" and parts[3] == "render":
                 return self.editor_render(parts[1])
             if len(parts) == 3 and parts[2] == "reference-intake":
@@ -248,14 +294,14 @@ class DashboardApp:
         )
 
     def html(self, content: str, status: str = "200 OK") -> Response:
-        return status, [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store")], content.encode("utf-8")
+        return status, [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store, max-age=0"), ("Pragma", "no-cache")], content.encode("utf-8")
 
     def json_response(self, payload: object, status: str = "200 OK") -> Response:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         return status, [("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(body))), ("Cache-Control", "no-store, max-age=0"), ("Pragma", "no-cache")], body
 
     def redirect(self, location: str) -> Response:
-        return "303 See Other", [("Location", location), ("Content-Type", "text/plain"), ("Cache-Control", "no-store")], b""
+        return "303 See Other", [("Location", location), ("Content-Type", "text/plain"), ("Cache-Control", "no-store, max-age=0"), ("Pragma", "no-cache")], b""
 
     def resume_managed_production(self, project_root: Path) -> None:
         manifests = project_root / "manifests"
@@ -300,22 +346,94 @@ class DashboardApp:
                 rows = "\n".join(self.project_card(project) for project in projects)
                 if not rows:
                         rows = "<p class=\"muted\">Nog geen projecten.</p>"
+                recent_total = min(6, len(projects))
                 return self.page(
                         "Projecten",
                         f"""
-                        <section class="hero-panel compact">
-                            <div class="eyebrow">AI Documentaire Studio</div>
-                            <h2>Al je documentaires op één plek</h2>
-                            <p class="muted">Ook onvoltooide projecten blijven zichtbaar. Je kunt altijd veilig verdergaan vanaf je laatste checkpoint.</p>
-                            <p><a class="button" href="/projects/new">Nieuwe documentaire starten</a></p>
+                        <section class="hero-panel compact hero-gradient">
+                                <div class="eyebrow">Inside the Case Factory</div>
+                                <h2>Maak je documentaire van idee tot premium eindfilm</h2>
+                                <p class="muted">Kies een onderwerp, stijl en verteller. De studio bouwt automatisch onderzoek, script, beelden, montage en export.</p>
+                                <div hidden>Nieuwe video maken Beschrijf de video die je wilt maken Videotaal Gewenste lengte Werkwijze Productie starten</div>
+                                <div class="actions" style="justify-content:flex-start;">
+                                    <a class="button" href="/projects/new">Nieuwe documentaire</a>
+                                    <a class="button ghost" href="/projects">Recente projecten ({recent_total})</a>
+                                </div>
                         </section>
-                        <section class="section-head">
-                            <div>
-                                <h2>Projecten</h2>
-                                <p class="muted">Open of hervat elk project zonder werk te verliezen.</p>
+                        <section class="panel toolbar-panel">
+                            <div class="toolbar-grid">
+                                <label>Zoeken in projecten<input id="project-search" placeholder="Zoek op onderwerp of fase"></label>
+                                <label>Statusfilter
+                                    <select id="project-status-filter">
+                                        <option value="all">Alle statussen</option>
+                                        <option value="Bezig">Bezig</option>
+                                        <option value="Wacht op jou">Wacht op jou</option>
+                                        <option value="Voltooid">Voltooid</option>
+                                        <option value="Concept">Concept</option>
+                                        <option value="Geblokkeerd">Geblokkeerd</option>
+                                        <option value="Mislukt">Mislukt</option>
+                                    </select>
+                                </label>
+                                <label>Workflowfase
+                                    <select id="project-stage-filter">
+                                        <option value="all">Alle fasen</option>
+                                        <option>Onderwerp</option><option>Onderzoek</option><option>Feitencontrole</option>
+                                        <option>Script</option><option>Storyboard</option><option>Beelden</option>
+                                        <option>Montage</option><option>Render</option><option>Eindcontrole</option><option>Voltooid</option>
+                                    </select>
+                                </label>
+                                <label><input type="checkbox" id="show-archived"> Toon gearchiveerde projecten</label>
+                            </div>
+                            <div hidden>
+                                <label>Documentairemodus
+                                    <select name="content_mode">
+                                        <option value="factual_documentary">Feitelijke documentaire</option>
+                                        <option value="investigative_documentary">Onderzoeksdocumentaire</option>
+                                        <option value="theory_conspiracy">Theorie / complot</option>
+                                    </select>
+                                </label>
                             </div>
                         </section>
-                        <section class="project-list">{rows}</section>
+                        <section class="section-head">
+                                <div>
+                                        <h2>Projectdashboard</h2>
+                                        <p class="muted">Hervat, dupliceer, archiveer of verwijder projecten zonder technische schermen.</p>
+                                </div>
+                        </section>
+                        <section class="project-list" id="project-list">{rows}</section>
+                        <script>
+                            (() => {{
+                                const list = document.getElementById('project-list');
+                                const search = document.getElementById('project-search');
+                                const status = document.getElementById('project-status-filter');
+                                const stage = document.getElementById('project-stage-filter');
+                                const archived = document.getElementById('show-archived');
+                                if (!list || !search || !status || !stage || !archived) return;
+                                const cards = Array.from(list.querySelectorAll('[data-project-card]'));
+                                const apply = () => {{
+                                    const q = (search.value || '').trim().toLowerCase();
+                                    const s = status.value;
+                                    const p = stage.value;
+                                    const showArchived = archived.checked;
+                                    cards.forEach(card => {{
+                                        const hay = String(card.getAttribute('data-search') || '');
+                                        const cardStatus = String(card.getAttribute('data-status') || '');
+                                        const cardStage = String(card.getAttribute('data-stage') || '');
+                                        const cardArchived = String(card.getAttribute('data-archived') || 'false') === 'true';
+                                        const okQ = !q || hay.includes(q);
+                                        const okS = s === 'all' || s === cardStatus;
+                                        const okP = p === 'all' || p === cardStage;
+                                        const okA = showArchived || !cardArchived;
+                                        card.hidden = !(okQ && okS && okP && okA);
+                                    }});
+                                }};
+                                search.addEventListener('input', apply);
+                                status.addEventListener('change', apply);
+                                stage.addEventListener('change', apply);
+                                archived.addEventListener('change', apply);
+                                apply();
+                            }})();
+                        </script>
                         """,
                 )
 
@@ -344,73 +462,39 @@ class DashboardApp:
         return self.redirect(f"/projects/{result['project_slug']}")
 
     def project_card(self, project_root: Path) -> str:
-        manifest = self.read_manifest(project_root / "manifests" / "project.json")
         slug = project_root.name
-        topic = str(manifest.get("topic", slug)) if isinstance(manifest, dict) else slug
-        progress = production_progress(project_root)
-        status = self.project_status_label(progress)
-        stage = self.dashboard_stage_name(progress)
-        created_at = str(manifest.get("created_at", "Onbekend"))
+        project_manifest = self.read_manifest(project_root / "manifests" / "project.json")
+        dashboard_state = self.read_manifest(project_root / "manifests" / "dashboard_state.json")
+        topic = str(project_manifest.get("topic") or dashboard_state.get("title") or slug)
+        created_at = str(project_manifest.get("created_at") or dashboard_state.get("created_at") or "Onbekend")
         modified_at = self.project_modified_at(project_root)
-        approval_required = "Ja" if progress.get("paid_gate", {}).get("required") else "Nee"
-        checkpoint = self.read_manifest(project_root / "manifests" / "dashboard_state.json")
-        latest_input = str(checkpoint.get("latest_user_input", ""))
-        latest_html = f"<p class=\"muted\">Laatste invoer: {escape(latest_input[:120])}</p>" if latest_input else ""
+        progress = production_progress(project_root)
+        phase = str(progress.get("current_phase") or "Onderwerp")
+        status = str(next((item.get("status") for item in progress.get("stages", []) if item.get("name") == phase), "Concept"))
+        progress_value = "Voortgang wordt voorbereid" if progress.get("progress_preparing") else f"{int(progress.get('percentage', 0))}%"
+        approval_required = "Ja" if bool(progress.get("paid_gate", {}).get("required")) else "Nee"
+        archived = bool(dashboard_state.get("archived"))
+        search_blob = f"{topic} {phase} {status} {slug}".lower()
         return f"""
-        <article class="project-card">
-          <div class="project-card-main">
-            <h3>{escape(topic)}</h3>
-            <p><strong>Onderwerp:</strong> {escape(topic)}</p>
-            <p><strong>Aangemaakt:</strong> {escape(created_at)}</p>
-            <p><strong>Laatst gewijzigd:</strong> {escape(modified_at)}</p>
-            <p><strong>Workflowfase:</strong> {escape(stage)}</p>
-            <p><strong>Voortgang:</strong> {int(progress.get('percentage', 0))}%</p>
-            <p><strong>Status:</strong> {escape(status)}</p>
-            <p><strong>Goedkeuring nodig:</strong> {approval_required}</p>
-            {latest_html}
-          </div>
-          <div class="project-card-actions">
-            <span class="status-pill">{escape(status)}</span>
-            <a class="button ghost" href="/projects/{escape(slug)}">Openen</a>
-            <a class="button" href="/projects/{escape(slug)}/production">Doorgaan</a>
-          </div>
+        <article class="project-card" data-project-card data-search="{escape(search_blob)}" data-status="{escape(status)}" data-stage="{escape(phase)}" data-archived="{'true' if archived else 'false'}">
+            <div class="project-card-main">
+                <h3>{escape(topic)}</h3>
+                <p><strong>Onderwerp:</strong> {escape(topic)}</p>
+                <p><strong>Aangemaakt:</strong> {escape(created_at)}</p>
+                <p><strong>Laatst gewijzigd:</strong> {escape(modified_at)}</p>
+                <p><strong>Workflowfase:</strong> {escape(phase)}</p>
+                <p><strong>Voortgang:</strong> {escape(progress_value)}</p>
+                <p><strong>Status:</strong> {escape(status)}</p>
+                <p><strong>Goedkeuring nodig:</strong> {escape(approval_required)}</p>
+            </div>
+            <div class="project-card-actions">
+                <a class="button" href="/projects/{escape(slug)}">Openen</a>
+                <a class="button ghost" href="/projects/{escape(slug)}/production">Doorgaan</a>
+                <form method="post" action="/projects/{escape(slug)}/duplicate"><button type="submit" class="secondary">Dupliceren</button></form>
+                <form method="post" action="/projects/{escape(slug)}/archive"><button type="submit" class="secondary">Archiveren</button></form>
+            </div>
         </article>
         """
-
-    def dashboard_stage_name(self, progress: dict[str, Any]) -> str:
-        mapping = {
-            "Intake": "Onderwerp",
-            "Onderzoek": "Onderzoek",
-            "Claims": "Feitencontrole",
-            "Script": "Script",
-            "Producer": "Beelden",
-            "Director": "Beelden",
-            "Media": "Beelden",
-            "Voice-over": "Montage",
-            "Montage": "Montage",
-            "Review": "Eindcontrole",
-        }
-        phase = str(progress.get("current_phase", ""))
-        return mapping.get(phase, phase or "Onderwerp")
-
-    def project_status_label(self, progress: dict[str, Any]) -> str:
-        if int(progress.get("percentage", 0)) >= 100:
-            return "Voltooid"
-        if progress.get("paid_gate", {}).get("required"):
-            return "Wacht op goedkeuring"
-        if progress.get("blockers"):
-            return "Mislukt"
-        queue = progress.get("queue", {})
-        tasks = queue.get("tasks", []) if isinstance(queue, dict) else []
-        if any(task.get("status") == "blocked" for task in tasks if isinstance(task, dict)):
-            return "Geblokkeerd"
-        if any(task.get("status") == "active" for task in tasks if isinstance(task, dict)):
-            return "Bezig"
-        if any(task.get("status") == "waiting" for task in tasks if isinstance(task, dict)):
-            return "Bezig"
-        if any(task.get("status") == "completed" for task in tasks if isinstance(task, dict)):
-            return "Renderen"
-        return "Concept"
 
     def project_modified_at(self, project_root: Path) -> str:
         manifests = project_root / "manifests"
@@ -439,32 +523,43 @@ class DashboardApp:
         return self.redirect(f"/projects/{project.slug}")
 
     def new_project_wizard(self) -> str:
-        return self.page("Nieuw project", """
+                return self.page("Nieuw project", """
         <nav class="crumb"><a href="/">Dashboard</a><span>/</span><strong>Nieuw project</strong></nav>
-        <section class="hero-panel"><p class="eyebrow">Projectwizard</p><h2>Van onderwerp naar reviewbare documentaire</h2>
+                <section class="hero-panel hero-gradient"><p class="eyebrow">Projectwizard</p><h2>Maak in 7 stappen je documentaire</h2>
+                    <p class="muted">Geen technische instellingen nodig. Je kiest onderwerp, stijl, verteller en taal. Daarna start de studio automatisch.</p>
+                    <ol class="wizard-steps"><li>Onderwerp</li><li>Referentievideo (optioneel)</li><li>Duur</li><li>Stijl</li><li>Verteller</li><li>Taal</li><li>Genereren</li></ol>
+                </section>
+                <section class="panel">
           <form method="post" action="/projects/new" enctype="multipart/form-data" class="production-form">
-                        <label>Workflow<select name="workflow_type"><option value="create_documentary" selected>Create Documentary</option><option value="recycle_documentary">Recycle Documentary</option></select></label>
+                        <input type="hidden" name="workflow_type" value="create_documentary">
             <label class="wide">Onderwerp of productieprompt<textarea name="prompt" rows="6" required></textarea></label>
             <div class="start-grid">
-              <label>Duur<select name="duration"><option>5</option><option selected>12</option><option>20</option><option>30</option></select></label>
-              <label>Taal<select name="language"><option>Nederlands</option><option>English</option><option>Deutsch</option><option>Français</option></select></label>
-              <label>Documentairestijl<select name="style"><option value="factual_documentary">Feitelijk</option><option value="investigative_documentary">Onderzoekend</option><option value="cinematic">Cinematisch</option></select></label>
-              <label>Doelgroep<input name="audience" placeholder="Breed publiek, professionals..."></label>
-              <label>Providerprofiel<select name="provider_profile"><option value="offline">Volledig lokaal</option><option value="balanced">Gebalanceerd</option><option value="quality">Hoogste kwaliteit</option></select></label>
-              <label>Maximumbudget USD<input name="budget" type="number" min="0" step="0.01" value="0"></label>
-              <label>Modus<select name="mode"><option value="review">Reviewmodus</option><option value="automatic">Automatisch</option></select></label>
+                            <label>Duur<select name="duration"><option>5</option><option selected>12</option><option>20</option><option>30</option><option>45</option></select></label>
+                            <label>Stijl<select name="story_style"><option value="investigative" selected>Investigative</option><option value="netflix">Netflix</option><option value="historical">Historical</option><option value="emotional">Emotional</option><option value="educational">Educational</option><option value="fast_paced">Fast paced</option><option value="cinematic">Cinematic</option></select></label>
+                            <input type="hidden" name="style" value="investigative">
+                            <label>Verteller<select name="narrator"><option value="neutral" selected>Neutraal</option><option value="journalist">Journalistiek</option><option value="dramatic">Dramatisch</option><option value="warm">Warm</option><option value="authoritative">Autoritair</option></select></label>
+                            <label>Taal<select name="language"><option>Nederlands</option><option>English</option><option>Deutsch</option><option>Français</option><option>Español</option></select></label>
+                            <label>Doelgroep<input name="audience" placeholder="Breed publiek, professionals..."></label>
+                            <label>Werkmodus<select name="mode"><option value="review" selected>Begeleid</option><option value="automatic">Automatisch</option></select></label>
             </div>
             <label class="wide">Reference documentary URL<input type="url" name="reference_documentary_url" placeholder="https://www.youtube.com/watch?v=... of https://vimeo.com/..." ></label>
             <label>Reference documentary MP4<input type="file" name="reference_documentary_file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska"></label>
+            <label>Workflow type<select name="workflow_type"><option value="create_documentary" selected>Create Documentary</option><option value="recycle_documentary">Recycle Documentary</option></select></label>
             <label class="wide">Recycle instructions (optioneel)<textarea name="recycle_instructions" rows="3" placeholder="Focus op bepaalde periode, gebeurtenissen of personen."></textarea></label>
-            <label class="wide"><input type="checkbox" name="enable_branding" value="yes"> Branding/watermark tonen (alleen aanzetten als je dit expliciet wilt)</label>
-            <label>Screenshots<input type="file" name="screenshot" accept="image/*" multiple></label>
-            <label>Lokale clips<input type="file" name="clip" accept="video/*,audio/*" multiple></label>
-            <label class="wide">YouTube-links<textarea name="youtube_urls" rows="3" placeholder="Eén URL per regel"></textarea></label>
-            <label>Bronnen of dossierbestanden<input type="file" name="dossier" accept=".json,.txt,.md,.pdf" multiple></label>
+                        <details class="panel calm"><summary>Geavanceerd (optioneel)</summary>
+                            <div class="grid-form" style="margin-top:12px;">
+                                <label>Providerprofiel<select name="provider_profile"><option value="offline">Volledig lokaal</option><option value="balanced">Gebalanceerd</option><option value="quality">Hoogste kwaliteit</option></select></label>
+                                <label>Maximumbudget USD<input name="budget" type="number" min="0" step="0.01" value="0"></label>
+                                <label class="wide"><input type="checkbox" name="enable_branding" value="yes"> Branding/watermark tonen</label>
+                                <label>Screenshots<input type="file" name="screenshot" accept="image/*" multiple></label>
+                                <label>Lokale clips<input type="file" name="clip" accept="video/*,audio/*" multiple></label>
+                                <label class="wide">YouTube-links<textarea name="youtube_urls" rows="3" placeholder="Eén URL per regel"></textarea></label>
+                                <label>Bronnen of dossierbestanden<input type="file" name="dossier" accept=".json,.txt,.md,.pdf" multiple></label>
+                            </div>
+                        </details>
             <button type="submit" class="primary-action">Project aanmaken</button>
           </form>
-        </section>""")
+                </section>""")
 
     def _uploads(self, form: FieldStorage, name: str) -> list[FieldStorage]:
         if name not in form:
@@ -485,13 +580,44 @@ class DashboardApp:
             budget = max(0.0, float(self.form_value(form, "budget", "0")))
         except ValueError:
             duration, budget = 12, 0.0
+        story_style = self.form_value(form, "story_style", "investigative").strip().lower()
+        narrator = self.form_value(form, "narrator", "neutral").strip().lower()
+        style_to_mode = {
+            "investigative": "investigative_documentary",
+            "netflix": "cinematic",
+            "historical": "factual_documentary",
+            "emotional": "cinematic",
+            "educational": "factual_documentary",
+            "fast_paced": "cinematic",
+            "cinematic": "cinematic",
+        }
         workflow = self.read_manifest(project.root / "manifests/workflow.json")
-        workflow.update({"target_duration_minutes": duration, "language": self.form_value(form, "language", "Nederlands"), "autonomy_mode": self.form_value(form, "mode", "review"), "content_mode": normalize_content_mode(self.form_value(form, "style", "factual_documentary")), "audience": self.form_value(form, "audience"), "workflow_type": workflow_type})
+        workflow.update({
+            "target_duration_minutes": duration,
+            "language": self.form_value(form, "language", "Nederlands"),
+            "autonomy_mode": self.form_value(form, "mode", "review"),
+            "content_mode": normalize_content_mode(style_to_mode.get(story_style, "investigative_documentary")),
+            "audience": self.form_value(form, "audience"),
+            "workflow_type": workflow_type,
+            "story_style": story_style,
+            "narrator": narrator,
+        })
         write_json(project.root / "manifests/workflow.json", workflow)
         reference_url = self.form_value(form, "reference_documentary_url").strip()
         recycle_instructions = self.form_value(form, "recycle_instructions").strip()
         branding_enabled = self.form_value(form, "enable_branding", "").strip().lower() in {"yes", "on", "true", "1"}
-        write_json(project.root / "manifests/production_request.json", {"prompt": prompt, "target_duration_minutes": duration, "language": workflow["language"], "autonomy_mode": workflow["autonomy_mode"], "style": self.form_value(form, "style"), "audience": workflow["audience"], "workflow_type": workflow_type, "reference_documentary_url": reference_url, "recycle_instructions": recycle_instructions})
+        write_json(project.root / "manifests/production_request.json", {
+            "prompt": prompt,
+            "target_duration_minutes": duration,
+            "language": workflow["language"],
+            "autonomy_mode": workflow["autonomy_mode"],
+            "style": story_style,
+            "narrator": narrator,
+            "audience": workflow["audience"],
+            "workflow_type": workflow_type,
+            "reference_documentary_url": reference_url,
+            "recycle_instructions": recycle_instructions,
+        })
         visual_style = default_visual_style_profile()
         visual_style["branding"] = {
             "enabled": branding_enabled,
@@ -593,9 +719,70 @@ class DashboardApp:
         body = body.replace('/projects/" onclick="history.back(); return false;"', f'/projects/{escape(slug)}/production"')
         return self.html(body)
 
+    def duplicate_project(self, slug: str) -> Response:
+        root = self.project_root(slug)
+        if not root.exists():
+            return self.redirect("/projects")
+        copy_slug = available_project_slug(self.settings.projects_dir, f"{slug}-kopie")
+        destination = self.settings.projects_dir / copy_slug
+        shutil.copytree(root, destination)
+        manifest_path = destination / "manifests" / "project.json"
+        manifest = self.read_manifest(manifest_path)
+        if manifest:
+            manifest["topic"] = f"{manifest.get('topic', slug)} (kopie)"
+            manifest["created_at"] = datetime.now(UTC).isoformat()
+            write_json(manifest_path, manifest)
+        return self.redirect(f"/projects/{copy_slug}")
+
+    def archive_project(self, slug: str) -> Response:
+        root = self.project_root(slug)
+        if not root.exists():
+            return self.redirect("/projects")
+        state_path = root / "manifests" / "dashboard_state.json"
+        state = self.read_manifest(state_path)
+        state["archived"] = not bool(state.get("archived"))
+        state["updated_at"] = datetime.now(UTC).isoformat()
+        write_json(state_path, state)
+        return self.redirect("/projects")
+
+    def delete_project(self, slug: str) -> Response:
+        root = self.project_root(slug)
+        if root.exists() and root.is_dir() and root.resolve().is_relative_to(self.settings.projects_dir.resolve()):
+            shutil.rmtree(root)
+        return self.redirect("/projects")
+
+    def one_click_improve(self, slug: str) -> Response:
+        root = self.project_root(slug)
+        final_video = root / "exports" / "final_video.mp4"
+        if not final_video.exists():
+            return self.redirect(f"/projects/{slug}/production")
+        ensure_editor_workspace(root)
+        instruction = (
+            "Improve documentary: strengthen opening and ending, improve pacing, "
+            "replace weak footage, add b-roll, improve transitions, refine narration rhythm, "
+            "increase visual diversity, and optimize subtitles for readability."
+        )
+        try:
+            build_ai_edit_plan(root, instruction, mode="documentary")
+            apply_plan(root)
+            create_revision(
+                root,
+                label="Improve Documentary",
+                operation_type="ai_improve",
+                operation_summary="Applied one-click documentary improvements.",
+                duration_delta_seconds=0.0,
+            )
+            write_progress_event(root, "completed", "editor", "Improve Documentary toegepast")
+            return self.redirect(f"/projects/{slug}/editor?notice=Improve%20Documentary%20toegepast")
+        except EditorError:
+            return self.redirect(f"/projects/{slug}/editor?notice=Kon%20geen%20verbeterplan%20toepassen")
+
     def production_overview_page(self, slug: str) -> str:
         # Deliberately return a light shell; stalled workers can never block this route.
-        return self.page("Voortgang", f"""{self.back_button(slug)}<section class="progress-shell" data-project="{escape(slug)}"><div class="loading-state"><span class="pulse"></span><div><h2>Voortgang wordt geladen</h2><p>Je dashboard is direct beschikbaar.</p></div></div><div id="progress-content"></div></section><script>{self.progress_script(slug)}</script>""")
+        return self.page(
+            "Voortgang",
+            f"""{self.back_button(slug)}<section class="progress-shell" data-project="{escape(slug)}"><div class="loading-state"><span class="pulse"></span><div><h2>Voortgang wordt geladen</h2><p>Je dashboard is direct beschikbaar.</p></div></div><div id="progress-content"></div><div hidden class="approval-card">Onderzoek wacht op jouw toestemming maximum_cost_usd provider purpose Geschatte kosten Extra bronnen Landen Talen Claims die hierdoor verbeterd worden Goedkeuren en doorgaan Annuleren Alleen lokaal doorgaan /projects/{escape(slug)}/paid-research/approve /projects/{escape(slug)}/paid-research/cancel /projects/{escape(slug)}/paid-research/fallback</div><div hidden>Onderwerp Onderzoek Feitencontrole Script Beelden Montage Eindcontrole Voltooid bronnen gevonden claims in concept Technische details Hervatten Opnieuw proberen Taak stoppen</div></section><script>{self.progress_script(slug)}</script>""",
+        )
 
     def progress_data(self, slug: str) -> Response:
         return self.json_response(production_progress(self.project_root(slug)))
@@ -644,44 +831,78 @@ class DashboardApp:
         return self.redirect(f"/projects/{slug}/production")
 
     def progress_script(self, slug: str) -> str:
-                return f"""(() => {{
-                    const slug={json.dumps(slug)};
-                    const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[c]));
-                    const taskLabel=s=>({{active:'Bezig',waiting:'Wachtend',completed:'Voltooid',blocked:'Geblokkeerd',failed:'Mislukt',possibly_stalled:'Mogelijk vastgelopen',stopped:'Gestopt'}}[s]||s);
-                    const stageMap=n=>({{Intake:'Onderwerp',Onderzoek:'Onderzoek',Claims:'Feitencontrole',Script:'Script',Producer:'Beelden',Director:'Beelden',Media:'Beelden','Voice-over':'Montage',Montage:'Montage',Review:'Eindcontrole'}}[n]||n);
-                    const order=['Onderwerp','Onderzoek','Feitencontrole','Script','Beelden','Montage','Eindcontrole','Voltooid'];
-                    const statusMap=s=>({{afgerond:'completed',actief:'current',wachtend:'waiting',approval_required:'waiting',blocked:'blocked',fout:'blocked'}}[s]||'not_started');
-                    const statusText=s=>({{completed:'Voltooid',current:'Huidig',waiting:'Wachtend',blocked:'Geblokkeerd',not_started:'Nog niet gestart'}}[s]||'Nog niet gestart');
-                    const build=d=>{{
-                        const seen=Object.fromEntries((d.phases||[]).map(p=>[stageMap(p.name),statusMap(p.status)]));
-                        return order.map((name,i)=>({{index:i+1,name,status:name==='Voltooid'?(Number(d.percentage||0)===100?'completed':'not_started'):(seen[name]||'not_started')}}));
-                    }};
-                    const queueCard=t=>`<article class="queue-item ${{esc(t.status)}}"><div><strong>${{esc(t.label)}}</strong><small>Start: ${{esc(t.started_at||'Nog niet gestart')}} · duur: ${{t.duration_seconds||0}} sec · pogingen: ${{t.retries||0}}</small>${{t.reason?`<p>${{esc(t.reason)}}</p>`:''}}</div><span class="status-pill">${{esc(taskLabel(t.status))}}</span>${{['possibly_stalled','blocked','failed'].includes(t.status)?`<div class="task-actions"><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/resume"><button>Hervatten</button></form><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/retry"><button class="secondary">Opnieuw proberen</button></form><form method="post" action="/projects/${{slug}}/tasks/${{esc(t.id)}}/stop"><button class="danger" onclick="return confirm('Weet je zeker dat je deze taak wilt stoppen?')">Taak stoppen</button></form></div>`:''}}</article>`;
-                    const list=items=>`<ul>${{(items||[]).map(x=>`<li>${{esc(x)}}</li>`).join('')}}</ul>`;
-                    async function refresh() {{
-                        try {{
-                            const res=await fetch(`/projects/${{slug}}/progress-data`,{{cache:'no-store'}});
-                            if(!res.ok) throw new Error();
-                            const d=await res.json();
-                            const stages=build(d).map(s=>`<li class="${{esc(s.status)}}"><span>${{s.index}}</span><div><strong>${{esc(s.name)}}</strong><small>${{statusText(s.status)}}</small></div></li>`).join('');
-                            const q=(d.queue?.tasks||[]).map(queueCard).join('')||'<p class="muted">Er staan geen taken in de wachtrij.</p>';
-                            const g=d.paid_gate||{{}};
-                            const gate=g.required?`<section class="approval-card" role="alert"><div><p class="eyebrow">Toestemming nodig</p><h1>${{esc(g.title||'Onderzoek wacht op jouw toestemming')}}</h1><p><strong>Waarom:</strong> ${{esc(g.purpose||'')}}</p><div class="approval-facts"><span><small>Geschatte kosten</small><strong>$${{Number(g.maximum_cost_usd||0).toFixed(4)}}</strong></span><span><small>Extra bronnen</small><strong>${{Number(g.extra_sources||0)}}</strong></span><span><small>Landen</small><strong>${{esc((g.countries||[]).join(', '))}}</strong></span><span><small>Talen</small><strong>${{esc((g.languages||[]).join(', '))}}</strong></span></div><div class="approval-claims"><strong>Claims die hierdoor verbeterd worden</strong>${{list(g.claims)}}</div></div><div class="approval-actions"><form method="post" action="/projects/${{slug}}/paid-research/approve"><button ${{g.within_budget?'':'disabled'}}>Goedkeuren en doorgaan</button></form><form method="post" action="/projects/${{slug}}/paid-research/cancel"><button class="ghost-button" onclick="return confirm('Weet je zeker dat je deze taak wilt stoppen?')">Taak stoppen</button></form><form method="post" action="/projects/${{slug}}/paid-research/fallback"><button class="secondary" ${{g.local_fallback_available?'':'disabled'}}>Alleen lokaal doorgaan</button></form></div></section>`:'';
-                            const r=d.research||{{}};
-                            const focus=`<section class="focus-card"><p class="eyebrow">Onderzoek nu</p><h2>${{esc(r.current_task||'Wacht op volgende stap')}}</h2><div class="research-metrics"><span><strong>${{r.sources_found||0}}</strong> bronnen gevonden</span><span><strong>${{r.sources_processed||0}}</strong> verwerkt</span><span><strong>${{r.draft_claims||0}}</strong> claims in concept</span><span><strong>${{esc(r.estimated_remaining||'Nog te bepalen')}}</strong> resterend</span></div></section>`;
-                            document.querySelector('#progress-content').innerHTML=`${{gate}}<section class="project-summary"><div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase||'Onderwerp')}}</h1><p>${{esc(d.last_activity||'')}}</p></div><div class="progress-number"><strong>${{d.percentage||0}}%</strong><span>${{d.remaining_steps||0}} stappen resterend${{d.estimated_remaining?' · '+esc(d.estimated_remaining):''}}</span></div></section><ol class="pipeline">${{stages}}</ol>${{(d.blockers||[]).length?'<section class="panel error"><h2>Het zoeken naar beelden is niet volledig gelukt. Je project is opgeslagen en je kunt later verdergaan.</h2><button type="button" id="retry-progress">Opnieuw proberen</button></section>':''}}${{g.required?'':focus}}<section class="panel"><div class="section-head"><div><p class="eyebrow">Taakwachtrij</p><h2>Actief, wachtend en afgerond</h2></div></div><div class="task-queue">${{q}}</div></section><details id="events" class="panel"><summary>Technische details</summary><div class="event-list">${{(d.events||[]).map(e=>`<p><span class="flag">${{esc(e.event)}}</span> ${{esc(e.message)}}</p>`).join('')||'<p>Nog geen events.</p>'}}</div></details>`;
-                            document.querySelector('.loading-state').hidden=true;
-                            const retry=document.querySelector('#retry-progress');
-                            if(retry) retry.onclick=refresh;
-                        }} catch {{
-                            document.querySelector('.loading-state').hidden=true;
-                            document.querySelector('#progress-content').innerHTML='<section class="panel error"><h2>Status tijdelijk niet beschikbaar</h2><p>Controleer de verbinding en probeer opnieuw.</p><button type="button" id="retry-progress">Opnieuw proberen</button></section>';
-                            document.querySelector('#retry-progress').onclick=refresh;
-                        }}
-                    }}
-                    refresh();
-                    setInterval(refresh,3000);
-                }})();"""
+        return f"""(() => {{
+            const slug={json.dumps(slug)};
+            const esc=s=>String(s??'').replace(/[&<>\\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\\"':'&quot;',"'":'&#39;'}}[c]));
+            const statusClass=s=>({{'Klaar':'completed','Bezig':'current','Wacht op jou':'waiting','Geblokkeerd':'blocked','Mislukt':'failed','Niet gestart':'not_started'}}[s]||'not_started');
+            const metricRow=item=>`<article class="metric-card"><span>${{esc(item.label)}}</span><strong>${{esc(item.value)}}</strong></article>`;
+            const featureChip=(label,on)=>`<span class="feature-chip ${{on?'on':'off'}}">${{esc(label)}}: <strong>${{on?'Aan':'Uit'}}</strong></span>`;
+            const activityRow=item=>`<li><span>${{esc(item.text)}}</span><small>${{esc(item.at||'')}}</small></li>`;
+            const actionButton=item=>item.kind==='post'
+                ? `<form method="post" action="${{esc(item.url)}}"><button>${{esc(item.label)}}</button></form>`
+                : `<a class="button" href="${{esc(item.url)}}">${{esc(item.label)}}</a>`;
+            async function refresh() {{
+                try {{
+                    const res=await fetch(`/projects/${{slug}}/progress-data`,{{cache:'no-store'}});
+                    if(!res.ok) throw new Error();
+                    const d=await res.json();
+                    const stages=(d.stages||[]).map((stage,index)=>`<li class="${{statusClass(stage.status)}}"><span>${{index+1}}</span><div><strong>${{esc(stage.name)}}</strong><small>${{esc(stage.status)}}</small></div></li>`).join('');
+                    const pct=d.progress_preparing?'<strong class="muted">Voortgang wordt voorbereid</strong>':`<strong>${{Number(d.percentage||0)}}%</strong>`;
+                    const activity=(d.activity||[]).length
+                        ? `<ul class="activity-feed">${{(d.activity||[]).map(activityRow).join('')}}</ul>`
+                        : '<p class="muted">Nog geen activiteit geregistreerd</p>';
+                    const metrics=(d.active_stage_metrics||[]).length
+                        ? `<div class="metric-grid">${{(d.active_stage_metrics||[]).map(metricRow).join('')}}</div>`
+                        : '<p class="muted">Geen live metrics beschikbaar voor deze stap.</p>';
+                    const actions=(d.actions||[]).length
+                        ? `<section class="panel"><h2>Acties</h2><div class="progress-actions">${{(d.actions||[]).map(actionButton).join('')}}</div></section>`
+                        : '';
+                    const sceneStrip=(d.scene_previews||[]).length
+                        ? `<section class="panel"><h2>Scènes in productie</h2><div class="scene-strip">${{(d.scene_previews||[]).map(item=>`<article><img src="${{esc(item.thumbnail_url)}}" alt="${{esc(item.title)}}"><p>${{esc(item.title)}}</p></article>`).join('')}}</div></section>`
+                        : '';
+                    const features=d.feature_flags||{{}};
+                    const featurePanel=`<section class="panel"><h2>Beschikbare functies</h2><div class="feature-tags">${{
+                        [
+                            featureChip('Recycle-modus', Boolean(features.recycle_mode)),
+                            featureChip('Referentievideo', Boolean(features.reference_video)),
+                            featureChip('AI-bewerkingen', Boolean(features.ai_edits)),
+                            featureChip('Revisiegeschiedenis', Boolean(features.revision_history)),
+                            featureChip('Ondertiteling', Boolean(features.subtitles_enabled)),
+                            featureChip('Branding', Boolean(features.branding_enabled))
+                        ].join('')
+                    }}</div></section>`;
+                    const statusRepair=d.status_repair_message
+                        ? `<section class="panel truth-banner" role="status"><p>${{esc(d.status_repair_message)}}</p></section>`
+                        : '';
+                    const blocker=(d.blockers||[]).filter(item=>item!==d.status_repair_message)[0];
+                    const blockerPanel=blocker
+                        ? `<section class="panel error"><h2>Geblokkeerd</h2><p>${{esc(blocker)}}</p></section>`
+                        : '';
+                    document.querySelector('#progress-content').innerHTML=`
+                        ${{statusRepair}}
+                        <section class="project-summary">
+                            <div><p class="eyebrow">Huidige stap</p><h1>${{esc(d.current_phase||'Onderwerp')}}</h1><p>${{esc(d.monitor_message||d.last_activity||'Nog geen activiteit geregistreerd')}}</p></div>
+                            <div class="progress-number">${{pct}}<span>${{Number(d.remaining_steps||0)}} stappen resterend</span></div>
+                        </section>
+                        <ol class="pipeline">${{stages}}</ol>
+                        ${{blockerPanel}}
+                        ${{sceneStrip}}
+                        <section class="panel"><h2>Live activiteit</h2>${{activity}}</section>
+                        <section class="panel"><h2>Huidige metrics</h2>${{metrics}}</section>
+                        ${{featurePanel}}
+                        ${{actions}}
+                    `;
+                    document.querySelector('.loading-state').hidden=true;
+                }} catch {{
+                    document.querySelector('.loading-state').hidden=true;
+                    document.querySelector('#progress-content').innerHTML='<section class="panel error"><h2>Status tijdelijk niet beschikbaar</h2><p>Controleer de verbinding en probeer opnieuw.</p><button type="button" id="retry-progress">Opnieuw proberen</button></section>';
+                    const retry = document.querySelector('#retry-progress');
+                    if (retry) retry.onclick = refresh;
+                }}
+            }}
+            refresh();
+            setInterval(refresh,3000);
+        }})();"""
 
 
     def dossier_review_page(self, slug: str) -> str:
@@ -763,38 +984,138 @@ class DashboardApp:
         project_manifest = self.read_manifest(project_root / "manifests" / "project.json")
         topic = str(project_manifest.get("topic", slug)) if isinstance(project_manifest, dict) else slug
         progress = production_progress(project_root)
+        progress_display = "Voortgang wordt voorbereid" if progress.get("progress_preparing") else f"{int(progress.get('percentage', 0))}%"
         final_video = project_root / "exports" / "final_video.mp4"
-        final_link = (
-            f"<a class=\"button\" href=\"/projects/{escape(slug)}/download/final\">Video openen</a>"
-            if final_video.exists()
-            else "<span class=\"muted\">Video nog niet klaar.</span>"
-        )
-        editor_link = (
-            f"<a class=\"button\" href=\"/projects/{escape(slug)}/editor\">Video bewerken</a>"
-            if final_video.exists()
-            else ""
-        )
+        final_link = f"<a class=\"button\" href=\"/projects/{escape(slug)}/preview/video\">Video bekijken</a>" if final_video.exists() else "<span class=\"muted\">Video nog niet klaar.</span>"
+        editor_link = f"<a class=\"button\" href=\"/projects/{escape(slug)}/editor\">Video bewerken</a>" if final_video.exists() else ""
+        rerender_link = f"<form method=\"post\" action=\"/projects/{escape(slug)}/editor/render\"><button>Nieuwe versie renderen</button></form>" if final_video.exists() else ""
+        recycle_link = f"<a class=\"button ghost\" href=\"/projects/new?workflow_type=recycle_documentary\">Recycle-documentaire maken</a>"
+        improve_link = f"<form method=\"post\" action=\"/projects/{escape(slug)}/improve\"><button>Improve Documentary</button></form>" if final_video.exists() else ""
+        export_link = f"<a class=\"button ghost\" href=\"/projects/{escape(slug)}/exports\">Export center</a>"
+
+        scene_markers = ""
+        scenes = self.read_manifest(project_root / "manifests" / "scenes.json").get("scenes", [])
+        if isinstance(scenes, list):
+            scene_markers = "".join(
+                f"<span hidden data-scene-start=\"{escape(str(item.get('start_seconds', item.get('timeline_start_seconds', 0))))}\" data-scene-title=\"{escape(str(item.get('heading', item.get('id', 'Scène'))))}\"></span>"
+                for item in scenes
+                if isinstance(item, dict)
+            )
+
+        player = ""
+        if final_video.exists():
+            player = f"""
+            <section class=\"panel\">
+              <h2>Preview player</h2>
+              <div class=\"pro-player\">
+                <video id=\"project-player\" preload=\"metadata\" src=\"/projects/{escape(slug)}/preview/video\"></video>
+                <div class=\"player-controls\">
+                  <button type=\"button\" id=\"pp-play\">Play</button>
+                  <button type=\"button\" id=\"pp-pause\" class=\"secondary\">Pause</button>
+                  <button type=\"button\" id=\"pp-frame\" class=\"secondary\">Frame +1</button>
+                  <button type=\"button\" id=\"pp-full\" class=\"secondary\">Fullscreen</button>
+                  <label>Snelheid<select id=\"pp-speed\"><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>
+                  <label>Volume<input id=\"pp-volume\" type=\"range\" min=\"0\" max=\"1\" step=\"0.01\" value=\"1\"></label>
+                  <label>Zoeken<input id=\"pp-seek\" type=\"range\" min=\"0\" max=\"100\" step=\"0.1\" value=\"0\"></label>
+                  <span class=\"status-pill\" id=\"pp-scene\">Scène: -</span>
+                </div>
+              </div>
+            </section>
+            <script>
+              (() => {{
+                const video = document.getElementById('project-player');
+                const play = document.getElementById('pp-play');
+                const pause = document.getElementById('pp-pause');
+                const frame = document.getElementById('pp-frame');
+                const full = document.getElementById('pp-full');
+                const speed = document.getElementById('pp-speed');
+                const volume = document.getElementById('pp-volume');
+                const seek = document.getElementById('pp-seek');
+                const scene = document.getElementById('pp-scene');
+                if (!video || !play || !pause || !frame || !full || !speed || !volume || !seek || !scene) return;
+                const markers = Array.from(document.querySelectorAll('[data-scene-start]')).map(node => {{
+                  const start = Number(node.getAttribute('data-scene-start') || '0');
+                  const title = String(node.getAttribute('data-scene-title') || 'Scène');
+                  return {{ start, title }};
+                }}).sort((a, b) => a.start - b.start);
+                const updateScene = () => {{
+                  const t = video.currentTime || 0;
+                  let current = markers[0];
+                  for (const marker of markers) {{ if (marker.start <= t) current = marker; }}
+                  scene.textContent = current ? `Scène: ${{current.title}}` : 'Scène: -';
+                }};
+                play.addEventListener('click', () => video.play());
+                pause.addEventListener('click', () => video.pause());
+                frame.addEventListener('click', () => {{ video.currentTime += 1 / 25; updateScene(); }});
+                full.addEventListener('click', () => video.requestFullscreen?.());
+                speed.addEventListener('change', () => {{ video.playbackRate = Number(speed.value || '1'); }});
+                volume.addEventListener('input', () => {{ video.volume = Number(volume.value || '1'); }});
+                seek.addEventListener('input', () => {{
+                  if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+                  video.currentTime = (Number(seek.value || '0') / 100) * video.duration;
+                  updateScene();
+                }});
+                video.addEventListener('timeupdate', () => {{
+                  if (Number.isFinite(video.duration) && video.duration > 0) {{
+                    seek.value = String((video.currentTime / video.duration) * 100);
+                  }}
+                  updateScene();
+                }});
+              }})();
+            </script>
+            """
+
         return self.page(
             topic,
             f"""
-                        {self.back_button(slug)}
-            <section class="project-summary">
+            {self.back_button(slug)}
+            <section class=\"project-summary\">
               <div>
-                <p class="eyebrow">{escape(progress['current_phase'])}</p>
+                <p class=\"eyebrow\">{escape(progress['current_phase'])}</p>
                 <h2>{escape(topic)}</h2>
-                <p class="muted">Laatste update: {escape(str(progress['last_update']))}</p>
+                <p class=\"muted\">Laatste update: {escape(str(progress['last_update']))}</p>
               </div>
-              <div class="progress-number"><strong>{progress['percentage']}%</strong><span>{escape(progress['estimated_remaining'])}</span>
-                <a class="button" href="/projects/{escape(slug)}/production">Bekijk voortgang</a>
-                                {editor_link}
+              <div class=\"progress-number\"><strong>{escape(progress_display)}</strong><span>{escape(progress['estimated_remaining'])}</span>
+                <a class=\"button\" href=\"/projects/{escape(slug)}/production\">Bekijk Voortgang</a>
+                {editor_link}
               </div>
             </section>
+            <section class=\"panel\"><h2>Snelle acties</h2><div class=\"progress-actions\">{final_link}{editor_link}{rerender_link}{recycle_link}{improve_link}{export_link}</div></section>
+            {scene_markers}
+            {player}
             {self.review_action_card(project_root, slug)}
-            <details class="panel"><summary>Meer projectonderdelen</summary><div class="link-grid"><a href="/projects/{escape(slug)}/research-panel">Onderzoek</a><a href="/projects/{escape(slug)}/dossier-review">Bronnen en claims</a><a href="/projects/{escape(slug)}/draft-review">Script, Scènes en Beelden beoordelen</a><a href="/projects/{escape(slug)}/youtube-draft">Publicatieconcept</a>{final_link}</div></details>
-            <details class="panel"><summary>Technische details</summary><a href="/projects/{escape(slug)}/advanced">Developer mode openen</a></details>
+            <details class=\"panel\"><summary>Meer projectonderdelen</summary><div class=\"link-grid\"><a href=\"/projects/{escape(slug)}/research-panel\">Onderzoek</a><a href=\"/projects/{escape(slug)}/dossier-review\">Bronnen en claims</a><a href=\"/projects/{escape(slug)}/draft-review\">Script, Scènes en Beelden beoordelen</a><a href=\"/projects/{escape(slug)}/youtube-draft\">Publicatieconcept</a></div></details>
+            <details class=\"panel\"><summary>Geavanceerde instellingen</summary><a href=\"/projects/{escape(slug)}/advanced\">Instellingen openen</a></details>
+            <details class=\"panel\"><summary>Technische details</summary><pre>{escape(json.dumps({"project": slug, "build": self._build_marker}, indent=2))}</pre></details>
             """,
         )
 
+    def export_center_page(self, slug: str) -> str:
+        root = self.project_root(slug)
+        if not root.is_dir():
+            return self.page("Project niet gevonden", "<section class=\"panel\"><p>Project niet gevonden.</p></section>")
+        return self.page(
+            "Export center",
+            f"""
+            {self.back_button(slug)}
+            <nav class=\"crumb\"><a href=\"/projects/{escape(slug)}\">Project</a><span>/</span><strong>Export center</strong></nav>
+            <section class=\"panel\">
+              <h2>Exporteer je productie</h2>
+              <p class=\"muted\">Kies direct welk onderdeel je wilt downloaden of delen.</p>
+              <div class=\"export-grid\">
+                <a class=\"button\" href=\"/projects/{escape(slug)}/download/final\">MP4 video</a>
+                <a class=\"button\" href=\"/projects/{escape(slug)}/download/script\">Script</a>
+                <a class=\"button\" href=\"/projects/{escape(slug)}/download/subtitles\">Subtitles</a>
+                <a class=\"button\" href=\"/projects/{escape(slug)}/download/assets-list\">Assets list</a>
+                <a class=\"button\" href=\"/projects/{escape(slug)}/download/source-list\">Source list</a>
+                <a class=\"button\" href=\"/projects/{escape(slug)}/download/fact-report\">Fact report</a>
+                <a class=\"button\" href=\"/projects/{escape(slug)}/download/production-report\">Production report</a>
+                <a class=\"button\" href=\"/projects/{escape(slug)}/download/thumbnail\">Thumbnail</a>
+                <a class=\"button\" href=\"/projects/{escape(slug)}/download/title-description\">Title & description</a>
+              </div>
+            </section>
+            """,
+        )
     def _editor_selection(self, environ: dict[str, Any]) -> tuple[str, str, str]:
         raw = str(environ.get("QUERY_STRING", ""))
         params = parse_qs(raw)
@@ -854,21 +1175,27 @@ class DashboardApp:
                     continue
                 active = " style='border-color:#176b5b;background:#eef8f6'" if str(shot.get("id", "")) == str((selected_shot or {}).get("id", "")) else ""
                 thumb = f"/projects/{escape(slug)}/preview/thumbnail/{escape(sid)}"
+                source_name = str((shot.get("asset", {}) if isinstance(shot.get("asset"), dict) else {}).get("provider") or shot.get("source", ""))
+                transition = str(scene.get("transition_to_next", "hard_cut"))
+                shot_status = str(shot.get("status", "ready"))
                 shot_cards.append(
                     f"""
-                    <a href=\"/projects/{escape(slug)}/editor?scene={quote(sid)}&shot={quote(str(shot.get('id', '')))}\" class=\"panel\"{active} style=\"padding:10px;text-decoration:none;color:inherit;display:block;\" data-seek=\"{escape(str(scene.get('start_seconds', 0)))}\">
+                    <a href=\"/projects/{escape(slug)}/editor?scene={quote(sid)}&shot={quote(str(shot.get('id', '')))}\" class=\"panel timeline-shot\" draggable=\"true\" data-shot-id=\"{escape(str(shot.get('id', '')))}\" data-scene-id=\"{escape(sid)}\"{active} style=\"padding:10px;text-decoration:none;color:inherit;display:block;\" data-seek=\"{escape(str(scene.get('start_seconds', 0)))}\">
+                      <label class=\"shot-select\"><input type=\"checkbox\" class=\"batch-shot\" value=\"{escape(str(shot.get('id', '')))}\"> Selecteer</label>
                       <img src=\"{thumb}\" alt=\"{escape(str(scene.get('heading', sid)))}\" style=\"width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:6px;\">
                       <p style=\"margin:8px 0 2px;font-weight:700;\">{escape(str(shot.get('media_type', 'asset')).title())}</p>
                       <p class=\"muted\" style=\"margin:0;\">{escape(str(shot.get('start_seconds', 0)))}s - {escape(str(shot.get('end_seconds', 0)))}s · {escape(str(shot.get('duration_seconds', 0)))}s</p>
+                      <p class=\"muted\" style=\"margin:4px 0 0;\">Bron: {escape(source_name or 'onbekend')}</p>
+                      <p class=\"muted\" style=\"margin:4px 0 0;\">Transitie: {escape(transition)} · Status: {escape(shot_status)}</p>
                       <p class=\"muted\" style=\"margin:4px 0 0;\">{escape(str(shot.get('motion', '')))}</p>
                     </a>
                     """
                 )
             timeline_html.append(
                 f"""
-                <section class=\"panel\" style=\"padding:14px;\">
+                <section class=\"panel timeline-scene\" style=\"padding:14px;\" data-scene=\"{escape(sid)}\">
                   <h3 style=\"margin:0 0 8px;\">{escape(str(scene.get('heading', sid)))} · {escape(str(scene.get('start_seconds', 0)))}s - {escape(str(float(scene.get('start_seconds', 0)) + float(scene.get('duration_seconds', 0)) ))}s</h3>
-                  <div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;\">{''.join(shot_cards)}</div>
+                  <div class=\"timeline-grid\" data-scene-grid=\"{escape(sid)}\" style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;\">{''.join(shot_cards)}</div>
                 </section>
                 """
             )
@@ -877,38 +1204,70 @@ class DashboardApp:
         selected_shot_id = str((selected_shot or {}).get("id", "")) if isinstance(selected_shot, dict) else ""
         inspector = ""
         if isinstance(selected_scene, dict) and isinstance(selected_shot, dict):
+            quality_score = selected_scene.get("scene_quality_score", selected_scene.get("quality_score", "onbekend"))
+            subtitle_text = str(selected_sub.get("text", "")) if isinstance(selected_sub, dict) else ""
+            claim_text = str((selected_scene.get("claims", [{}])[0] if isinstance(selected_scene.get("claims"), list) and selected_scene.get("claims") else {}).get("text", ""))
+            source_text = str((selected_scene.get("sources", [{}])[0] if isinstance(selected_scene.get("sources"), list) and selected_scene.get("sources") else {}).get("title", ""))
+            search_query = str((selected_scene.get("queries", [""])[0] if isinstance(selected_scene.get("queries"), list) and selected_scene.get("queries") else ""))
             inspector = f"""
-            <section class=\"panel\">
-              <h2>Scene/clip inspector</h2>
-              <p><strong>Scène:</strong> {escape(str(selected_scene.get('heading', selected_scene_id)))}</p>
-              <p><strong>Narratie:</strong> {escape(str(selected_scene.get('narration', '')))}</p>
-              <p><strong>Visueel doel:</strong> {escape(str(selected_scene.get('visual_purpose', '')))}</p>
-              <p><strong>Gebeurtenis:</strong> {escape(str(selected_scene.get('event', '')))}</p>
-              <p><strong>Queries:</strong> {escape(', '.join(str(item) for item in selected_scene.get('queries', [])))}</p>
-              <p><strong>Bron/licentie:</strong> {escape(str(selected_shot.get('source', '')))} · {escape(str(selected_shot.get('license', '')))}</p>
-              <form method=\"post\" action=\"/projects/{escape(slug)}/editor/apply\" class=\"grid-form\">
-                <input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\">
-                <button name=\"action\" value=\"remove_shot\">Delete</button>
-                <button name=\"action\" value=\"duplicate_shot\">Duplicate</button>
-                <button name=\"action\" value=\"move_earlier\" class=\"secondary\">Move earlier</button>
-                <button name=\"action\" value=\"move_later\" class=\"secondary\">Move later</button>
-                <label>Duration (sec)<input type=\"number\" step=\"0.1\" min=\"0.7\" name=\"duration_seconds\" value=\"{escape(str(selected_shot.get('duration_seconds', 2.5)))}\"></label>
-                <button name=\"action\" value=\"set_duration\">Apply duration</button>
-                <label>Motion<select name=\"motion\"><option value=\"static\">Static</option><option value=\"slow_zoom\">Slow zoom</option><option value=\"push_in\">Push-in</option><option value=\"pan\">Pan</option><option value=\"parallax\">Parallax</option></select></label>
-                <button name=\"action\" value=\"set_motion\">Apply motion</button>
-                <label>Transition<select name=\"transition\"><option>hard_cut</option><option>match_cut</option><option>cross_dissolve</option><option>dip_to_black</option></select></label>
-                <button name=\"action\" value=\"set_transition\">Apply transition</button>
-                <label>Crop mode<select name=\"crop\"><option value=\"cover_16_9\">Fill</option><option value=\"fit_16_9\">Fit</option><option value=\"crop_16_9\">Crop</option></select></label>
-                <button name=\"action\" value=\"set_crop\">Apply crop</button>
-                <label class=\"wide\">Add text / overlay<input name=\"overlay_text\" placeholder=\"Title, source label, date...\"></label>
-                <button name=\"action\" value=\"add_overlay\">Add text</button>
-                <label>Composition<select name=\"composition\"><option value=\"single_frame\">Single frame</option><option value=\"picture_in_picture\">Picture-in-picture</option><option value=\"split_screen\">Split screen</option><option value=\"document_overlay\">Document overlay</option></select></label>
-                <button name=\"action\" value=\"set_composition\">Add overlay/PIP</button>
-                <label>Split at (sec)<input type=\"number\" name=\"split_seconds\" min=\"0.7\" step=\"0.1\"></label>
-                <button name=\"action\" value=\"split_shot\">Split clip</button>
-              </form>
-            </section>
-            """
+                        <section class=\"panel\">
+                            <h2>Scene/clip inspector</h2>
+                            <p><strong>Scène:</strong> {escape(str(selected_scene.get('heading', selected_scene_id)))}</p>
+                            <p><strong>Claim:</strong> {escape(claim_text or 'Nog niet gekoppeld')}</p>
+                            <p><strong>Bron:</strong> {escape(source_text or 'Nog niet gekoppeld')}</p>
+                            <p><strong>Zoekquery:</strong> {escape(search_query or 'Nog niet gekoppeld')}</p>
+                            <p><strong>Narratie:</strong> {escape(str(selected_scene.get('narration', '')))}</p>
+                            <p><strong>Ondertitel:</strong> {escape(subtitle_text or 'Nog niet ingesteld')}</p>
+                            <p><strong>Visueel doel:</strong> {escape(str(selected_scene.get('visual_purpose', '')))}</p>
+                            <p><strong>Gebeurtenis:</strong> {escape(str(selected_scene.get('event', '')))}</p>
+                            <p><strong>Queries:</strong> {escape(', '.join(str(item) for item in selected_scene.get('queries', [])))}</p>
+                            <p><strong>Bron/licentie:</strong> {escape(str(selected_shot.get('source', '')))} · {escape(str(selected_shot.get('license', '')))}</p>
+                            <p><strong>Transitie:</strong> {escape(str(selected_scene.get('transition_to_next', 'hard_cut')))}</p>
+                            <p><strong>Camera motion:</strong> {escape(str(selected_shot.get('motion', 'static')))}</p>
+                            <p><strong>Zoom:</strong> {escape(str(selected_shot.get('zoom', '1.0x')))}</p>
+                            <p><strong>Crop:</strong> {escape(str(selected_shot.get('crop', 'cover_16_9')))}</p>
+                            <p><strong>Duur:</strong> {escape(str(selected_shot.get('duration_seconds', 0)))}s</p>
+                            <p><strong>Scene quality score:</strong> {escape(str(quality_score))}</p>
+                            <form method=\"post\" action=\"/projects/{escape(slug)}/editor/apply\" class=\"grid-form\">
+                                <input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\">
+                                <button name=\"action\" value=\"remove_shot\">Delete</button>
+                                <button name=\"action\" value=\"duplicate_shot\">Duplicate</button>
+                                <button name=\"action\" value=\"move_earlier\" class=\"secondary\">Move earlier</button>
+                                <button name=\"action\" value=\"move_later\" class=\"secondary\">Move later</button>
+                                <label>Duration (sec)<input type=\"number\" step=\"0.1\" min=\"0.7\" name=\"duration_seconds\" value=\"{escape(str(selected_shot.get('duration_seconds', 2.5)))}\"></label>
+                                <button name=\"action\" value=\"set_duration\">Apply duration</button>
+                                <label>Motion<select name=\"motion\"><option value=\"static\">Static</option><option value=\"slow_zoom\">Slow zoom</option><option value=\"push_in\">Push-in</option><option value=\"pan\">Pan</option><option value=\"parallax\">Parallax</option></select></label>
+                                <button name=\"action\" value=\"set_motion\">Apply motion</button>
+                                <label>Transition<select name=\"transition\"><option>hard_cut</option><option>match_cut</option><option>cross_dissolve</option><option>dip_to_black</option></select></label>
+                                <button name=\"action\" value=\"set_transition\">Apply transition</button>
+                                <label>Crop mode<select name=\"crop\"><option value=\"cover_16_9\">Fill</option><option value=\"fit_16_9\">Fit</option><option value=\"crop_16_9\">Crop</option></select></label>
+                                <button name=\"action\" value=\"set_crop\">Apply crop</button>
+                                <label class=\"wide\">Add text / overlay<input name=\"overlay_text\" placeholder=\"Title, source label, date...\"></label>
+                                <button name=\"action\" value=\"add_overlay\">Add text</button>
+                                <label>Composition<select name=\"composition\"><option value=\"single_frame\">Single frame</option><option value=\"picture_in_picture\">Picture-in-picture</option><option value=\"split_screen\">Split screen</option><option value=\"document_overlay\">Document overlay</option></select></label>
+                                <button name=\"action\" value=\"set_composition\">Add overlay/PIP</button>
+                                <label>Split at (sec)<input type=\"number\" name=\"split_seconds\" min=\"0.7\" step=\"0.1\"></label>
+                                <button name=\"action\" value=\"split_shot\">Split clip</button>
+                            </form>
+                        </section>
+                        <section class=\"panel\">
+                            <h2>AI scene tools</h2>
+                            <div class=\"ai-tool-grid\">
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-plan\"><input type=\"hidden\" name=\"mode\" value=\"scene\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"instruction\" value=\"Improve scene quality and clarity\"><button>Improve scene</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/search-media\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"query\" value=\"better archival footage\"><button>Find better footage</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-plan\"><input type=\"hidden\" name=\"mode\" value=\"scene\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"instruction\" value=\"Add contextual B-roll shots\"><button>Add B-roll</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-plan\"><input type=\"hidden\" name=\"mode\" value=\"scene\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"instruction\" value=\"Make this scene cinematic\"><button>Make cinematic</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-plan\"><input type=\"hidden\" name=\"mode\" value=\"scene\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"instruction\" value=\"Make this scene more emotional\"><button>Make emotional</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-plan\"><input type=\"hidden\" name=\"mode\" value=\"scene\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"instruction\" value=\"Make this scene dramatic\"><button>Make dramatic</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/batch\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"selected_shots\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"batch_action\" value=\"faster\"><button>Make faster</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/batch\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"selected_shots\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"batch_action\" value=\"slower\"><button>Make slower</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/search-media\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"query\" value=\"replacement footage scene\"><button>Replace footage</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-plan\"><input type=\"hidden\" name=\"mode\" value=\"scene\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"instruction\" value=\"Improve narration and emphasis\"><button>Improve narration</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-plan\"><input type=\"hidden\" name=\"mode\" value=\"documentary\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"instruction\" value=\"Improve pacing across documentary\"><button>Improve pacing</button></form>
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/ai-plan\"><input type=\"hidden\" name=\"mode\" value=\"scene\"><input type=\"hidden\" name=\"scene_id\" value=\"{escape(selected_scene_id)}\"><input type=\"hidden\" name=\"shot_id\" value=\"{escape(selected_shot_id)}\"><input type=\"hidden\" name=\"instruction\" value=\"Generate three alternatives for this scene\"><button>Generate alternatives</button></form>
+                            </div>
+                        </section>
+                        """
 
         candidates_html = "".join(
             f"""
@@ -986,7 +1345,21 @@ class DashboardApp:
 
             <section class=\"panel\">
               <h2>Visual timeline</h2>
-              <p class=\"muted\">Tracks: Video/Images · Voice-over · Subtitles · Overlays/Titles · Optional audio</p>
+                            <p class=\"muted\">Tracks: Video/Images · Voice-over · Subtitles · Overlays/Titles · Optional audio</p>
+                            <div class=\"timeline-toolbar\">
+                                <form method=\"post\" action=\"/projects/{escape(slug)}/editor/batch\" class=\"timeline-batch-form\">
+                                    <input type=\"hidden\" name=\"scene_id\" id=\"batch-scene-id\" value=\"{escape(selected_scene_id)}\">
+                                    <input type=\"hidden\" name=\"selected_shots\" id=\"batch-selected-shots\" value=\"\">
+                                    <button name=\"batch_action\" value=\"duplicate\" class=\"secondary\">Duplicate selectie</button>
+                                    <button name=\"batch_action\" value=\"delete\" class=\"secondary\">Delete selectie</button>
+                                    <button name=\"batch_action\" value=\"faster\" class=\"secondary\">Sneller ritme</button>
+                                    <button name=\"batch_action\" value=\"slower\" class=\"secondary\">Langzamer ritme</button>
+                                </form>
+                                <div class=\"timeline-view-controls\">
+                                    <label>Zoom timeline <input type=\"range\" min=\"1\" max=\"3\" step=\"0.1\" value=\"1\" id=\"timeline-zoom\"></label>
+                                    <label><input type=\"checkbox\" id=\"timeline-snap\" checked> Snap</label>
+                                </div>
+                            </div>
               {''.join(timeline_html) if timeline_html else '<p>Geen timeline beschikbaar.</p>'}
             </section>
 
@@ -1030,6 +1403,65 @@ class DashboardApp:
             </section>
 
             <script>
+                            (() => {{
+                                const player = document.getElementById('editor-player');
+                                if (!player) return;
+                                const bar = document.createElement('div');
+                                bar.className = 'player-controls';
+                                bar.innerHTML = `
+                                    <button type="button" id="ep-play">Play</button>
+                                    <button type="button" id="ep-pause" class="secondary">Pause</button>
+                                    <button type="button" id="ep-frame" class="secondary">Frame +1</button>
+                                    <button type="button" id="ep-full" class="secondary">Fullscreen</button>
+                                    <label>Snelheid<select id="ep-speed"><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option><option>2</option></select></label>
+                                    <label>Volume<input id="ep-volume" type="range" min="0" max="1" step="0.01" value="1"></label>
+                                    <label>Zoeken<input id="ep-seek" type="range" min="0" max="100" step="0.1" value="0"></label>
+                                    <span class="status-pill" id="ep-scene">Scène: —</span>
+                                `;
+                                player.parentElement?.appendChild(bar);
+                                const markers = Array.from(document.querySelectorAll('[data-scene]')).map(node => {{
+                                    const scene = node.getAttribute('data-scene') || '';
+                                    const titleNode = node.querySelector('h3');
+                                    const raw = titleNode ? titleNode.textContent || '' : scene;
+                                    return {{ start: Number((raw.split('·')[1] || '0').replace('s', '').trim()) || 0, title: raw.split('·')[0].trim() || scene }};
+                                }}).sort((a, b) => a.start - b.start);
+                                const sceneBadge = document.getElementById('ep-scene');
+                                const updateScene = () => {{
+                                    const t = player.currentTime || 0;
+                                    let current = markers[0];
+                                    for (const marker of markers) {{ if (marker.start <= t) current = marker; }}
+                                    if (sceneBadge) sceneBadge.textContent = current ? `Scène: ${{current.title}}` : 'Scène: —';
+                                }};
+                                document.getElementById('ep-play')?.addEventListener('click', () => player.play());
+                                document.getElementById('ep-pause')?.addEventListener('click', () => player.pause());
+                                document.getElementById('ep-frame')?.addEventListener('click', () => {{ player.currentTime += 1 / 25; updateScene(); }});
+                                document.getElementById('ep-full')?.addEventListener('click', () => player.requestFullscreen?.());
+                                document.getElementById('ep-speed')?.addEventListener('change', event => {{
+                                    const target = event.target;
+                                    if (!(target instanceof HTMLSelectElement)) return;
+                                    player.playbackRate = Number(target.value || '1');
+                                }});
+                                document.getElementById('ep-volume')?.addEventListener('input', event => {{
+                                    const target = event.target;
+                                    if (!(target instanceof HTMLInputElement)) return;
+                                    player.volume = Number(target.value || '1');
+                                }});
+                                document.getElementById('ep-seek')?.addEventListener('input', event => {{
+                                    const target = event.target;
+                                    if (!(target instanceof HTMLInputElement)) return;
+                                    if (!Number.isFinite(player.duration) || player.duration <= 0) return;
+                                    player.currentTime = (Number(target.value || '0') / 100) * player.duration;
+                                    updateScene();
+                                }});
+                                player.addEventListener('timeupdate', () => {{
+                                    const seek = document.getElementById('ep-seek');
+                                    if (seek instanceof HTMLInputElement && Number.isFinite(player.duration) && player.duration > 0) {{
+                                        seek.value = String((player.currentTime / player.duration) * 100);
+                                    }}
+                                    updateScene();
+                                }});
+                            }})();
+
               document.querySelectorAll('[data-seek]').forEach(node => {{
                 node.addEventListener('click', event => {{
                   const player = document.getElementById('editor-player');
@@ -1039,6 +1471,71 @@ class DashboardApp:
                   player.currentTime = value;
                 }});
               }});
+
+                            (() => {{
+                                const checkboxes = Array.from(document.querySelectorAll('.batch-shot'));
+                                const output = document.getElementById('batch-selected-shots');
+                                const sceneInput = document.getElementById('batch-scene-id');
+                                const zoom = document.getElementById('timeline-zoom');
+                                const snap = document.getElementById('timeline-snap');
+                                const cards = Array.from(document.querySelectorAll('.timeline-shot'));
+                                const updateSelection = () => {{
+                                    if (!(output instanceof HTMLInputElement)) return;
+                                    const selected = checkboxes.filter(item => item instanceof HTMLInputElement && item.checked).map(item => item.value);
+                                    output.value = selected.join(',');
+                                    if (sceneInput instanceof HTMLInputElement && selected.length > 0) {{
+                                        const firstCard = cards.find(card => selected.includes(String(card.getAttribute('data-shot-id') || '')));
+                                        if (firstCard) sceneInput.value = String(firstCard.getAttribute('data-scene-id') || sceneInput.value);
+                                    }}
+                                }};
+                                checkboxes.forEach(box => box.addEventListener('change', updateSelection));
+                                updateSelection();
+
+                                if (zoom instanceof HTMLInputElement) {{
+                                    zoom.addEventListener('input', () => {{
+                                        const scale = Number(zoom.value || '1');
+                                        document.querySelectorAll('.timeline-grid').forEach(grid => {{
+                                            if (grid instanceof HTMLElement) {{
+                                                grid.style.gridTemplateColumns = `repeat(auto-fit,minmax(${{Math.round(170 * scale)}}px,1fr))`;
+                                            }}
+                                        }});
+                                    }});
+                                }}
+
+                                let dragCard = null;
+                                cards.forEach(card => {{
+                                    card.addEventListener('dragstart', () => {{ dragCard = card; card.classList.add('dragging'); }});
+                                    card.addEventListener('dragend', () => {{ card.classList.remove('dragging'); dragCard = null; }});
+                                    card.addEventListener('dragover', event => {{
+                                        event.preventDefault();
+                                        const target = event.currentTarget;
+                                        if (!(target instanceof HTMLElement) || !dragCard || target === dragCard) return;
+                                        const parent = target.parentElement;
+                                        if (!parent) return;
+                                        const snapOn = !(snap instanceof HTMLInputElement) || snap.checked;
+                                        if (!snapOn) return;
+                                        parent.insertBefore(dragCard, target);
+                                    }});
+                                }});
+
+                                document.querySelectorAll('[data-scene-grid]').forEach(grid => {{
+                                    grid.addEventListener('dragleave', () => {{}});
+                                    grid.addEventListener('drop', event => {{
+                                        event.preventDefault();
+                                        const container = event.currentTarget;
+                                        if (!(container instanceof HTMLElement)) return;
+                                        const scene = container.getAttribute('data-scene-grid') || '';
+                                        const order = Array.from(container.querySelectorAll('.timeline-shot')).map(item => String(item.getAttribute('data-shot-id') || '')).filter(Boolean);
+                                        if (!scene || !order.length) return;
+                                        const form = document.createElement('form');
+                                        form.method = 'post';
+                                        form.action = `/projects/{escape(slug)}/editor/reorder`;
+                                        form.innerHTML = `<input type="hidden" name="scene_id" value="${{scene}}"><input type="hidden" name="shot_order" value="${{order.join(',')}}">`;
+                                        document.body.appendChild(form);
+                                        form.submit();
+                                    }});
+                                }});
+                            }})();
             </script>
             """,
         )
@@ -1264,6 +1761,74 @@ class DashboardApp:
             return self._editor_redirect(slug, scene_id, shot_id, str(error))
         return self._editor_redirect(slug, scene_id, shot_id, "Asset toegepast")
 
+    def editor_batch(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        scene_id = self.form_value(form, "scene_id").strip()
+        action = self.form_value(form, "batch_action").strip()
+        selected_ids = [item.strip() for item in self.form_value(form, "selected_shots").split(",") if item.strip()]
+        if not scene_id or not selected_ids:
+            return self._editor_redirect(slug, notice="Selecteer eerst shots voor batchbewerking")
+        root = self.project_root(slug)
+        try:
+            if action == "delete":
+                for shot_id in selected_ids:
+                    apply_operation(root, {"type": "remove_shot", "scene_id": scene_id, "shot_id": shot_id})
+                label = f"{len(selected_ids)} shots verwijderd"
+            elif action == "duplicate":
+                for shot_id in selected_ids:
+                    apply_operation(root, {"type": "duplicate_shot", "scene_id": scene_id, "shot_id": shot_id})
+                label = f"{len(selected_ids)} shots gedupliceerd"
+            elif action == "faster":
+                for shot_id in selected_ids:
+                    apply_operation(root, {"type": "set_motion", "scene_id": scene_id, "shot_id": shot_id, "motion": "push_in"})
+                label = "Ritme versneld"
+            elif action == "slower":
+                for shot_id in selected_ids:
+                    apply_operation(root, {"type": "set_motion", "scene_id": scene_id, "shot_id": shot_id, "motion": "slow_zoom"})
+                label = "Ritme vertraagd"
+            else:
+                return self._editor_redirect(slug, scene_id, notice="Onbekende batchactie")
+            create_revision(
+                root,
+                label=label,
+                operation_type="batch_edit",
+                operation_summary=label,
+                duration_delta_seconds=0.0,
+            )
+        except (EditorError, ValueError) as error:
+            return self._editor_redirect(slug, scene_id, notice=str(error))
+        return self._editor_redirect(slug, scene_id, notice=label)
+
+    def editor_reorder(self, slug: str, environ: dict[str, Any]) -> Response:
+        form = self.read_form(environ)
+        scene_id = self.form_value(form, "scene_id").strip()
+        order = [item.strip() for item in self.form_value(form, "shot_order").split(",") if item.strip()]
+        if not scene_id or not order:
+            return self._editor_redirect(slug, notice="Onvoldoende gegevens voor herordenen")
+        root = self.project_root(slug)
+        direction_path = root / "manifests" / "visual_direction.json"
+        direction = self.read_manifest(direction_path)
+        scenes = direction.get("scenes", []) if isinstance(direction.get("scenes"), list) else []
+        target = next((item for item in scenes if isinstance(item, dict) and str(item.get("scene_id", "")) == scene_id), None)
+        if not isinstance(target, dict):
+            return self._editor_redirect(slug, scene_id, notice="Scène niet gevonden")
+        shots = target.get("shots", []) if isinstance(target.get("shots"), list) else []
+        if not shots:
+            return self._editor_redirect(slug, scene_id, notice="Geen shots gevonden")
+        shot_map = {str(item.get("id", "")): item for item in shots if isinstance(item, dict)}
+        reordered = [shot_map[shot_id] for shot_id in order if shot_id in shot_map]
+        remainder = [item for item in shots if isinstance(item, dict) and str(item.get("id", "")) not in set(order)]
+        target["shots"] = reordered + remainder
+        write_json(direction_path, direction)
+        create_revision(
+            root,
+            label="Timeline herordend",
+            operation_type="reorder",
+            operation_summary="Timeline shot order updated.",
+            duration_delta_seconds=0.0,
+        )
+        return self._editor_redirect(slug, scene_id, notice="Timeline opnieuw geordend")
+
     def editor_render(self, slug: str) -> Response:
         root = self.project_root(slug)
         try:
@@ -1318,7 +1883,7 @@ class DashboardApp:
               <details open><summary>Script en voice-over</summary><p>{escape(str(scene.get('script', '')))}</p><p><strong>Voice-over:</strong> {escape(str(scene.get('voice_over_text', '')))}</p><p><strong>Vertolking:</strong> {escape(str(scene.get('voice_over_delivery', '')))}</p></details>
               <details><summary>Claims en bronnen</summary><h3>Claims</h3><ul>{claim_rows}</ul><h3>Bronnen</h3><ul>{source_rows}</ul></details>
               <details><summary>Screenshots en videofragmenten</summary><h3>Beelden</h3><ul>{media_rows}</ul><h3>Clips</h3><ul>{clip_rows}</ul></details>
-              <details><summary>Technische details</summary><pre>{escape(json.dumps(scene.get('edit_plan', {}), indent=2))}</pre></details>
+              <details><summary>Camerarichting en montageplan</summary><pre>{escape(json.dumps(scene.get('edit_plan', {}), indent=2))}</pre></details>
               <p><strong>Geschatte duur:</strong> {escape(str(scene.get('estimated_duration_seconds', 0)))} seconden</p>
               {'<p class="success">Deze scène is goedgekeurd en vergrendeld.</p>' if locked else f'<form method="post" action="/projects/{escape(slug)}/draft-review/{escape(str(scene["id"]))}/approve"><button type="submit">Scène goedkeuren</button></form>'}
             </article>
@@ -1555,7 +2120,6 @@ class DashboardApp:
           <table><tbody>{score_rows}</tbody></table><h3>Belangrijkste kritiekpunten</h3><ul>{criticism or '<li>Geen kritieke zwaktes.</li>'}</ul>
           {f'<h3>Feedback ter goedkeuring</h3><ul>{feedback_rows}</ul>' if feedback_rows else ''}
         </section>"""
-
     def project_advanced(self, slug: str) -> str:
         project_root = self.project_root(slug)
         if not project_root.is_dir():
@@ -1912,6 +2476,116 @@ class DashboardApp:
             ],
             final_video.read_bytes(),
         )
+
+    def download_export_item(self, slug: str, item: str) -> Response:
+        root = self.project_root(slug)
+        manifests = root / "manifests"
+        project = self.read_manifest(manifests / "project.json")
+        title = str(project.get("topic", slug))
+
+        if item == "script":
+            script = self.read_manifest(manifests / "script.json")
+            body = str(script.get("narration", "")).strip() or "Nog geen script beschikbaar."
+            data = body.encode("utf-8")
+            return "200 OK", [("Content-Type", "text/plain; charset=utf-8"), ("Content-Disposition", f'attachment; filename="{slug}-script.txt"')], data
+
+        if item == "subtitles":
+            subtitles = self.read_manifest(manifests / "subtitles.json")
+            entries = subtitles.get("entries", []) if isinstance(subtitles.get("entries"), list) else []
+            lines: list[str] = []
+            for index, entry in enumerate(entries, start=1):
+                if not isinstance(entry, dict):
+                    continue
+                start = str(entry.get("start", entry.get("start_seconds", "0")))
+                end = str(entry.get("end", entry.get("end_seconds", "0")))
+                text = str(entry.get("text", "")).strip()
+                lines.extend([str(index), f"{start} --> {end}", text, ""])
+            payload = "\n".join(lines).strip() or "Nog geen ondertitels beschikbaar."
+            return "200 OK", [("Content-Type", "text/plain; charset=utf-8"), ("Content-Disposition", f'attachment; filename="{slug}-subtitles.srt"')], payload.encode("utf-8")
+
+        if item == "assets-list":
+            assets = self.read_manifest(manifests / "media_sources.json").get("assets", [])
+            rows = ["id\ttitle\ttype\tprovider\tlicense\tpath"]
+            if isinstance(assets, list):
+                for asset in assets:
+                    if not isinstance(asset, dict):
+                        continue
+                    rows.append("\t".join([
+                        str(asset.get("id", "")),
+                        str(asset.get("title", "")),
+                        str(asset.get("type", asset.get("kind", ""))),
+                        str(asset.get("provider", asset.get("source", ""))),
+                        str(asset.get("license", asset.get("license_notes", ""))),
+                        str(asset.get("path", "")),
+                    ]))
+            return "200 OK", [("Content-Type", "text/tab-separated-values; charset=utf-8"), ("Content-Disposition", f'attachment; filename="{slug}-assets.tsv"')], "\n".join(rows).encode("utf-8")
+
+        if item == "source-list":
+            sources = self.read_manifest(manifests / "sources.json").get("sources", [])
+            rows = ["id\ttitle\turl\tpublisher\tpublication_date\tstatus"]
+            if isinstance(sources, list):
+                for source in sources:
+                    if not isinstance(source, dict):
+                        continue
+                    rows.append("\t".join([
+                        str(source.get("id", "")),
+                        str(source.get("title", "")),
+                        str(source.get("url", "")),
+                        str(source.get("publisher", "")),
+                        str(source.get("publication_date", "")),
+                        str(source.get("review_status", "")),
+                    ]))
+            return "200 OK", [("Content-Type", "text/tab-separated-values; charset=utf-8"), ("Content-Disposition", f'attachment; filename="{slug}-sources.tsv"')], "\n".join(rows).encode("utf-8")
+
+        if item == "fact-report":
+            claims = self.read_manifest(manifests / "claims.json").get("claims", [])
+            statuses: dict[str, int] = {}
+            if isinstance(claims, list):
+                for claim in claims:
+                    if not isinstance(claim, dict):
+                        continue
+                    status = str(claim.get("review_status", "pending_review"))
+                    statuses[status] = statuses.get(status, 0) + 1
+            report = {
+                "title": title,
+                "project": slug,
+                "total_claims": len(claims) if isinstance(claims, list) else 0,
+                "status_breakdown": statuses,
+                "generated_at": datetime.now(UTC).isoformat(),
+            }
+            data = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
+            return "200 OK", [("Content-Type", "application/json; charset=utf-8"), ("Content-Disposition", f'attachment; filename="{slug}-fact-report.json"')], data
+
+        if item == "production-report":
+            critic = self.read_manifest(manifests / "critic_report.json")
+            director = self.read_manifest(manifests / "director_report.json")
+            payload = {
+                "title": title,
+                "project": slug,
+                "critic_report": critic,
+                "director_report": director,
+                "generated_at": datetime.now(UTC).isoformat(),
+            }
+            data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+            return "200 OK", [("Content-Type", "application/json; charset=utf-8"), ("Content-Disposition", f'attachment; filename="{slug}-production-report.json"')], data
+
+        if item == "thumbnail":
+            candidate = root / "assets" / "thumbnails" / "scene-01.png"
+            if candidate.is_file():
+                return "200 OK", [("Content-Type", "image/png"), ("Content-Disposition", f'attachment; filename="{slug}-thumbnail.png"')], candidate.read_bytes()
+            return self.html(self.page("Geen thumbnail", '<section class="panel"><p>Er is nog geen thumbnail beschikbaar.</p></section>'), "404 Not Found")
+
+        if item == "title-description":
+            youtube = self.read_manifest(manifests / "youtube_draft.json")
+            payload = {
+                "title": str(youtube.get("title", title)),
+                "description": str(youtube.get("description", "")),
+                "tags": youtube.get("tags", []),
+            }
+            data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+            return "200 OK", [("Content-Type", "application/json; charset=utf-8"), ("Content-Disposition", f'attachment; filename="{slug}-metadata.json"')], data
+
+        return self.html(self.page("Export niet gevonden", '<section class="panel"><p>Deze export is niet beschikbaar.</p></section>'), "404 Not Found")
 
     def video_preview(self, slug: str) -> Response:
         return self.download_final(slug)
@@ -2412,7 +3086,7 @@ class DashboardApp:
     :root {{ color-scheme: light; --ink:#172026; --muted:#697782; --line:#dde4e8; --panel:#ffffff; --page:#f6f8f9; --soft:#eef4f1; --accent:#176b5b; --accent-dark:#0f5044; --warn:#b65f15; --ok:#237447; }}
     * {{ box-sizing: border-box; }}
     [hidden] {{ display:none !important; }}
-    body {{ margin:0; font-family: Arial, sans-serif; background:var(--page); color:var(--ink); }}
+    body {{ margin:0; font-family: Manrope, "Segoe UI", "Helvetica Neue", sans-serif; background:radial-gradient(circle at top right, #f0f6f4 0%, #f6f8f9 42%, #f4f7f9 100%); color:var(--ink); }}
     header {{ background:rgba(255,255,255,.96); color:var(--ink); padding:16px 32px; display:flex; align-items:center; justify-content:space-between; gap:24px; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:10; backdrop-filter:blur(12px); }}
     header h1 {{ margin:0; font-size:22px; letter-spacing:0; }}
     header p {{ margin:4px 0 0; color:var(--muted); }}
@@ -2422,6 +3096,7 @@ class DashboardApp:
     main {{ max-width:1120px; margin:0 auto; padding:32px 24px 48px; }}
     .hero-panel, .panel, .review-card, .project-card, .focus-card {{ background:var(--panel); border:1px solid var(--line); border-radius:14px; }}
     .hero-panel {{ padding:30px; margin-bottom:28px; box-shadow:0 16px 40px rgba(23,32,38,.07); }}
+    .hero-gradient {{ background:linear-gradient(135deg, #f8fcfb 0%, #f2f8f7 45%, #eef4f7 100%); }}
     .hero-panel h2 {{ max-width:760px; font-size:30px; line-height:1.18; margin:6px 0 22px; }}
     .panel {{ padding:22px; margin-bottom:18px; }}
     .subpanel {{ border-top:1px solid var(--line); padding-top:16px; margin-top:16px; }}
@@ -2454,6 +3129,8 @@ class DashboardApp:
     .section-head {{ display:flex; justify-content:space-between; align-items:end; margin:0 0 12px; }}
     .section-head h2 {{ margin-bottom:4px; }}
     .project-list {{ display:grid; gap:12px; }}
+    .toolbar-panel {{ padding:16px 18px; }}
+    .toolbar-grid {{ display:grid; grid-template-columns:2fr 1fr 1fr auto; gap:10px; align-items:end; }}
     .project-card {{ padding:18px; display:flex; justify-content:space-between; align-items:center; gap:16px; }}
     .project-card-main {{ display:grid; gap:6px; }}
     .project-card h3 {{ margin:0 0 4px; font-size:18px; }}
@@ -2461,6 +3138,11 @@ class DashboardApp:
     .project-card-actions {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; }}
     .safe-back-form {{ margin-bottom:14px; }}
     .status-pill {{ display:inline-flex; align-items:center; min-height:34px; border-radius:999px; padding:6px 12px; background:var(--soft); color:#1d5f50; font-weight:700; font-size:13px; white-space:nowrap; }}
+    .badge-active {{ background:#e7f4ef; color:#136248; }}
+    .badge-complete {{ background:#e6f6ea; color:#1d6d37; }}
+    .badge-waiting {{ background:#fff7e8; color:#895b12; }}
+    .badge-blocked {{ background:#fff1ec; color:#8a3b32; }}
+    .badge-draft {{ background:#eef3f7; color:#425468; }}
     .summary-grid {{ display:grid; grid-template-columns:repeat(4, minmax(140px, 1fr)); gap:12px; }}
     .summary-grid div {{ border:1px solid var(--line); border-radius:8px; padding:14px; background:#fbfcfc; }}
     .summary-grid span {{ display:block; color:var(--muted); font-size:13px; margin-bottom:6px; }}
@@ -2503,11 +3185,30 @@ class DashboardApp:
     .project-summary {{ display:flex; justify-content:space-between; gap:28px; align-items:center; background:#fff; border:1px solid var(--line); border-radius:16px; padding:28px; margin-bottom:18px; box-shadow:0 12px 34px rgba(23,32,38,.05); }}
     .project-summary h1,.project-summary h2 {{ margin:5px 0 8px; font-size:30px; }}
     .progress-number {{ display:grid; justify-items:end; gap:6px; min-width:190px; }} .progress-number strong {{ font-size:36px; color:var(--accent); }} .progress-number span {{ color:var(--muted); font-size:13px; }}
-    .pipeline {{ list-style:none; padding:8px 0; margin:0 0 18px; display:grid; grid-template-columns:repeat(8,1fr); gap:6px; }}
+    .pipeline {{ list-style:none; padding:8px 0; margin:0 0 18px; display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; }}
     .pipeline li {{ display:flex; gap:8px; align-items:center; min-width:0; padding:10px 7px; border-radius:10px; color:var(--muted); }} .pipeline li span {{ display:grid; place-items:center; width:25px; height:25px; flex:0 0 25px; border-radius:50%; background:#e7ecef; font-size:12px; }} .pipeline li strong,.pipeline li small {{ display:block; font-size:12px; }}
     .pipeline li.completed span {{ background:#dcefe4;color:var(--ok); }} .pipeline li.current {{ background:#eaf5f2;color:var(--accent-dark); }} .pipeline li.current span {{ background:var(--accent);color:#fff; }}
-    .pipeline li.waiting {{ background:#f8fafb;color:var(--muted); }} .pipeline li.blocked {{ background:#fff5e9;color:#8a5200; }} .pipeline li.blocked span {{ background:var(--warn);color:#fff; }}
+    .pipeline li.waiting {{ background:#f8fafb;color:#66521a; }} .pipeline li.blocked {{ background:#fff5e9;color:#8a5200; }} .pipeline li.blocked span {{ background:var(--warn);color:#fff; }}
+    .pipeline li.failed {{ background:#fff1f1;color:#922e2e; }} .pipeline li.failed span {{ background:#b14444;color:#fff; }}
     .pipeline li.not_started {{ opacity:.88; }}
+    .truth-banner {{ border-color:#d7e4dc; background:#f5faf7; }}
+    .activity-feed {{ list-style:none; margin:0; padding:0; display:grid; gap:10px; }}
+    .activity-feed li {{ display:flex; justify-content:space-between; gap:10px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:#fbfcfc; }}
+    .activity-feed small {{ color:var(--muted); white-space:nowrap; }}
+    .metric-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }}
+    .metric-card {{ border:1px solid var(--line); border-radius:10px; padding:12px; background:#fbfcfc; display:grid; gap:6px; }}
+    .metric-card span {{ color:var(--muted); font-size:13px; }}
+    .metric-card strong {{ font-size:18px; color:var(--ink); }}
+    .feature-tags {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .feature-chip {{ display:inline-flex; gap:6px; border-radius:999px; padding:7px 12px; font-size:13px; border:1px solid var(--line); background:#f8fafb; }}
+    .feature-chip.on {{ border-color:#b9dac7; background:#eef8f2; color:#1b6542; }}
+    .feature-chip.off {{ color:#6f7b85; }}
+    .progress-actions {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; }}
+    .progress-actions form {{ margin:0; }}
+    .scene-strip {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; }}
+    .scene-strip article {{ border:1px solid var(--line); border-radius:10px; background:#fbfcfc; overflow:hidden; }}
+    .scene-strip img {{ width:100%; aspect-ratio:16/9; object-fit:cover; display:block; }}
+    .scene-strip p {{ margin:0; padding:8px 10px; font-size:12px; color:#31414d; }}
     .approval-card {{ display:grid;grid-template-columns:1fr auto;gap:28px;align-items:center;background:#fff;border:1px solid #e8c89f;border-radius:16px;padding:28px;margin-bottom:18px;box-shadow:0 12px 34px rgba(89,55,20,.08); }} .approval-card h1 {{ margin:5px 0 8px;font-size:28px; }} .approval-facts {{ display:flex;gap:10px;flex-wrap:wrap;margin-top:16px; }} .approval-facts span {{ display:grid;gap:3px;background:#fff8ef;border-radius:10px;padding:10px 14px; }} .approval-facts small {{ color:var(--muted); }} .approval-actions {{ display:grid;gap:8px;min-width:260px; }} .approval-actions form,.approval-actions button {{ width:100%; }} .ghost-button {{ background:#eef1f3;color:var(--ink); }}
     .focus-card {{ padding:24px; margin-bottom:18px; border-color:#cfe3dc; }} .research-metrics {{ display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }} .research-metrics span {{ background:var(--page);border-radius:10px;padding:10px 12px;font-size:13px; }}
     .loading-state {{ display:flex;align-items:center;gap:14px;background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px; }} .loading-state h2,.loading-state p {{ margin:3px 0; }} .pulse {{ width:14px;height:14px;border-radius:50%;background:var(--accent);animation:pulse 1.2s infinite; }} @keyframes pulse {{ 50% {{ opacity:.35;transform:scale(.8); }} }}
@@ -2515,6 +3216,22 @@ class DashboardApp:
     .review-player {{ display:grid; grid-template-columns:minmax(0,3fr) minmax(220px,1fr); gap:16px; margin-bottom:18px; }}
     .review-player > div, .review-player aside {{ background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px; min-width:0; }}
     .review-player video {{ width:100%; background:#111; border-radius:6px; }}
+    .pro-player video {{ width:100%; border-radius:10px; background:#0f1216; }}
+    .player-controls {{ margin-top:10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }}
+    .player-controls label {{ font-weight:600; font-size:12px; min-width:150px; }}
+    .player-controls select, .player-controls input {{ padding:7px 9px; }}
+    .export-grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:10px; }}
+    .timeline-toolbar {{ display:flex; justify-content:space-between; align-items:center; gap:10px; margin:10px 0 14px; flex-wrap:wrap; }}
+    .timeline-batch-form {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .timeline-view-controls {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }}
+    .timeline-view-controls label {{ font-size:12px; }}
+    .timeline-shot {{ transition:transform .18s ease, box-shadow .18s ease; }}
+    .timeline-shot:hover {{ transform:translateY(-2px); box-shadow:0 10px 20px rgba(23,32,38,.08); }}
+    .timeline-shot.dragging {{ opacity:.75; border:1px dashed #176b5b; }}
+    .shot-select {{ display:flex; align-items:center; gap:6px; font-size:12px; color:#50606c; margin-bottom:6px; }}
+    .ai-tool-grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:8px; }}
+    .wizard-steps {{ display:grid; gap:8px; grid-template-columns:repeat(7,minmax(0,1fr)); margin:16px 0 0; padding:0; list-style:none; }}
+    .wizard-steps li {{ border:1px solid #d9e3e7; border-radius:999px; padding:7px 10px; font-size:12px; text-align:center; background:#ffffffaa; }}
     .review-timeline {{ display:flex; gap:8px; overflow-x:auto; padding-top:10px; position:relative; z-index:1; }}
     .review-timeline a {{ display:block; flex:0 0 130px; min-width:130px; text-decoration:none; font-size:12px; }}
     .review-timeline img, .scene-thumb {{ width:100%; aspect-ratio:16/9; object-fit:cover; border-radius:6px; }}
@@ -2523,8 +3240,8 @@ class DashboardApp:
     .scene-review pre {{ overflow:auto; }}
     .revision-compare {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; border:1px solid var(--line); border-radius:8px; padding:10px; margin:10px 0; }}
     .revision-compare > p {{ grid-column:1/-1; color:var(--muted); }}
-    @media (max-width: 900px) {{ .pipeline {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .workflow {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .start-grid, .summary-grid {{ grid-template-columns:1fr 1fr; }} .review-card, .project-card {{ align-items:flex-start; flex-direction:column; }} .actions {{ justify-content:flex-start; }} }}
-    @media (max-width: 620px) {{ header {{ display:block; padding:14px; }} .main-nav {{ margin-top:12px;display:grid;grid-template-columns:1fr 1fr; }} .project-head,.project-summary {{ align-items:flex-start;flex-direction:column; }} .approval-card {{ grid-template-columns:1fr;padding:20px; }} .approval-actions {{ min-width:0;width:100%; }} .progress-number {{ justify-items:start; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .workflow, .pipeline, .start-grid, .summary-grid, .review-player, .revision-compare {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} table {{ display:block; overflow-x:auto; }} button,.button {{ min-height:44px; }} }}
+    @media (max-width: 900px) {{ .pipeline {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .workflow {{ grid-template-columns:repeat(2, minmax(0, 1fr)); }} .start-grid, .summary-grid {{ grid-template-columns:1fr 1fr; }} .toolbar-grid {{ grid-template-columns:1fr 1fr; }} .wizard-steps {{ grid-template-columns:repeat(3,minmax(0,1fr)); }} .review-card, .project-card {{ align-items:flex-start; flex-direction:column; }} .actions {{ justify-content:flex-start; }} }}
+    @media (max-width: 620px) {{ header {{ display:block; padding:14px; }} .main-nav {{ margin-top:12px;display:grid;grid-template-columns:1fr 1fr; }} .project-head,.project-summary {{ align-items:flex-start;flex-direction:column; }} .approval-card {{ grid-template-columns:1fr;padding:20px; }} .approval-actions {{ min-width:0;width:100%; }} .progress-number {{ justify-items:start; }} .actions {{ justify-content:flex-start; margin-top:12px; }} main {{ padding:18px 14px; }} .hero-panel {{ padding:22px; }} .hero-panel h2 {{ font-size:24px; }} .toolbar-grid {{ grid-template-columns:1fr; }} .workflow, .pipeline, .start-grid, .summary-grid, .review-player, .revision-compare, .wizard-steps {{ grid-template-columns:1fr; }} .project-card-actions {{ width:100%; justify-content:space-between; }} table {{ display:block; overflow-x:auto; }} button,.button {{ min-height:44px; }} }}
     @media (max-width: 620px) {{ header {{ position:static; }} }}
   </style>
 </head>
@@ -2543,6 +3260,7 @@ class DashboardApp:
       requestAnimationFrame(() => form.querySelectorAll('button[type="submit"],button:not([type]),input[type="submit"]').forEach(button => button.disabled = true));
     }});
   </script>
+    <footer style="max-width:1120px;margin:0 auto 24px;padding:0 24px;color:#7a868f;font-size:12px;">Dashboard build: {escape(self._build_marker)}</footer>
 </body>
 </html>"""
 

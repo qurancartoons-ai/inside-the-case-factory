@@ -725,6 +725,7 @@ def discover_project_scene_media(
             budget_exhausted = True
             break
         scene_id = str(scene.get("id", ""))
+        scene_has_coverage = False
         direction = directed.get(scene_id, {})
         shot_intents = [shot.get("media_intent", {}) for shot in direction.get("shots", []) if isinstance(shot, dict)]
         if not shot_intents:
@@ -773,6 +774,7 @@ def discover_project_scene_media(
                     save_media_manifest(project_root, current_manifest)
             if len(linked) >= target_per_shot:
                 used_providers.update(str(item.get("discovery", {}).get("source", "")) for item in linked)
+                scene_has_coverage = True
                 continue
             query_values = _scene_specific_queries(scene, intent)
             found_for_shot = len(linked)
@@ -814,7 +816,9 @@ def discover_project_scene_media(
                         break
                 if found_for_shot >= target_per_shot:
                     break
-            if not found_for_shot:
+            if found_for_shot:
+                scene_has_coverage = True
+            if not found_for_shot and not scene_has_coverage:
                 uncovered.append(shot_id)
         if budget_exhausted:
             break
@@ -831,6 +835,16 @@ def discover_project_scene_media(
     }
     write_json(project_root / "manifests" / DISCOVERY_MANIFEST_NAME, result)
     if uncovered:
+        all_unavailable = bool(availability) and not any(
+            bool(item.get("attempted")) or bool(item.get("candidates_returned"))
+            for item in availability.values()
+        )
+        if all_unavailable:
+            detail = "; ".join(
+                f"{name}: {info.get('skipped_reason') or 'provider unavailable'}"
+                for name, info in availability.items()
+            )
+            raise RuntimeError(f"All configured real media providers are unavailable: {detail}")
         workflow_path = project_root / "manifests" / "workflow.json"
         workflow = read_json(workflow_path) if workflow_path.exists() else {}
         run_quality_mode = str(workflow.get("run_quality_mode", "sample_or_demo"))

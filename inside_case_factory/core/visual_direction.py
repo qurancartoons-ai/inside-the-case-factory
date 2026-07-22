@@ -152,6 +152,15 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
         shot_count = max(2, min(10, int(round(duration / target_avg))))
         if shot_count * 5.0 < duration:
             shot_count += 1
+        scene_asset_shot_ids = {
+            str(shot_id)
+            for asset in assets
+            if isinstance(asset, dict)
+            for shot_id in asset.get("shot_ids", [])
+            if str(shot_id).startswith(f"{scene_id}-shot-")
+        }
+        if scene_asset_shot_ids:
+            shot_count = min(shot_count, max(1, len(scene_asset_shot_ids)))
         base_duration = max(2.0, min(5.0, duration / shot_count))
         shots = []
         for shot_index in range(shot_count):
@@ -161,7 +170,7 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
                 project_root, scene, shot_id, assets,
                 desired_media_type=str(media_intent["desired_media_type"]),
             )
-            available = [item for item in candidates if str(item["id"]) not in used_assets]
+            available = candidates
             concrete_available = [item for item in available if not item.get("generated")]
             pool = concrete_available or available or candidates
             asset = pool[0].copy()
@@ -175,8 +184,9 @@ def build_cinematic_plan(project_root: Path, scenes: list[dict[str, Any]], style
                     "reason": "No approved, relevant, non-duplicate concrete asset remained for this shot after the recorded provider attempts.",
                     "content_fit": str(media_intent["content_reason"]),
                 }
-            if str(asset["id"]) in used_assets and asset.get("generated"):
-                asset["id"] = f"{asset['id']}-shot-{shot_index + 1}"
+            if str(asset.get("id", "")) in used_assets:
+                asset["original_asset_id"] = str(asset.get("id", ""))
+                asset["id"] = f"{asset.get('id', 'asset')}-shot-{shot_index + 1}"
             used_assets.add(str(asset["id"]))
             secondary_asset = None
             desired_composition = str(media_intent["composition"])
