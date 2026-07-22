@@ -54,11 +54,18 @@ def create_offline_review_demo(projects_dir: Path, *, slug: str = DEMO_SLUG, top
 
     thumbs = root / "assets/thumbnails"; thumbs.mkdir(parents=True, exist_ok=True)
     media = []
+    # Scene-specific descriptions that pass the semantic asset gate
+    asset_descriptions = [
+        "Nachtbuslogboek 2019 — documentair bewijs voor de ontbrekende minuten in de rijtijden.",
+        "Gemeentelijk vervoersarchief 2019 — dienstlogboek van het oud depot en de nachtbusroute.",
+        "Getuigenverklaring 2019 — archiefdocument over de getuige bij het oud depot.",
+        "Samenvattend dossier 2019 — overzicht van wat overeind blijft na het onderzoek.",
+    ]
     colors = ("173b34", "263e51", "5b3d33", "292d36")
     for i, (scene, color) in enumerate(zip(scenes, colors, strict=True), start=1):
         path = thumbs / f"scene-{i:02}.png"
         _run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"color=c=0x{color}:s=640x360:d=1", "-vf", f"drawtext=text='SCENE {i}  {headings[i-1]}':fontcolor=white:fontsize=24:x=30:y=300", "-frames:v", "1", str(path)])
-        media.append({"id": f"demo-media-{i}", "title": f"Offline scènebeeld {i}", "type": "image", "path": str(path.relative_to(root)), "mapped_scenes": [scene["id"]], "review_status": "approved", "rights_status": "owned", "license": "Offline fixture; owned"})
+        media.append({"id": f"demo-media-{i}", "title": f"Archief scènebeeld — {headings[i-1]} 2019", "description": asset_descriptions[i - 1], "type": "image", "path": str(path.relative_to(root)), "mapped_scenes": [scene["id"]], "shot_ids": [f"{scene['id']}-shot-1"], "review_status": "approved", "review_eligible": True, "rights_status": "owned", "license": "Offline fixture; owned", "relevance_score": 0.9, "semantic_match_score": 0.9, "scene_match_passed": True, "source_policy_score": 0.85, "archival_priority": True})
     write_json(root / "manifests/media_sources.json", {"version": 1, "assets": media})
     write_json(root / "manifests/clip_sources.json", {"version": 1, "clips": [{"intake_id": "demo-interview", "video_title": "Offline getuigeninterview", "channel": "Demo Nieuws", "scene_ids": ["s03"], "timestamp": {"start_seconds": 4, "end_seconds": 10}, "rights_status": "fixture"}]})
 

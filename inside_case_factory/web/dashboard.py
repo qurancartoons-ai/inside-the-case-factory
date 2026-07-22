@@ -1202,6 +1202,9 @@ class DashboardApp:
 
         selected_scene_id = str(selected_scene.get("scene_id", "")) if isinstance(selected_scene, dict) else ""
         selected_shot_id = str((selected_shot or {}).get("id", "")) if isinstance(selected_shot, dict) else ""
+        # selected_sub is built after timeline loops; pre-derive it here so inspector can use it
+        _subtitle_entries_pre = timeline.get("subtitle_entries", []) if isinstance(timeline.get("subtitle_entries"), list) else []
+        selected_sub = next((entry for entry in _subtitle_entries_pre if isinstance(entry, dict) and str(entry.get("scene_id", "")) == selected_scene_id), {})
         inspector = ""
         if isinstance(selected_scene, dict) and isinstance(selected_shot, dict):
             quality_score = selected_scene.get("scene_quality_score", selected_scene.get("quality_score", "onbekend"))
@@ -2571,9 +2574,30 @@ class DashboardApp:
 
         if item == "thumbnail":
             candidate = root / "assets" / "thumbnails" / "scene-01.png"
+            if not candidate.is_file():
+                # Generate a thumbnail from the final video if it exists
+                final_vid = root / "exports" / "final_video.mp4"
+                if final_vid.is_file():
+                    import subprocess as _sp
+                    candidate.parent.mkdir(parents=True, exist_ok=True)
+                    result = _sp.run(
+                        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                         "-i", str(final_vid), "-ss", "00:00:02", "-vframes", "1",
+                         "-vf", "scale=640:360", str(candidate)],
+                        capture_output=True,
+                    )
+                    if result.returncode != 0 or not candidate.is_file():
+                        # Fallback: generate coloured SVG placeholder
+                        svg = (
+                            f'<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360">'
+                            f'<rect width="100%" height="100%" fill="#172026"/>'
+                            f'<text x="30" y="310" fill="#eef4f1" font-size="28" font-family="sans-serif">{escape(slug)}</text>'
+                            f'</svg>'
+                        )
+                        return "200 OK", [("Content-Type", "image/svg+xml"), ("Content-Disposition", f'attachment; filename="{slug}-thumbnail.svg"')], svg.encode("utf-8")
             if candidate.is_file():
                 return "200 OK", [("Content-Type", "image/png"), ("Content-Disposition", f'attachment; filename="{slug}-thumbnail.png"')], candidate.read_bytes()
-            return self.html(self.page("Geen thumbnail", '<section class="panel"><p>Er is nog geen thumbnail beschikbaar.</p></section>'), "404 Not Found")
+            return self.html(self.page("Geen thumbnail", '<section class="panel"><p>Er is nog geen thumbnail beschikbaar. Render eerst het project.</p></section>'), "404 Not Found")
 
         if item == "title-description":
             youtube = self.read_manifest(manifests / "youtube_draft.json")
