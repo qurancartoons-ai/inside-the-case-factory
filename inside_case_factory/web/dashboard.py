@@ -20,7 +20,7 @@ from inside_case_factory import __version__
 from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media, discover_project_scene_media
 from inside_case_factory.config.settings import Settings, load_settings
 from inside_case_factory.core.media import add_image_asset, ensure_media_manifest, load_media_manifest, update_image_review
-from inside_case_factory.core.production import ProductionRequest, _persist_candidate, _promote_candidate, run_production, start_production
+from inside_case_factory.core.production import ProductionRequest, _persist_candidate, _promote_candidate, run_production, start_production, write_plan
 from inside_case_factory.providers.reasoning import paid_api_confirmed
 from inside_case_factory.core.narrative_quality import validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
@@ -305,14 +305,46 @@ class DashboardApp:
 
     def resume_managed_production(self, project_root: Path) -> None:
         manifests = project_root / "manifests"
-        if (manifests / "production_plan.json").exists() and (manifests / "production_request.json").exists():
-            run_production(self.settings, project_root)
+        request_path = manifests / "production_request.json"
+        if not request_path.exists():
+            return
+        plan_path = manifests / "production_plan.json"
+        if not plan_path.exists():
+            payload = read_json(request_path)
+            request = ProductionRequest(
+                prompt=str(payload.get("prompt") or project_root.name),
+                target_duration_minutes=int(payload.get("target_duration_minutes") or 10),
+                language=str(payload.get("language") or "Nederlands"),
+                autonomy_mode=str(payload.get("autonomy_mode") or "review"),
+                content_mode=normalize_content_mode(str(payload.get("content_mode") or "factual_documentary")),
+                run_quality_mode=str(payload.get("run_quality_mode") or "sample_or_demo"),
+                workflow_type=str(payload.get("workflow_type") or "create_documentary"),
+                reference_documentary_url=str(payload.get("reference_documentary_url") or ""),
+            )
+            project = read_json(manifests / "project.json")
+            topic = str(project.get("topic") or payload.get("topic") or request.prompt)
+            write_plan(project_root, request, topic)
+            research_plan_path = manifests / "research_plan.json"
+            if not research_plan_path.exists():
+                write_json(research_plan_path, fallback_research_plan(payload | {"topic": topic}))
+        run_production(self.settings, project_root)
 
     def resume_recoverable_projects(self) -> None:
         for project_root in self.projects():
             state_path = project_root / "manifests" / "orchestration.json"
             state = read_json(state_path) if state_path.exists() else {}
-            if state.get("resume_after_restart") is not True or not paid_api_confirmed(project_root, "research_plan"):
+            approval_path = project_root / "manifests" / "paid_research_approval.json"
+            approval = read_json(approval_path) if approval_path.exists() else {}
+            approved_research_wait = (
+                approval.get("resolution") == "approved"
+                and state.get("status") == "approval_required"
+                and state.get("current_stage") == "research"
+            )
+            has_paid_confirmation = (
+                paid_api_confirmed(project_root, "research_plan")
+                or paid_api_confirmed(project_root, "tavily_research")
+            )
+            if not (state.get("resume_after_restart") is True or approved_research_wait) or not has_paid_confirmation:
                 continue
             state["resume_after_restart"] = False
             state["status"] = "queued"
@@ -950,12 +982,12 @@ class DashboardApp:
             approval_path = manifests / "paid_research_approval.json"
             approval = read_json(approval_path) if approval_path.exists() else {}
             if confirmation.get("confirmed") is True and approval.get("resolution") == "approved":
-                result = analyse_research_review(root)
                 write_progress_event(
-                    root, "completed", "research_review",
-                    f"Bestaande onderzoeksronde opnieuw geëxtraheerd zonder nieuwe betaaltoestemming: {result['claims_created']} conceptclaims",
+                    root, "started", "research",
+                    "Goedgekeurd aanvullend onderzoek hervat zonder nieuwe betaaltoestemming",
                 )
-                return self.redirect(f"/projects/{slug}/dossier-review")
+                self.resume_managed_production(root)
+                return self.redirect(f"/projects/{slug}/production")
             plan = read_json(manifests / "research_plan.json") if (manifests / "research_plan.json").exists() else {}
             claims_data = read_json(manifests / "claims.json") if (manifests / "claims.json").exists() else {"claims": []}
             claims = [str(item.get("text")) for item in claims_data.get("claims", []) if item.get("review_status") != "approved"]
