@@ -110,6 +110,54 @@ class OwnerAutomaticRecoveryTests(unittest.TestCase):
         request = read_json(projects[0] / "manifests/production_request.json")
         self.assertEqual(request["workflow_type"], "recycle_documentary")
 
+    def test_reference_video_chunks_are_assembled_in_order(self) -> None:
+        upload_id = "a" * 32
+        for index, content in enumerate((b"first", b"second")):
+            environ = {
+                "CONTENT_LENGTH": str(len(content)), "wsgi.input": BytesIO(content),
+                "HTTP_X_UPLOAD_ID": upload_id, "HTTP_X_FILE_NAME": "documentary.mp4",
+                "HTTP_X_CHUNK_INDEX": str(index), "HTTP_X_CHUNK_COUNT": "2",
+            }
+            response = self.app.upload_reference_chunk(environ)
+            self.assertEqual(response[0], "200 OK")
+
+        staged = self.app.staged_reference_upload(upload_id)
+        self.assertIsNotNone(staged)
+        path, filename = staged or (Path(), "")
+        self.assertEqual(filename, "documentary.mp4")
+        self.assertEqual(path.read_bytes(), b"firstsecond")
+
+    def test_wizard_consumes_completed_chunked_reference_upload(self) -> None:
+        upload_id = "b" * 32
+        content = b"local video bytes"
+        chunk_environ = {
+            "CONTENT_LENGTH": str(len(content)), "wsgi.input": BytesIO(content),
+            "HTTP_X_UPLOAD_ID": upload_id, "HTTP_X_FILE_NAME": "documentary.mp4",
+            "HTTP_X_CHUNK_INDEX": "0", "HTTP_X_CHUNK_COUNT": "1",
+        }
+        self.assertEqual(self.app.upload_reference_chunk(chunk_environ)[0], "200 OK")
+        fields = {
+            "prompt": "Chunked recycle", "duration": "12", "language": "Nederlands",
+            "mode": "automatic", "provider_profile": "balanced", "budget": "0.25",
+            "workflow_type": "recycle_documentary", "reference_upload_token": upload_id,
+        }
+        body = urlencode(fields).encode("utf-8")
+        environ = {
+            "REQUEST_METHOD": "POST", "CONTENT_TYPE": "application/x-www-form-urlencoded",
+            "CONTENT_LENGTH": str(len(body)), "wsgi.input": BytesIO(body),
+        }
+
+        with patch("inside_case_factory.web.dashboard.create_reference_documentary") as create_reference, patch(
+            "inside_case_factory.web.dashboard.prepare_recycle_documentary"
+        ), patch("inside_case_factory.web.dashboard.Thread"):
+            response = self.app.create_project_wizard(environ)
+
+        self.assertEqual(response[0], "303 See Other")
+        local_path = create_reference.call_args.kwargs["local_path"]
+        self.assertEqual(create_reference.call_args.kwargs["original_filename"], "documentary.mp4")
+        self.assertFalse(local_path.exists())
+        self.assertFalse((self.root / ".upload-staging" / upload_id).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

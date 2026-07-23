@@ -32,6 +32,7 @@ playwright-report/
 
 # Runtime-generated project data and manifests
 .calibration/
+.upload-staging/
 projects/
 projects/*/manifests/
 projects/*/workspace/
