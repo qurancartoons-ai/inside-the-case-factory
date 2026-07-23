@@ -387,6 +387,32 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     unknown_beats = sorted(represented - required_beats)
     duplicate_beats = sorted({item for item in returned if returned.count(item) > 1})
     claim_ids = {str(claim.get("id")) for claim in claims}
+    represented_claim_ids = {
+        str(claim_id)
+        for section in script.get("sections", []) if isinstance(section, dict)
+        for claim_id in section.get("claim_ids", [])
+        if str(claim_id)
+    }
+    unknown_structured_claim_ids = sorted(represented_claim_ids - claim_ids)
+    minimum_claims = math.ceil(target_minutes * float(config.get("minimum_claims_per_minute", 0) or 0))
+    minimum_sources = math.ceil(
+        target_minutes / 6 * float(config.get("minimum_distinct_sources_per_six_minutes", 0) or 0)
+    )
+    represented_source_ids = {
+        str(source_id)
+        for claim in claims if str(claim.get("id")) in represented_claim_ids
+        for source_id in claim.get("source_ids", [])
+        if str(source_id)
+    }
+    vague_patterns = (
+        r"\ber doken (?:diverse |verschillende )?theorie[eë]n op\b",
+        r"\bverschillende rapporten\b", r"\bsommige analyses\b",
+        r"\bgetuigen beweerden\b", r"\ber circuleerden getuigenissen\b",
+        r"\bsommige deskundigen\b", r"\bvolgens bronnen\b",
+    )
+    unattributed_vague_phrases = sorted({
+        match.group(0) for pattern in vague_patterns for match in re.finditer(pattern, text.casefold())
+    })
     cited = set(re.findall(r"c\d{3}", text))
     required_details = [str(item.get("detail")) for item in architecture.get("research_utilization_audit", []) if isinstance(item, dict) and item.get("required") is True]
     unused_required = [detail for detail in required_details if not any(token.casefold() in text.casefold() for token in detail.split() if len(token) > 5)]
@@ -424,6 +450,19 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
     if narration_section_mismatch: failures.append("Narration does not exactly match the ordered section text.")
     if unused_required: failures.append("Belangrijke onderzoeksdetails ontbreken: required details are unused.")
     if style["unsupported_citation_ids"]: failures.append("Unsupported claim IDs are cited.")
+    if unknown_structured_claim_ids: failures.append("Script sections contain unsupported claim IDs.")
+    if minimum_claims and len(represented_claim_ids & claim_ids) < minimum_claims:
+        failures.append(
+            f"Onvoldoende concrete feiten voor {target_minutes:g} minuten: "
+            f"{len(represented_claim_ids & claim_ids)} gebruikte claims; minimaal {minimum_claims}."
+        )
+    if minimum_sources and len(represented_source_ids) < minimum_sources:
+        failures.append(
+            f"Onvoldoende brondiversiteit: {len(represented_source_ids)} gebruikte bronnen; minimaal {minimum_sources}."
+        )
+    maximum_vague = int(config.get("maximum_unattributed_vague_phrases", 999) or 0)
+    if len(unattributed_vague_phrases) > maximum_vague:
+        failures.append("Niet-toegeschreven vage formuleringen moeten worden vervangen door concrete namen, onderzoeken of bronnen.")
     if narration_metadata: failures.append("Narration contains claim IDs or metadata.")
     if style["style_violations"]: failures.append("Banned style phrases are present.")
     if unsupported_years: failures.append("Narration contains years not supported by approved claims.")
@@ -438,6 +477,12 @@ def validate_script(script: dict[str, Any], claims: list[dict[str, Any]], archit
         "represented_beat_ids": sorted(required_beats & represented), "missing_beat_ids": missing_beats,
         "unknown_beat_ids": unknown_beats, "duplicate_beat_ids": duplicate_beats,
         "unsupported_claim_ids": sorted(cited - claim_ids), "unused_required_research_details": unused_required,
+        "represented_claim_ids": sorted(represented_claim_ids & claim_ids),
+        "unknown_structured_claim_ids": unknown_structured_claim_ids,
+        "minimum_required_claims": minimum_claims,
+        "represented_source_ids": sorted(represented_source_ids),
+        "minimum_required_sources": minimum_sources,
+        "unattributed_vague_phrases": unattributed_vague_phrases,
         "unsupported_narrated_years": unsupported_years,
         "unsupported_narrated_numbers": unsupported_numbers, "unsupported_narrated_names": unsupported_names,
         "narration_metadata": narration_metadata,

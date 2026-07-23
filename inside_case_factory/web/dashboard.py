@@ -20,9 +20,12 @@ from inside_case_factory import __version__
 from inside_case_factory.core.discovery import DiscoveryQuery, discover_archival_media, discover_project_scene_media
 from inside_case_factory.config.settings import Settings, load_settings
 from inside_case_factory.core.media import add_image_asset, ensure_media_manifest, load_media_manifest, update_image_review
-from inside_case_factory.core.production import ProductionRequest, _persist_candidate, _promote_candidate, run_production, start_production, write_plan
+from inside_case_factory.core.production import (
+    ProductionRequest, _generate_validated_script_candidates, _persist_candidate,
+    _promote_candidate, _write_generation_failure, run_production, start_production, write_plan,
+)
 from inside_case_factory.providers.reasoning import paid_api_confirmed
-from inside_case_factory.core.narrative_quality import validate_script
+from inside_case_factory.core.narrative_quality import script_word_targets, validate_script
 from inside_case_factory.core.content_modes import normalize_content_mode
 from inside_case_factory.core.content_modes import content_mode
 from inside_case_factory.core.project import available_project_slug, create_project
@@ -327,9 +330,6 @@ class DashboardApp:
             project = read_json(manifests / "project.json")
             topic = str(project.get("topic") or payload.get("topic") or request.prompt)
             write_plan(project_root, request, topic)
-            research_plan_path = manifests / "research_plan.json"
-            if not research_plan_path.exists():
-                write_json(research_plan_path, fallback_research_plan(payload | {"topic": topic}))
         run_production(self.settings, project_root)
 
     def migrate_stalled_owner_project(self, project_root: Path) -> bool:
@@ -2616,23 +2616,48 @@ class DashboardApp:
 
     def generate_script(self, slug: str, environ: dict[str, Any]) -> Response:
         form = self.read_form(environ)
+        project_root = self.project_root(slug)
+        script_path = project_root / "manifests" / "script.json"
+        quality_path = project_root / "manifests" / "script_quality_report.json"
+        previous_script = script_path.read_bytes() if script_path.exists() else None
+        previous_quality = quality_path.read_bytes() if quality_path.exists() else None
         try:
             minutes = int(self.form_value(form, "target_duration_minutes", "10"))
-            project_root = self.project_root(slug)
+            minutes = max(1, min(60, minutes))
+            provider = reasoning_provider_from_settings(self.settings.providers.get("reasoning", {}))
+            word_contract = script_word_targets(
+                minutes, float(self.settings.script.get("words_per_minute", 130)),
+                float(self.settings.script.get("duration_tolerance", 0.5)),
+            )
             script = generate_script(
-                project_root,
-                max(1, min(60, minutes)),
-                reasoning_provider=reasoning_provider_from_settings(self.settings.providers.get("reasoning", {})),
+                project_root, minutes, reasoning_provider=provider,
+                word_range=(word_contract["minimum_words"], word_contract["maximum_words"]),
             )
             architecture_path = project_root / "manifests" / "story_architecture.json"
-            if architecture_path.exists():
-                workflow = load_manifest(project_root, "workflow.json")
-                quality = validate_script(script, approved_claims(project_root), read_json(architecture_path), {**self.settings.script, "language": workflow.get("language", script.get("language", "English"))})
-                _persist_candidate(project_root, 1, script, quality)
-                if not quality["pass"]:
-                    raise RuntimeError("Script rejected: " + "; ".join(quality["failure_reasons"]))
-                _promote_candidate(project_root, 1, script, quality)
+            if not architecture_path.exists():
+                raise RuntimeError("Script rejected: story architecture is missing.")
+            workflow = load_manifest(project_root, "workflow.json")
+            claims = approved_claims(project_root)
+            script_config = {**self.settings.script, "language": workflow.get("language", script.get("language", "English"))}
+            candidate, attempts = _generate_validated_script_candidates(
+                project_root, script, provider, claims, read_json(architecture_path), script_config,
+                read_json(project_root / "manifests" / "research_plan.json"),
+                read_json(project_root / "manifests" / "dossier.json"),
+                read_json(project_root / "manifests" / "narrative_outline.json"),
+                minutes, str(workflow.get("language", script.get("language", "English"))),
+            )
+            if candidate is None:
+                _write_generation_failure(project_root, attempts, len(attempts) > 1)
+                raise RuntimeError("Script rejected: " + "; ".join(attempts[-1][1]["failure_reasons"]))
         except Exception as error:
+            if previous_script is None:
+                script_path.unlink(missing_ok=True)
+            else:
+                script_path.write_bytes(previous_script)
+            if previous_quality is None:
+                quality_path.unlink(missing_ok=True)
+            else:
+                quality_path.write_bytes(previous_quality)
             return self.html(self.page("Script Blocked", f"<section class=\"panel\"><h2>Script blocked</h2><p>{escape(str(error))}</p></section>"), "409 Conflict")
         return self.redirect(f"/projects/{slug}")
 
@@ -2646,6 +2671,23 @@ class DashboardApp:
 
     def approve_script(self, slug: str) -> Response:
         project_root = self.project_root(slug)
+        script_path = project_root / "manifests" / "script.json"
+        architecture_path = project_root / "manifests" / "story_architecture.json"
+        if not script_path.exists() or not architecture_path.exists():
+            return self.html(self.page("Script Not Ready", "<section class=\"panel\"><p>Generate a validated script before approval.</p></section>"), "409 Conflict")
+        script = read_json(script_path)
+        workflow = load_manifest(project_root, "workflow.json")
+        quality = validate_script(
+            script, approved_claims(project_root), read_json(architecture_path),
+            {**self.settings.script, "language": workflow.get("language", script.get("language", "English"))},
+        )
+        _persist_candidate(project_root, 1, script, quality)
+        if not quality["pass"]:
+            return self.html(
+                self.page("Script Not Ready", f"<section class=\"panel\"><p>{escape('; '.join(quality['failure_reasons']))}</p></section>"),
+                "409 Conflict",
+            )
+        _promote_candidate(project_root, 1, script, quality)
         if not approve_script(project_root):
             return self.html(self.page("Script Not Ready", "<section class=\"panel\"><p>Save a script draft before approval.</p></section>"), "409 Conflict")
         self.resume_managed_production(project_root)

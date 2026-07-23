@@ -105,9 +105,8 @@ class PaidResearchApprovalUXTests(unittest.TestCase):
         with patch("inside_case_factory.web.dashboard.run_production") as run:
             self.app.resume_managed_production(self.root)
         plan = read_json(self.root / "manifests/production_plan.json")
-        research_plan = read_json(self.root / "manifests/research_plan.json")
         self.assertEqual(plan["topic"], "Approval Case")
-        self.assertEqual(research_plan["provider"], "local_fallback")
+        self.assertFalse((self.root / "manifests/research_plan.json").exists())
         run.assert_called_once_with(self.app.settings, self.root)
 
     def test_restart_recovers_already_approved_research(self):

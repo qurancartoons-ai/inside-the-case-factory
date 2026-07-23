@@ -36,7 +36,10 @@ before_render = false
 before_publish = true
 
 [script]
-words_per_minute = 125
-duration_tolerance = 1.0
+words_per_minute = 130
+duration_tolerance = 0.5
 minimum_story_beat_coverage = 1.0
 maximum_revision_attempts = 2
+minimum_claims_per_minute = 0.75
+minimum_distinct_sources_per_six_minutes = 1.0
+maximum_unattributed_vague_phrases = 0
