@@ -14,6 +14,7 @@ from inside_case_factory.core.media import add_image_asset, image_for_scene, loa
 from inside_case_factory.core.media import update_image_review
 from inside_case_factory.core.research import (
     TavilyResearchProvider,
+    bounded_tavily_query,
     add_claim,
     add_source,
     approve_research,
@@ -45,6 +46,17 @@ from inside_case_factory.web.dashboard import DashboardApp
 
 
 class ProjectScaffoldTests(unittest.TestCase):
+    def test_tavily_query_is_bounded_without_dropping_search_intent(self) -> None:
+        query = bounded_tavily_query(
+            "Princess Diana",
+            "official records verified facts reputable reporting",
+            {"combined_query": " OR ".join(["uitgebreide onderzoeksvraag"] * 40)},
+        )
+
+        self.assertLessEqual(len(query), 400)
+        self.assertTrue(query.endswith("official records verified facts reputable reporting"))
+        self.assertIn("uitgebreide onderzoeksvraag", query)
+
     def test_low_cost_strategy_has_stage_models_and_stays_under_budget(self) -> None:
         settings = load_settings(Path.cwd())
         config = reasoning_config_from_settings(settings.providers["reasoning"])

@@ -78,6 +78,18 @@ ATTRIBUTION_MARKERS = (
     "vermoed", "mogelijk", "kan ", "kunnen ", "schijn", "ontkent",
 )
 
+TAVILY_MAX_QUERY_CHARACTERS = 400
+
+
+def bounded_tavily_query(topic: str, query_suffix: str, strategy: dict[str, Any] | None = None) -> str:
+    """Build a useful Tavily query without exceeding the provider's hard limit."""
+    base = compact_whitespace(str((strategy or {}).get("combined_query") or topic))
+    suffix = compact_whitespace(query_suffix)
+    available = max(1, TAVILY_MAX_QUERY_CHARACTERS - len(suffix) - 1)
+    if len(base) > available:
+        base = base[:available].rsplit(" ", 1)[0].rstrip(" ,;|OR") or base[:available]
+    return compact_whitespace(f"{base} {suffix}")[:TAVILY_MAX_QUERY_CHARACTERS]
+
 
 def _topic_terms(project_root: Path) -> set[str]:
     request_path = project_root / "manifests" / "production_request.json"
@@ -234,7 +246,7 @@ class TavilyResearchProvider(ResearchProvider):
             "theory_conspiracy": "theory origins proponents alleged motives anomalies counterarguments conventional explanation",
         }.get(content_mode, "official records verified facts reputable reporting")
         payload = {
-            "query": f"{(strategy or {}).get('combined_query') or topic} {query_suffix}",
+            "query": bounded_tavily_query(topic, query_suffix, strategy),
             "topic": "general",
             "search_depth": self.search_depth,
             "max_results": self.max_results,
