@@ -78,6 +78,7 @@ This single-owner installation treats the per-project budget as standing authori
 - `allow_publish = false`
 - `stop_before_expensive_steps = true`
 - Validated research, quality-checked scripts, and rights-eligible media are accepted automatically. Publishing remains a manual hard stop.
+- On dashboard startup, legacy projects stuck at paid-research approval with an accidental zero budget are migrated to the configured default budget and resumed automatically.
 
 ## Low-cost model strategy
 

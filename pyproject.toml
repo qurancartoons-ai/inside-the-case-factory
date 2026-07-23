@@ -3,8 +3,7 @@ name = "inside-the-case-factory"
 version = "0.1.0"
 description = "Offline-first scaffold for an automated cinematic documentary video production pipeline."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["yt-dlp==2026.7.4"]
 
 [project.scripts]
 case-factory = "inside_case_factory.cli.main:main"
-

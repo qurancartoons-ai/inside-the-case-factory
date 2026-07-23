@@ -35,6 +35,7 @@ class DashboardExperienceTests(unittest.TestCase):
         page = self.app.new_project_wizard()
         for name in ("prompt", "duration", "language", "style", "audience", "screenshot", "clip", "youtube_urls", "dossier", "provider_profile", "budget", "mode"):
             self.assertIn(f'name="{name}"', page)
+        self.assertEqual(page.count('name="workflow_type"'), 1)
 
     def test_live_progress_has_all_eleven_phases_and_costs(self):
         result = production_progress(self.root)
