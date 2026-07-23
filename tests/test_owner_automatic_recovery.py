@@ -158,6 +158,34 @@ class OwnerAutomaticRecoveryTests(unittest.TestCase):
         self.assertFalse(local_path.exists())
         self.assertFalse((self.root / ".upload-staging" / upload_id).exists())
 
+    def test_rejected_dashboard_script_never_remains_as_visible_script(self) -> None:
+        project = create_project(self.root / "projects", "Rejected script").root
+        write_json(project / "manifests/workflow.json", {"research_approved": True, "language": "Nederlands"})
+        write_json(project / "manifests/research_plan.json", {})
+        write_json(project / "manifests/dossier.json", {})
+        write_json(project / "manifests/narrative_outline.json", {})
+        write_json(project / "manifests/story_architecture.json", {})
+        write_json(project / "manifests/claims.json", {"claims": []})
+        self.app.project_root = lambda slug: project  # type: ignore[method-assign]
+        body = urlencode({"target_duration_minutes": "12"}).encode("utf-8")
+        environ = {
+            "CONTENT_LENGTH": str(len(body)), "CONTENT_TYPE": "application/x-www-form-urlencoded",
+            "wsgi.input": BytesIO(body),
+        }
+
+        def write_invalid(*args, **kwargs):
+            invalid = {"narration": "veel te kort", "target_duration_minutes": 12, "sections": []}
+            write_json(project / "manifests/script.json", invalid)
+            return invalid
+
+        with patch("inside_case_factory.web.dashboard.generate_script", side_effect=write_invalid), patch(
+            "inside_case_factory.web.dashboard._generate_validated_script_candidates", side_effect=RuntimeError("quality rejected")
+        ):
+            response = self.app.generate_script(project.name, environ)
+
+        self.assertEqual(response[0], "409 Conflict")
+        self.assertFalse((project / "manifests/script.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -303,6 +303,30 @@ class ScriptAcceptanceTests(unittest.TestCase):
         self.assertFalse(report["pass"])
         self.assertTrue(any("te kort" in reason for reason in report["failure_reasons"]))
 
+    def test_long_documentary_requires_claim_and_source_density(self) -> None:
+        claims = [{"id": "c001", "text": "Een feit.", "source_ids": ["source-1"]}]
+        script = self.script(1560, ["beat_01", "beat_02", "beat_03"])
+        script["sections"][0]["claim_ids"] = ["c001"]
+        report = validate_script(script, claims, self.architecture, {
+            "words_per_minute": 130, "duration_tolerance": 0.5,
+            "minimum_claims_per_minute": 0.75,
+            "minimum_distinct_sources_per_six_minutes": 1.0,
+        })
+        self.assertFalse(report["pass"])
+        self.assertEqual(report["minimum_required_claims"], 9)
+        self.assertEqual(report["minimum_required_sources"], 2)
+        self.assertTrue(any("Onvoldoende concrete feiten" in reason for reason in report["failure_reasons"]))
+
+    def test_unattributed_vague_dutch_phrases_fail(self) -> None:
+        report = validate_script(
+            {"narration": "Er doken verschillende theorieën op. Verschillende rapporten spraken elkaar tegen. Sommige analyses weken af.", "language": "Nederlands", "target_duration_minutes": 1, "sections": [{"beat_ids": ["beat_01", "beat_02", "beat_03"]}]},
+            self.claims, self.architecture,
+            {"words_per_minute": 125, "duration_tolerance": 10, "maximum_unattributed_vague_phrases": 0},
+        )
+        self.assertFalse(report["pass"])
+        self.assertIn("verschillende rapporten", report["unattributed_vague_phrases"])
+        self.assertTrue(any("vage formuleringen" in reason for reason in report["failure_reasons"]))
+
     def test_missing_story_beats_fail(self) -> None:
         report = validate_script(self.script(1600, ["beat_01"]), self.claims, self.architecture)
         self.assertFalse(report["pass"])
