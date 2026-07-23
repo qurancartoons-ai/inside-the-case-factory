@@ -329,6 +329,84 @@ class DashboardApp:
                 write_json(research_plan_path, fallback_research_plan(payload | {"topic": topic}))
         run_production(self.settings, project_root)
 
+    def migrate_stalled_owner_project(self, project_root: Path) -> bool:
+        """Repair legacy zero-budget research waits under single-owner defaults."""
+        settings = self.settings
+        if settings.pipeline.get("require_paid_api_confirmation", False):
+            return False
+        manifests = project_root / "manifests"
+        state_path = manifests / "orchestration.json"
+        provider_path = manifests / "provider_config.json"
+        if not state_path.exists() or not provider_path.exists():
+            return False
+        state = read_json(state_path)
+        provider = read_json(provider_path)
+        status = str(state.get("status", "")).lower()
+        stage = str(state.get("current_stage", "")).lower()
+        error = str(state.get("last_error", "")).lower()
+        stalled_for_paid_research = (
+            stage in {"research", "research_plan", "research_approval"}
+            and status in {"approval_required", "waiting_for_approval", "blocked"}
+            and (
+                status in {"approval_required", "waiting_for_approval"}
+                or "betaal" in error
+                or "paid" in error
+                or "toestemming" in error
+            )
+        )
+        if not stalled_for_paid_research or float(provider.get("budget_usd", 0) or 0) > 0:
+            return False
+        budget = float(settings.pipeline.get("default_project_budget_usd", 0.25) or 0.25)
+        if budget <= 0:
+            return False
+        now = datetime.now(UTC).isoformat()
+        provider.update({
+            "profile": "balanced", "budget_usd": budget,
+            "external_calls_enabled": True, "owner_budget_migrated_at": now,
+        })
+        write_json(provider_path, provider)
+        for name in ("workflow.json", "production_request.json", "production_plan.json"):
+            path = manifests / name
+            if path.exists():
+                payload = read_json(path)
+                payload["autonomy_mode"] = "automatic"
+                write_json(path, payload)
+        estimate_path = manifests / "cost_estimate.json"
+        if estimate_path.exists():
+            estimate = read_json(estimate_path)
+            estimate["project_budget_usd"] = budget
+            write_json(estimate_path, estimate)
+        approval_path = manifests / "paid_research_approval.json"
+        if approval_path.exists():
+            approval = read_json(approval_path)
+            approval.update({
+                "approval_required": False, "resolution": "superseded_by_owner_budget",
+                "resolved_at": now,
+            })
+            write_json(approval_path, approval)
+        confirmation_path = manifests / "paid_api_confirmation.json"
+        if confirmation_path.exists():
+            confirmation = read_json(confirmation_path)
+            confirmation.update({"confirmed": False, "superseded_at": now, "superseded_by": "owner_project_budget"})
+            write_json(confirmation_path, confirmation)
+        completed = [item for item in state.get("completed_stages", []) if item not in {"research", "research_approval"}]
+        state.update({
+            "status": "queued", "current_stage": "research", "waiting_for": "",
+            "last_error": "", "completed_stages": completed, "resume_after_restart": False,
+            "owner_budget_migrated_at": now, "updated_at": now,
+        })
+        write_json(state_path, state)
+        research_path = manifests / "research.json"
+        if research_path.exists():
+            research = read_json(research_path)
+            research.update({"status": "queued", "message": "Onderzoek hervat binnen het projectbudget."})
+            write_json(research_path, research)
+        write_progress_event(
+            project_root, "started", "research",
+            f"Vastgelopen onderzoek automatisch hervat met projectbudget ${budget:.2f}",
+        )
+        return True
+
     def resume_recoverable_projects(self) -> None:
         try:
             confirmation_required = bool(self.settings.pipeline.get("require_paid_api_confirmation", False))
@@ -336,6 +414,7 @@ class DashboardApp:
             # Embedded/test apps without repository config retain the legacy-safe behavior.
             confirmation_required = True
         for project_root in self.projects():
+            migrated = False if confirmation_required else self.migrate_stalled_owner_project(project_root)
             state_path = project_root / "manifests" / "orchestration.json"
             state = read_json(state_path) if state_path.exists() else {}
             approval_path = project_root / "manifests" / "paid_research_approval.json"
@@ -357,7 +436,7 @@ class DashboardApp:
                 and state.get("current_stage") == "research"
                 and project_budget > 0
             )
-            if not (state.get("resume_after_restart") is True or approved_research_wait or owner_authorized_wait):
+            if not (migrated or state.get("resume_after_restart") is True or approved_research_wait or owner_authorized_wait):
                 continue
             if confirmation_required and not has_paid_confirmation:
                 continue
@@ -578,7 +657,6 @@ class DashboardApp:
                 </section>
                 <section class="panel">
           <form method="post" action="/projects/new" enctype="multipart/form-data" class="production-form">
-                        <input type="hidden" name="workflow_type" value="create_documentary">
             <label class="wide">Onderwerp of productieprompt<textarea name="prompt" rows="6" required></textarea></label>
             <div class="start-grid">
                             <label>Duur<select name="duration"><option>5</option><option selected>12</option><option>20</option><option>30</option><option>45</option></select></label>
@@ -617,14 +695,16 @@ class DashboardApp:
 
     def create_project_wizard(self, environ: dict[str, Any]) -> Response:
         form = self.read_form(environ)
+        settings = self.settings
         prompt = self.form_value(form, "prompt").strip()
         workflow_type = self.form_value(form, "workflow_type", "create_documentary")
         if not prompt:
             return self.html(self.page("Prompt ontbreekt", '<section class="panel"><p>Voer een onderwerp of prompt in.</p></section>'), "400 Bad Request")
-        project = create_project(self.settings.projects_dir, prompt[:100], available_project_slug(self.settings.projects_dir, prompt[:100]))
+        project = create_project(settings.projects_dir, prompt[:100], available_project_slug(settings.projects_dir, prompt[:100]))
         try:
             duration = max(1, min(60, int(self.form_value(form, "duration", "12"))))
-            budget = max(0.0, float(self.form_value(form, "budget", "0")))
+            default_budget = float(settings.pipeline.get("default_project_budget_usd", 0.25) or 0.25)
+            budget = max(0.0, float(self.form_value(form, "budget", str(default_budget))))
         except ValueError:
             duration, budget = 12, 0.0
         story_style = self.form_value(form, "story_style", "investigative").strip().lower()

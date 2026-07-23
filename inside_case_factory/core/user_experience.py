@@ -449,6 +449,15 @@ def production_progress(project_root: Path) -> dict[str, Any]:
         or waiting_for in {"research", "research_plan", "approve_research", "research_approval"}
     )
 
+    provider_config = _read_manifest(manifests / "provider_config.json", {})
+    owner_automatic = (
+        str(workflow.get("autonomy_mode", "")).lower() == "automatic"
+        and str(provider_config.get("profile", "")).lower() != "offline"
+        and float(provider_config.get("budget_usd", 0) or 0) > 0
+    )
+    if owner_automatic:
+        paid_gate_required = False
+
     approval_path = manifests / "paid_research_approval.json"
     approval = _read_manifest(approval_path, {})
     estimate = _read_manifest(manifests / "cost_estimate.json", {})

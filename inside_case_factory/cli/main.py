@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 
 from inside_case_factory import __version__
@@ -50,6 +51,7 @@ def cmd_health(args: argparse.Namespace) -> int:
             "python": sys.version.split()[0],
             "ffmpeg_available": ffmpeg_available(),
             "ffmpeg": ffmpeg_version(),
+            "yt_dlp_available": shutil.which("yt-dlp") is not None,
             "paid_providers_allowed": settings.pipeline.get("allow_paid_providers", False),
             "publishing_allowed": settings.pipeline.get("allow_publish", False),
         }

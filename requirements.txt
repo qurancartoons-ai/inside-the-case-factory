@@ -1,5 +1,6 @@
-# The initial scaffold intentionally uses only the Python 3.12 standard library.
-# Add optional provider SDKs here later, for example:
+yt-dlp==2026.7.4
+
+# Optional provider SDKs can be added here later, for example:
 # pydantic
 # pyyaml
 # typer
