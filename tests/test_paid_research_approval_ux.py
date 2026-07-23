@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 import os
 import tempfile
 import unittest
@@ -30,6 +31,14 @@ class PaidResearchApprovalUXTests(unittest.TestCase):
         write_json(self.root / "manifests/orchestration.json", {"status": "blocked", "current_stage": "research_plan", "last_error": "Paid API call not confirmed."})
         write_json(self.root / "manifests/production_plan.json", {"topic": "Approval Case", "stages": []})
         write_json(self.root / "manifests/production_request.json", {"prompt": "Approval Case"})
+        configured = load_settings(ROOT)
+        manual_settings = replace(
+            configured,
+            pipeline={**configured.pipeline, "require_paid_api_confirmation": True, "owner_automatic_approval": False},
+        )
+        self.settings_patch = patch("inside_case_factory.web.dashboard.load_settings", return_value=manual_settings)
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
         self.app = DashboardApp(ROOT)
         self.app.project_root = lambda slug: self.root  # type: ignore[method-assign]
 

@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from inside_case_factory.config.settings import Settings
 from inside_case_factory.core.project import create_project
-from inside_case_factory.core.production import run_production
+from inside_case_factory.core.production import _approve_eligible_media, _approve_validated_research, run_production
 from inside_case_factory.pipeline.generator import _ensure_voice_segment
 from inside_case_factory.utils.files import read_json, write_json
 
@@ -35,6 +35,33 @@ def _production_project(root: Path) -> Path:
 
 
 class OrchestrationTests(unittest.TestCase):
+    def test_owner_mode_accepts_only_validated_research_and_rights_eligible_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = _production_project(Path(tmp))
+            write_json(project_root / "manifests" / "sources.json", {"sources": [
+                {"id": "valid", "extraction_status": "success", "relevance_status": "relevant"},
+                {"id": "failed", "extraction_status": "failed", "relevance_status": "relevant"},
+            ]})
+            write_json(project_root / "manifests" / "claims.json", {"claims": [
+                {"id": "supported", "text": "Supported fact", "source_ids": ["valid"], "evidence": [{"excerpt": "Supported fact"}]},
+                {"id": "unsupported", "text": "Unsupported fact", "source_ids": ["failed"], "evidence": []},
+            ]})
+            write_json(project_root / "manifests" / "media_sources.json", {"assets": [
+                {"id": "safe", "review_eligible": True, "rights_status": "public_domain", "suggested_scenes": ["s01"]},
+                {"id": "unknown", "review_eligible": True, "rights_status": "unknown"},
+            ]})
+
+            self.assertTrue(_approve_validated_research(project_root))
+            _approve_eligible_media(project_root)
+
+            sources = read_json(project_root / "manifests" / "sources.json")["sources"]
+            claims = read_json(project_root / "manifests" / "claims.json")["claims"]
+            media = read_json(project_root / "manifests" / "media_sources.json")["assets"]
+            self.assertEqual([item["review_status"] for item in sources], ["approved", "rejected"])
+            self.assertEqual([item["review_status"] for item in claims], ["approved", "rejected"])
+            self.assertEqual([item["review_status"] for item in media], ["approved", "rejected"])
+            self.assertEqual(media[0]["mapped_scenes"], ["s01"])
+
     def test_existing_voice_segment_is_not_generated_again(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -50,6 +77,9 @@ class OrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project_root = _production_project(root)
+            plan = read_json(project_root / "manifests" / "production_plan.json")
+            plan["autonomy_mode"] = "review"
+            write_json(project_root / "manifests" / "production_plan.json", plan)
 
             def research(*args: object, **kwargs: object) -> dict[str, object]:
                 return {"ok": True, "claims_added": 1}
@@ -84,6 +114,7 @@ class OrchestrationTests(unittest.TestCase):
                     "id": "m1",
                     "review_status": "approved",
                     "review_eligible": True,
+                    "rights_status": "approved",
                     "relevance_score": 0.9,
                     "source_url": "https://example.com/m1",
                     "project_slug": project_root.name,
@@ -254,7 +285,7 @@ class OrchestrationTests(unittest.TestCase):
             write_json(project_root / "manifests" / "claims.json", {"claims": [{"id": "c1", "review_status": "approved", "source_ids": ["s1"]}]})
             write_json(project_root / "manifests" / "script.json", {"version": 1, "title": "Evidence", "status": "approved", "narration": "Approved narration."})
             write_json(project_root / "manifests" / "scenes.json", {"version": 1, "scenes": [{"id": "s01", "narration": "Approved narration."}]})
-            write_json(project_root / "manifests" / "media_sources.json", {"version": 1, "assets": [{"id": "m1", "review_status": "approved", "review_eligible": True}]})
+            write_json(project_root / "manifests" / "media_sources.json", {"version": 1, "assets": [{"id": "m1", "review_status": "approved", "review_eligible": True, "rights_status": "approved"}]})
 
             def successful_render(*args: object, **kwargs: object) -> None:
                 output = project_root / "exports" / "final_video.mp4"

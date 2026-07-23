@@ -330,6 +330,11 @@ class DashboardApp:
         run_production(self.settings, project_root)
 
     def resume_recoverable_projects(self) -> None:
+        try:
+            confirmation_required = bool(self.settings.pipeline.get("require_paid_api_confirmation", False))
+        except FileNotFoundError:
+            # Embedded/test apps without repository config retain the legacy-safe behavior.
+            confirmation_required = True
         for project_root in self.projects():
             state_path = project_root / "manifests" / "orchestration.json"
             state = read_json(state_path) if state_path.exists() else {}
@@ -344,7 +349,17 @@ class DashboardApp:
                 paid_api_confirmed(project_root, "research_plan")
                 or paid_api_confirmed(project_root, "tavily_research")
             )
-            if not (state.get("resume_after_restart") is True or approved_research_wait) or not has_paid_confirmation:
+            provider_path = project_root / "manifests" / "provider_config.json"
+            project_budget = float(read_json(provider_path).get("budget_usd", 0) or 0) if provider_path.exists() else 0
+            owner_authorized_wait = (
+                not confirmation_required
+                and state.get("status") == "approval_required"
+                and state.get("current_stage") == "research"
+                and project_budget > 0
+            )
+            if not (state.get("resume_after_restart") is True or approved_research_wait or owner_authorized_wait):
+                continue
+            if confirmation_required and not has_paid_confirmation:
                 continue
             state["resume_after_restart"] = False
             state["status"] = "queued"
@@ -572,7 +587,7 @@ class DashboardApp:
                             <label>Verteller<select name="narrator"><option value="neutral" selected>Neutraal</option><option value="journalist">Journalistiek</option><option value="dramatic">Dramatisch</option><option value="warm">Warm</option><option value="authoritative">Autoritair</option></select></label>
                             <label>Taal<select name="language"><option>Nederlands</option><option>English</option><option>Deutsch</option><option>Français</option><option>Español</option></select></label>
                             <label>Doelgroep<input name="audience" placeholder="Breed publiek, professionals..."></label>
-                            <label>Werkmodus<select name="mode"><option value="review" selected>Begeleid</option><option value="automatic">Automatisch</option></select></label>
+                            <label>Werkmodus<select name="mode"><option value="automatic" selected>Automatisch</option><option value="review">Begeleid</option></select></label>
             </div>
             <label class="wide">Reference documentary URL<input type="url" name="reference_documentary_url" placeholder="https://www.youtube.com/watch?v=... of https://vimeo.com/..." ></label>
             <label>Reference documentary MP4<input type="file" name="reference_documentary_file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska"></label>
@@ -580,8 +595,8 @@ class DashboardApp:
             <label class="wide">Recycle instructions (optioneel)<textarea name="recycle_instructions" rows="3" placeholder="Focus op bepaalde periode, gebeurtenissen of personen."></textarea></label>
                         <details class="panel calm"><summary>Geavanceerd (optioneel)</summary>
                             <div class="grid-form" style="margin-top:12px;">
-                                <label>Providerprofiel<select name="provider_profile"><option value="offline">Volledig lokaal</option><option value="balanced">Gebalanceerd</option><option value="quality">Hoogste kwaliteit</option></select></label>
-                                <label>Maximumbudget USD<input name="budget" type="number" min="0" step="0.01" value="0"></label>
+                                <label>Providerprofiel<select name="provider_profile"><option value="balanced" selected>Gebalanceerd</option><option value="quality">Hoogste kwaliteit</option><option value="offline">Volledig lokaal</option></select></label>
+                                <label>Maximumbudget USD<input name="budget" type="number" min="0" step="0.01" value="0.25"></label>
                                 <label class="wide"><input type="checkbox" name="enable_branding" value="yes"> Branding/watermark tonen</label>
                                 <label>Screenshots<input type="file" name="screenshot" accept="image/*" multiple></label>
                                 <label>Lokale clips<input type="file" name="clip" accept="video/*,audio/*" multiple></label>
@@ -627,7 +642,7 @@ class DashboardApp:
         workflow.update({
             "target_duration_minutes": duration,
             "language": self.form_value(form, "language", "Nederlands"),
-            "autonomy_mode": self.form_value(form, "mode", "review"),
+            "autonomy_mode": self.form_value(form, "mode", "automatic"),
             "content_mode": normalize_content_mode(style_to_mode.get(story_style, "investigative_documentary")),
             "audience": self.form_value(form, "audience"),
             "workflow_type": workflow_type,
@@ -657,7 +672,7 @@ class DashboardApp:
             "opacity": 0.58 if branding_enabled else 0.0,
         }
         write_json(project.root / "manifests" / "visual_style_profile.json", visual_style)
-        profile = self.form_value(form, "provider_profile", "offline")
+        profile = self.form_value(form, "provider_profile", "balanced")
         write_json(project.root / "manifests/provider_config.json", {"version": 1, "profile": profile, "budget_usd": budget, "external_calls_enabled": profile != "offline" and budget > 0, "cache_enabled": True, "retries": 2, "tasks": {}})
         reference_uploads = self._uploads(form, "reference_documentary_file")
         if workflow_type == "recycle_documentary":
@@ -703,6 +718,8 @@ class DashboardApp:
             current_stage="Onderwerp",
             latest_user_input=prompt,
         )
+        write_progress_event(project.root, "started", "recycle" if workflow_type == "recycle_documentary" else "production", "Project staat klaar voor automatische productie")
+        Thread(target=self.resume_managed_production, args=(project.root,), daemon=True).start()
         return self.redirect(f"/projects/{project.slug}/production")
 
     def persist_project_checkpoint(self, project_root: Path, *, current_stage: str, latest_user_input: str) -> None:
@@ -977,6 +994,22 @@ class DashboardApp:
             write_progress_event(root, "completed", "research_review", f"{result['claims_created']} conceptclaims lokaal opgesteld")
         else:
             manifests = root / "manifests"
+            if not self.settings.pipeline.get("require_paid_api_confirmation", False):
+                orchestration_path = manifests / "orchestration.json"
+                state = read_json(orchestration_path) if orchestration_path.exists() else {"version": 1}
+                completed = [stage for stage in state.get("completed_stages", []) if stage not in {"research", "research_approval"}]
+                state.update({
+                    "status": "queued", "current_stage": "research", "waiting_for": "",
+                    "last_error": "", "completed_stages": completed,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                })
+                write_json(orchestration_path, state)
+                workflow = read_json(manifests / "workflow.json")
+                workflow["research_approved"] = False
+                write_json(manifests / "workflow.json", workflow)
+                write_progress_event(root, "started", "research", "Aanvullend onderzoek gestart binnen het projectbudget")
+                Thread(target=self.resume_managed_production, args=(root,), daemon=True).start()
+                return self.redirect(f"/projects/{slug}/production")
             confirmation_path = manifests / "paid_api_confirmation.json"
             confirmation = read_json(confirmation_path) if confirmation_path.exists() else {}
             approval_path = manifests / "paid_research_approval.json"

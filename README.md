@@ -69,15 +69,15 @@ make_video.py               Existing FFmpeg proof-of-concept script
 
 ## Safety Defaults
 
-The default configuration keeps the expensive and risky actions off:
+This single-owner installation treats the per-project budget as standing authorization:
 
-- `allow_paid_providers = false`
-- `require_paid_api_confirmation = true`
+- `allow_paid_providers = true`
+- `require_paid_api_confirmation = false`
 - `default_project_budget_usd = 0.25`
-- `dry_run = true`
+- A zero budget blocks every external paid call; configured provider limits remain hard upper bounds.
 - `allow_publish = false`
 - `stop_before_expensive_steps = true`
-- Human review gates enabled after research, script, scene planning, generation prompts, rendering, and before publishing.
+- Validated research, quality-checked scripts, and rights-eligible media are accepted automatically. Publishing remains a manual hard stop.
 
 ## Low-cost model strategy
 
@@ -190,7 +190,7 @@ Create a 12-minute Inside the Case documentary about the death of Michael Jackso
 Autonomy modes:
 
 - `Review Mode`: runs safe setup/research, then pauses for source and claim review. It also pauses after script and media selection.
-- `Automatic Mode`: continues through safe stages only when the required approvals already exist. It never approves research, scripts, or media by itself, and never publishes to YouTube.
+- `Automatic Mode` (default): uses the project budget as standing permission, accepts only research/scripts/media that pass their existing validation gates, and never publishes to YouTube.
 
 Provider behavior:
 
@@ -201,9 +201,11 @@ Provider behavior:
 
 The project page shows the production plan, current activity, recent activity log, and stage status. Manual source, claim, script, scene, and media controls are still available under `Advanced`.
 
+The **Recycle Documentary** workflow accepts a YouTube/Vimeo link or local reference file, analyzes the complete timeline in bounded windows, and reuses only its narrative structure. It records measurable transcript, temporal, and visual coverage and requires independent sources for factual claims. See [docs/RECYCLE_DOCUMENTARY.md](docs/RECYCLE_DOCUMENTARY.md) for prerequisites, safety rules, and generated manifests.
+
 ### Factual Research and Script Workflow
 
-Real documentary projects use an approval-gated factual workflow. Do not use the legacy one-step sample generator for factual cases.
+Real documentary projects use a validation-gated factual workflow. Manual review remains available, but is not required in the default single-owner mode.
 
 Once the factual script and scenes are approved and every discovered media item has been reviewed (with at least one approved asset), render that same manifest-backed project without regenerating sample narration:
 
@@ -225,7 +227,7 @@ The replaceable visual provider chain prefers approved archival media, then appr
 
 The FFmpeg edit uses bounded multi-shot scene timing, varied motivated zoom/pan/push/parallax/focus treatments, restrained narrative transitions, consistent grading, optional scene-bound ambience and effects, fades, voice normalization and safe effect limiting. Music is not required. Existing completed voice segments remain resumable and are not generated twice.
 
-Production runs also maintain `manifests/orchestration.json`. Each dashboard approval automatically resumes the state machine until the next approval gate. Concurrent resumes are serialized with a project lock, completed stages are reconciled from their durable artifacts, and JSON manifests are replaced atomically. After a process or machine restart, resume explicitly with:
+Production runs also maintain `manifests/orchestration.json`. In owner-automatic mode the state machine resumes through validated stages without separate approval clicks. Concurrent resumes are serialized with a project lock, completed stages are reconciled from their durable artifacts, and JSON manifests are replaced atomically. After a process or machine restart, resume explicitly with:
 
 ```bash
 python3 -m inside_case_factory resume-project PROJECT_SLUG
@@ -253,7 +255,7 @@ The dashboard workflow is:
 10. Generate Voice-over
 11. Render Video
 
-Sources store title, URL, publisher, publication date, source type, access date, and reliability notes. Claims must link to one or more source IDs and remain reviewable. Research approval requires at least one approved source and one approved claim.
+Sources store title, URL, publisher, publication date, source type, access date, and reliability notes. Claims must link to one or more source IDs and remain reviewable. Owner-automatic acceptance requires a successfully extracted relevant source and an evidence-bearing linked claim.
 
 Script generation is blocked until research is approved. The current script generator is deterministic and only uses approved source-backed claims; it does not invent facts or citations. You can edit the generated script directly in the dashboard before approving it.
 
@@ -310,7 +312,7 @@ Use the `Discover Archival Media` form on a project page to search by topic, peo
 - suggested scene mappings
 - source-specific metadata
 
-Discovered images enter the dashboard review queue as `review_status = "pending_review"`. They are not used by the render pipeline until you approve them. Unknown or restrictive copyright status is flagged in the review queue and must be checked before approval. Rejected items remain in provenance records but are ignored by rendering.
+Discovered images enter the dashboard review queue as `review_status = "pending_review"`. Owner-automatic mode accepts only relevant assets with an explicitly eligible license; unknown or restrictive copyright status is rejected. Rejected items remain in provenance records but are ignored by rendering.
 
 The discovery layer only uses official APIs or clearly documented programmatic endpoints. Do not add connectors that scrape sites whose terms or robots policy prohibit automated access.
 

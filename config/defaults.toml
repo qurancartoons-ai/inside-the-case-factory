@@ -1,7 +1,7 @@
 [app]
 name = "Inside the Case Factory"
 environment = "production"
-human_review_required = true
+human_review_required = false
 
 [paths]
 projects_dir = "projects"
@@ -16,7 +16,8 @@ style = "cinematic documentary"
 [pipeline]
 default_content_mode = "factual_documentary"
 allow_paid_providers = true
-require_paid_api_confirmation = true
+require_paid_api_confirmation = false
+owner_automatic_approval = true
 allow_publish = false
 stop_before_expensive_steps = true
 default_project_budget_usd = 0.25
@@ -27,11 +28,11 @@ director_rerender_budget_usd = 0.0
 director_estimated_rerender_cost_usd = 0.0
 
 [review_gates]
-after_research = true
-after_script = true
-after_scene_plan = true
-before_generation = true
-before_render = true
+after_research = false
+after_script = false
+after_scene_plan = false
+before_generation = false
+before_render = false
 before_publish = true
 
 [script]

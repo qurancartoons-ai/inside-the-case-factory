@@ -22,7 +22,7 @@ max_output_tokens = 3500
 max_sources_analyzed = 8
 max_source_text_length = 18000
 per_project_spending_limit_usd = 0.25
-require_explicit_confirmation = true
+require_explicit_confirmation = false
 dry_run = false
 
 # Prices are editable planning assumptions in USD per 1M tokens, not live quotes.

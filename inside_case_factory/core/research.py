@@ -966,6 +966,9 @@ def approve_research(project_root: Path) -> bool:
     research = load_manifest(project_root, "research.json")
     research["status"] = "approved"
     save_manifest(project_root, "research.json", research)
+    if str(workflow.get("workflow_type", "")) == "recycle_documentary":
+        from inside_case_factory.core.recycle import update_recycle_verification
+        update_recycle_verification(project_root)
     return True
 
 
@@ -1107,7 +1110,7 @@ def save_script_edit(project_root: Path, narration: str) -> dict[str, Any]:
     return script
 
 
-def approve_script(project_root: Path) -> bool:
+def approve_script(project_root: Path, *, approval_source: str = "manual_review") -> bool:
     script = load_manifest(project_root, "script.json")
     if not script.get("narration"):
         return False
@@ -1115,7 +1118,7 @@ def approve_script(project_root: Path) -> bool:
     fingerprint = {
         "script_hash": script_content_hash(script),
         "approved_at": approved_at,
-        "approval_source": "manual_review",
+        "approval_source": approval_source,
         "approval_valid": True,
     }
     script["status"] = "approved"
@@ -1145,6 +1148,7 @@ def generate_scenes(
         dossier = load_optional_manifest(project_root, "dossier.json")
         scenes = reasoning_provider.generate_scenes(project_root, script, dossier, claims, target_minutes)
         workflow["scenes_generated"] = True
+        workflow["recycle_reconstruction_ready"] = True
         workflow["stage"] = "discover_media"
         save_manifest(project_root, "workflow.json", workflow)
         return scenes
@@ -1203,6 +1207,7 @@ def generate_scenes(
         payload = {"version": 1, "status": "draft", "scenes": scenes}
         save_manifest(project_root, "scenes.json", payload)
         workflow["scenes_generated"] = True
+        workflow["recycle_reconstruction_ready"] = True
         workflow["stage"] = "discover_media"
         save_manifest(project_root, "workflow.json", workflow)
         return payload
