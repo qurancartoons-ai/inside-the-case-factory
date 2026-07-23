@@ -131,6 +131,9 @@ class DashboardApp:
         if method == "POST":
             self._manifest_cache.clear()
 
+        if method == "POST" and path == "/uploads/reference/chunk":
+            return self.upload_reference_chunk(environ)
+
         if method == "GET" and path == "/":
             return self.redirect("/projects")
         if method == "GET" and path == "/projects":
@@ -467,6 +470,64 @@ class DashboardApp:
             return value.decode("utf-8", errors="replace")
         return str(value)
 
+    def upload_reference_chunk(self, environ: dict[str, Any]) -> Response:
+        maximum_chunk = 8 * 1024 * 1024
+        try:
+            body_size = int(environ.get("CONTENT_LENGTH") or 0)
+            upload_id = str(environ.get("HTTP_X_UPLOAD_ID", ""))
+            filename = Path(str(environ.get("HTTP_X_FILE_NAME", "reference.mp4"))).name
+            chunk_index = int(environ.get("HTTP_X_CHUNK_INDEX", "-1"))
+            chunk_count = int(environ.get("HTTP_X_CHUNK_COUNT", "0"))
+        except ValueError:
+            return self.json_response({"ok": False, "message": "Ongeldige uploadmetadata."}, "400 Bad Request")
+        allowed_id = 16 <= len(upload_id) <= 64 and upload_id.isalnum()
+        allowed_suffix = Path(filename).suffix.lower() in {".mp4", ".webm", ".mov", ".mkv"}
+        if not allowed_id or not allowed_suffix or chunk_count < 1 or not 0 <= chunk_index < chunk_count:
+            return self.json_response({"ok": False, "message": "Ongeldige referentievideo-upload."}, "400 Bad Request")
+        if body_size < 1 or body_size > maximum_chunk:
+            return self.json_response({"ok": False, "message": "Uploadblok moet maximaal 8 MiB zijn."}, "413 Payload Too Large")
+        staging_dir = self.root / ".upload-staging" / upload_id
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        target = staging_dir / f"reference{Path(filename).suffix.lower()}"
+        metadata_path = staging_dir / "metadata.json"
+        if chunk_index == 0:
+            target.unlink(missing_ok=True)
+            write_json(metadata_path, {"filename": filename, "chunk_count": chunk_count, "next_chunk": 0})
+        if not metadata_path.exists():
+            return self.json_response({"ok": False, "message": "Uploadblok 0 ontbreekt."}, "409 Conflict")
+        metadata = read_json(metadata_path)
+        if metadata.get("filename") != filename or int(metadata.get("chunk_count", 0)) != chunk_count:
+            return self.json_response({"ok": False, "message": "Uploadmetadata veranderde tijdens de upload."}, "409 Conflict")
+        if int(metadata.get("next_chunk", 0)) != chunk_index:
+            return self.json_response({"ok": False, "message": "Uploadblokken moeten op volgorde aankomen."}, "409 Conflict")
+        body = environ["wsgi.input"].read(body_size)
+        if len(body) != body_size:
+            return self.json_response({"ok": False, "message": "Uploadblok is onvolledig ontvangen."}, "400 Bad Request")
+        with target.open("ab") as handle:
+            handle.write(body)
+        metadata["next_chunk"] = chunk_index + 1
+        metadata["completed"] = chunk_index + 1 == chunk_count
+        write_json(metadata_path, metadata)
+        return self.json_response({
+            "ok": True, "upload_id": upload_id, "received": chunk_index + 1,
+            "chunk_count": chunk_count, "completed": metadata["completed"],
+        })
+
+    def staged_reference_upload(self, upload_id: str) -> tuple[Path, str] | None:
+        if not (16 <= len(upload_id) <= 64 and upload_id.isalnum()):
+            return None
+        staging_dir = self.root / ".upload-staging" / upload_id
+        metadata_path = staging_dir / "metadata.json"
+        if not metadata_path.exists():
+            return None
+        metadata = read_json(metadata_path)
+        if not metadata.get("completed"):
+            return None
+        candidates = [path for path in staging_dir.glob("reference.*") if path.is_file()]
+        if len(candidates) != 1:
+            return None
+        return candidates[0], Path(str(metadata.get("filename", candidates[0].name))).name
+
     def index(self) -> str:
                 projects = self.projects()
                 rows = "\n".join(self.project_card(project) for project in projects)
@@ -656,7 +717,7 @@ class DashboardApp:
                     <ol class="wizard-steps"><li>Onderwerp</li><li>Referentievideo (optioneel)</li><li>Duur</li><li>Stijl</li><li>Verteller</li><li>Taal</li><li>Genereren</li></ol>
                 </section>
                 <section class="panel">
-          <form method="post" action="/projects/new" enctype="multipart/form-data" class="production-form">
+          <form id="project-wizard" method="post" action="/projects/new" enctype="multipart/form-data" class="production-form">
             <label class="wide">Onderwerp of productieprompt<textarea name="prompt" rows="6" required></textarea></label>
             <div class="start-grid">
                             <label>Duur<select name="duration"><option>5</option><option selected>12</option><option>20</option><option>30</option><option>45</option></select></label>
@@ -668,7 +729,8 @@ class DashboardApp:
                             <label>Werkmodus<select name="mode"><option value="automatic" selected>Automatisch</option><option value="review">Begeleid</option></select></label>
             </div>
             <label class="wide">Reference documentary URL<input type="url" name="reference_documentary_url" placeholder="https://www.youtube.com/watch?v=... of https://vimeo.com/..." ></label>
-            <label>Reference documentary MP4<input type="file" name="reference_documentary_file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska"></label>
+            <label>Reference documentary MP4<input id="reference-documentary-file" type="file" name="reference_documentary_file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska"><small id="reference-upload-progress" class="muted"></small></label>
+            <input id="reference-upload-token" type="hidden" name="reference_upload_token" value="">
             <label>Workflow type<select name="workflow_type"><option value="create_documentary" selected>Create Documentary</option><option value="recycle_documentary">Recycle Documentary</option></select></label>
             <label class="wide">Recycle instructions (optioneel)<textarea name="recycle_instructions" rows="3" placeholder="Focus op bepaalde periode, gebeurtenissen of personen."></textarea></label>
                         <details class="panel calm"><summary>Geavanceerd (optioneel)</summary>
@@ -684,6 +746,36 @@ class DashboardApp:
                         </details>
             <button type="submit" class="primary-action">Project aanmaken</button>
           </form>
+          <script>
+          (() => {
+            const form=document.querySelector('#project-wizard');
+            const input=document.querySelector('#reference-documentary-file');
+            const token=document.querySelector('#reference-upload-token');
+            const progress=document.querySelector('#reference-upload-progress');
+            form?.addEventListener('submit', async event => {
+              const file=input?.files?.[0];
+              if (!file || form.dataset.chunkReady==='true') return;
+              event.preventDefault(); event.stopImmediatePropagation();
+              const chunkSize=8*1024*1024;
+              const count=Math.ceil(file.size/chunkSize);
+              const uploadId=crypto.randomUUID().replaceAll('-','');
+              try {
+                for(let index=0;index<count;index++) {
+                  progress.textContent=`Video uploaden: ${index+1}/${count}`;
+                  const response=await fetch('/uploads/reference/chunk',{
+                    method:'POST', body:file.slice(index*chunkSize,Math.min(file.size,(index+1)*chunkSize)),
+                    headers:{'X-Upload-ID':uploadId,'X-File-Name':file.name,'X-Chunk-Index':String(index),'X-Chunk-Count':String(count)}
+                  });
+                  if(!response.ok) throw new Error((await response.json()).message||`Upload mislukt (${response.status})`);
+                }
+                token.value=uploadId; input.value=''; form.dataset.chunkReady='true';
+                progress.textContent='Video ontvangen. Project wordt aangemaakt…'; form.requestSubmit();
+              } catch(error) {
+                progress.textContent=error instanceof Error?error.message:'Upload mislukt';
+              }
+            });
+          })();
+          </script>
                 </section>""")
 
     def _uploads(self, form: FieldStorage, name: str) -> list[FieldStorage]:
@@ -755,21 +847,34 @@ class DashboardApp:
         profile = self.form_value(form, "provider_profile", "balanced")
         write_json(project.root / "manifests/provider_config.json", {"version": 1, "profile": profile, "budget_usd": budget, "external_calls_enabled": profile != "offline" and budget > 0, "cache_enabled": True, "retries": 2, "tasks": {}})
         reference_uploads = self._uploads(form, "reference_documentary_file")
+        upload_token = self.form_value(form, "reference_upload_token").strip()
+        staged_upload = self.staged_reference_upload(upload_token) if upload_token else None
         if workflow_type == "recycle_documentary":
-            if not reference_url and not reference_uploads:
+            if upload_token and staged_upload is None:
+                return self.html(self.page("Upload onvolledig", '<section class="panel"><p>De referentievideo is niet volledig ontvangen. Probeer de upload opnieuw.</p></section>'), "400 Bad Request")
+            if not reference_url and not reference_uploads and staged_upload is None:
                 return self.html(self.page("Reference documentary ontbreekt", '<section class="panel"><p>Voeg een YouTube-, Vimeo- of lokale MP4-referentie toe voor de recycle-workflow.</p></section>'), "400 Bad Request")
-            if reference_uploads:
-                field = reference_uploads[0]
-                suffix = Path(str(field.filename)).suffix
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-                    temp = Path(handle.name); handle.write(field.file.read())
+            if reference_uploads or staged_upload is not None:
+                field = reference_uploads[0] if reference_uploads else None
+                if staged_upload is not None:
+                    temp, original_filename = staged_upload
+                    remove_temp = False
+                else:
+                    suffix = Path(str(field.filename)).suffix
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+                        temp = Path(handle.name); handle.write(field.file.read())
+                    original_filename = Path(str(field.filename)).name
+                    remove_temp = True
                 try:
-                    create_reference_documentary(project.root, local_path=temp, original_filename=Path(str(field.filename)).name, instructions=recycle_instructions)
+                    create_reference_documentary(project.root, local_path=temp, original_filename=original_filename, instructions=recycle_instructions)
                     prepare_recycle_documentary(project.root)
                 except RuntimeError as error:
                     return self.html(self.page("Recycle workflow geblokkeerd", f'<section class="panel"><p>{escape(str(error))}</p></section>'), "400 Bad Request")
                 finally:
-                    temp.unlink(missing_ok=True)
+                    if remove_temp:
+                        temp.unlink(missing_ok=True)
+                    elif upload_token:
+                        shutil.rmtree(self.root / ".upload-staging" / upload_token, ignore_errors=True)
             elif reference_url:
                 try:
                     create_reference_documentary(project.root, source_url=reference_url, instructions=recycle_instructions)
