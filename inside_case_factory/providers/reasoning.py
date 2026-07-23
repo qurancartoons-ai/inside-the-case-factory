@@ -40,6 +40,17 @@ def _project_content_mode(project_root: Path) -> str:
     return "factual_documentary"
 
 
+def _project_spending_limit(project_root: Path, configured_limit: float) -> float:
+    """Use a project's budget as standing authorization and as a hard upper bound."""
+    path = project_root / "manifests" / "provider_config.json"
+    if not path.exists():
+        return configured_limit
+    budget = float(read_json(path).get("budget_usd", 0) or 0)
+    if budget <= 0:
+        raise ReasoningProviderError("Project budget must be greater than 0 before paid AI calls can start.")
+    return min(configured_limit, budget)
+
+
 @dataclass(frozen=True)
 class ReasoningConfig:
     provider: str = "openai"
@@ -574,10 +585,11 @@ class OpenAIReasoningProvider(ReasoningProvider):
                 f"Estimated maximum reasoning cost: ${estimate['estimated_maximum_cost_usd']:.4f}."
             )
         current = current_estimated_spend(project_root)
-        if current + estimated > self.config.per_project_spending_limit_usd:
+        spending_limit = _project_spending_limit(project_root, self.config.per_project_spending_limit_usd)
+        if current + estimated > spending_limit:
             raise ReasoningProviderError(
                 f"Project reasoning budget would be exceeded before {operation}: "
-                f"{current + estimated:.4f} > {self.config.per_project_spending_limit_usd:.4f} USD."
+                f"{current + estimated:.4f} > {spending_limit:.4f} USD."
             )
 
     def _preflight_estimated_cost(self, operation: str) -> float:
@@ -789,7 +801,8 @@ class StructuredTextReasoningProvider(OpenAIReasoningProvider):
             raise ReasoningProviderError(f"{self.name} reasoning is not available.")
         if self.name != "local" and self.config.require_explicit_confirmation and not paid_api_confirmed(project_root, operation, self.config.estimated_cost_per_call_usd):
             raise ReasoningProviderError("Paid API call not confirmed for this project.")
-        if current_estimated_spend(project_root) + self.config.estimated_cost_per_call_usd > self.config.per_project_spending_limit_usd:
+        spending_limit = _project_spending_limit(project_root, self.config.per_project_spending_limit_usd)
+        if current_estimated_spend(project_root) + self.config.estimated_cost_per_call_usd > spending_limit:
             raise ReasoningProviderError(f"Project reasoning budget would be exceeded before {operation}.")
 
     def _json_response(

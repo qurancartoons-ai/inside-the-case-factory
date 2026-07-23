@@ -53,7 +53,7 @@ class ProjectScaffoldTests(unittest.TestCase):
         self.assertTrue(config.enabled)
         self.assertFalse(config.dry_run)
         self.assertEqual(config.per_project_spending_limit_usd, 0.25)
-        self.assertTrue(config.require_explicit_confirmation)
+        self.assertFalse(config.require_explicit_confirmation)
         self.assertNotEqual(config.stage("source_analysis")["model"], "gpt-5.5")
         self.assertEqual(config.stage("source_analysis")["model"], "gpt-4.1-nano")
         self.assertEqual(config.stage("script")["model"], "gpt-4.1-mini")

@@ -1110,7 +1110,7 @@ def save_script_edit(project_root: Path, narration: str) -> dict[str, Any]:
     return script
 
 
-def approve_script(project_root: Path) -> bool:
+def approve_script(project_root: Path, *, approval_source: str = "manual_review") -> bool:
     script = load_manifest(project_root, "script.json")
     if not script.get("narration"):
         return False
@@ -1118,7 +1118,7 @@ def approve_script(project_root: Path) -> bool:
     fingerprint = {
         "script_hash": script_content_hash(script),
         "approved_at": approved_at,
-        "approval_source": "manual_review",
+        "approval_source": approval_source,
         "approval_valid": True,
     }
     script["status"] = "approved"

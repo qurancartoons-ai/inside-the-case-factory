@@ -333,6 +333,61 @@ def _set_run_outcome(workflow: dict[str, Any], status: str, run_quality_mode: st
     workflow["is_evidence_grade"] = run_quality_mode == RUN_QUALITY_EVIDENCE_GRADE
 
 
+def _owner_automatic(settings: Settings, workflow: dict[str, Any], plan: dict[str, Any]) -> bool:
+    return bool(settings.pipeline.get("owner_automatic_approval", False)) or str(
+        workflow.get("autonomy_mode") or plan.get("autonomy_mode") or ""
+    ) == "automatic"
+
+
+def _approve_validated_research(project_root: Path) -> bool:
+    sources = load_manifest(project_root, "sources.json")
+    approved_source_ids: set[str] = set()
+    for source in sources.get("sources", []):
+        if not isinstance(source, dict):
+            continue
+        eligible = (
+            source.get("extraction_status") == "success"
+            and source.get("relevance_status", "relevant") != "irrelevant"
+            and not source.get("blueprint_only")
+        )
+        source["review_status"] = "approved" if eligible else "rejected"
+        if eligible:
+            source["approval_source"] = "owner_automatic_validated_extraction"
+            approved_source_ids.add(str(source.get("id", "")))
+    save_manifest(project_root, "sources.json", sources)
+
+    claims = load_manifest(project_root, "claims.json")
+    for claim in claims.get("claims", []):
+        if not isinstance(claim, dict):
+            continue
+        linked = any(str(source_id) in approved_source_ids for source_id in claim.get("source_ids", []))
+        eligible = linked and bool(claim.get("evidence")) and bool(str(claim.get("text", "")).strip())
+        claim["review_status"] = "approved" if eligible else "rejected"
+        if eligible:
+            claim["approval_source"] = "owner_automatic_evidence_validation"
+    save_manifest(project_root, "claims.json", claims)
+    return approve_research(project_root)
+
+
+def _approve_eligible_media(project_root: Path) -> None:
+    path = project_root / "manifests" / "media_sources.json"
+    if not path.exists():
+        return
+    media = read_json(path)
+    for asset in media.get("assets", []):
+        if not isinstance(asset, dict):
+            continue
+        eligible = bool(asset.get("review_eligible")) and str(asset.get("rights_status", "")).lower() in {
+            "approved", "owned", "licensed", "public_domain", "cc0", "cc-by", "cc-by-sa",
+        }
+        asset["review_status"] = "approved" if eligible else "rejected"
+        if eligible:
+            asset["approval_source"] = "owner_automatic_rights_and_relevance_gate"
+            if not asset.get("mapped_scenes") and isinstance(asset.get("suggested_scenes"), list):
+                asset["mapped_scenes"] = [str(item) for item in asset["suggested_scenes"]]
+    write_json(path, media)
+
+
 def _block_for_gate(
     project_root: Path,
     state: dict[str, Any],
@@ -397,6 +452,7 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
     topic = str(plan.get("topic", project_root.name))
     reasoning_provider = reasoning_provider_from_settings(settings.providers.get("reasoning", {}))
     state = _orchestration_state(project_root)
+    owner_automatic = _owner_automatic(settings, workflow, plan)
     state["run_count"] = int(state.get("run_count", 0)) + 1
     _save_orchestration(project_root, state, status="running", waiting_for="", last_error="")
 
@@ -456,7 +512,25 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
                     )
                     _save_orchestration(project_root, state, status="blocked", current_stage="research", last_error=str(result.get("message", "")))
                     return
-        if run_quality_mode == RUN_QUALITY_EVIDENCE_GRADE:
+        if owner_automatic:
+            if not _approve_validated_research(project_root):
+                gate = _gate_result(
+                    stage="research",
+                    passed=False,
+                    run_quality_mode=run_quality_mode,
+                    blocking_code="missing_validated_research",
+                    blocking_reason="Research blocked: no validated source-backed claims are available.",
+                    missing_requirements=["At least one successfully extracted source with a supported claim"],
+                    next_action="Run additional research or add a verifiable source.",
+                )
+                _block_for_gate(
+                    project_root, state, stage="research", gate=gate,
+                    orchestration_status="blocked_missing_research", plan_stage="research",
+                )
+                return
+            workflow = load_manifest(project_root, "workflow.json")
+            update_plan_stage(project_root, "approve_research", "completed", "Validated research accepted automatically.")
+        elif run_quality_mode == RUN_QUALITY_EVIDENCE_GRADE:
             gate = _gate_result(
                 stage="research",
                 passed=False,
@@ -592,6 +666,10 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
             return
 
     workflow = load_manifest(project_root, "workflow.json")
+    if owner_automatic and not workflow.get("script_approved"):
+        approve_script(project_root, approval_source="owner_automatic_quality_validation")
+        workflow = load_manifest(project_root, "workflow.json")
+        update_plan_stage(project_root, "approve_script", "completed", "Validated script accepted automatically.")
     if not workflow.get("script_approved"):
         append_activity(project_root, "Waiting for definitive script approval.", stage="approve_script")
         update_plan_stage(project_root, "approve_script", "waiting_for_review")
@@ -628,6 +706,8 @@ def _run_production_locked(settings: Settings, project_root: Path) -> None:
             _save_orchestration(project_root, state, status="blocked", current_stage="discover_media", last_error=str(error))
             return
 
+    if owner_automatic:
+        _approve_eligible_media(project_root)
     media = read_json(project_root / "manifests" / "media_sources.json")
     assets = media.get("assets", []) if isinstance(media, dict) else []
     eligible_assets = [item for item in assets if isinstance(item, dict) and bool(item.get("review_eligible"))]
@@ -721,6 +801,11 @@ def run_research(
     reasoning_provider: ReasoningProvider | None = None,
     research_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    provider_config_path = project_root / "manifests" / "provider_config.json"
+    if provider_config_path.exists():
+        project_budget = float(read_json(provider_config_path).get("budget_usd", 0) or 0)
+        if project_budget <= 0:
+            return {"ok": False, "message": "Project budget must be greater than 0 for external research."}
     if not os.environ.get("TAVILY_API_KEY"):
         research = load_manifest(project_root, "research.json")
         research.update(
